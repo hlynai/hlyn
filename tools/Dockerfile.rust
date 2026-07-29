@@ -7,4 +7,18 @@ FROM rust:slim
 # target directory and its own image rather than a fresh install each time.
 RUN cargo install --locked cargo-mutants
 
+# Fuzzing. libFuzzer's instrumentation is nightly-only, which is why the
+# toolchain is here and not in the shipped build; the library itself is built
+# with stable Rust.
+RUN rustup toolchain install nightly --profile minimal --component llvm-tools-preview \
+ && cargo install --locked cargo-fuzz
+
+# libFuzzer ships as C++ source that libfuzzer-sys compiles on the spot, so the
+# fuzz targets need a C++ toolchain even though nothing we write is C++.
+# Deliberately after the cargo installs: those take minutes and this does not,
+# so keeping it last means editing it does not rebuild them.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends clang lld \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /native

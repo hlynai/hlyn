@@ -12,24 +12,27 @@
 
 use landlock::{
     Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath, PathFd,
-    Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope, ABI,
+    Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetStatus, Scope, ABI,
 };
 use std::ffi::{c_char, CStr};
 
 /// What a caller asks for. Arrays are borrowed for the duration of the call.
+///
+/// The fields are public because this is a C ABI type: the layout is already
+/// the contract, and the caller on the other side writes it directly.
 #[repr(C)]
 pub struct Plan {
-    reads: *const *const c_char,
-    nreads: usize,
-    writes: *const *const c_char,
-    nwrites: usize,
-    execs: *const *const c_char,
-    nexecs: usize,
-    binds: *const u16,
-    nbinds: usize,
-    connects: *const u16,
-    nconnects: usize,
-    flags: u32,
+    pub reads: *const *const c_char,
+    pub nreads: usize,
+    pub writes: *const *const c_char,
+    pub nwrites: usize,
+    pub execs: *const *const c_char,
+    pub nexecs: usize,
+    pub binds: *const u16,
+    pub nbinds: usize,
+    pub connects: *const u16,
+    pub nconnects: usize,
+    pub flags: u32,
 }
 
 // flags
@@ -121,6 +124,28 @@ unsafe fn numbers(items: *const u16, count: usize) -> Option<Vec<u16>> {
     Some(std::slice::from_raw_parts(items, count).to_vec())
 }
 
+/// The pointer marshalling, reachable by name for fuzzing.
+///
+/// Same functions the real path uses, not copies of them. Compiled only under
+/// the `fuzz` feature.
+#[cfg(feature = "fuzz")]
+pub mod marshal {
+    use super::{list, numbers};
+    use std::ffi::c_char;
+
+    /// # Safety
+    /// `items` must be null or point to `count` valid C string pointers.
+    pub unsafe fn strings(items: *const *const c_char, count: usize) -> Option<Vec<&'static str>> {
+        list(items, count)
+    }
+
+    /// # Safety
+    /// `items` must be null or point to `count` valid `u16`s.
+    pub unsafe fn ports(items: *const u16, count: usize) -> Option<Vec<u16>> {
+        numbers(items, count)
+    }
+}
+
 /// The ABI this shim is written against.
 ///
 /// The crate's guidance is to name the version whose features you actually use
@@ -149,35 +174,31 @@ pub extern "C" fn hlyn_abi() -> i32 {
     }
 }
 
-/// Apply `plan` to the calling process. One-way, and irreversible.
+/// Everything `seal` does except the one step that cannot be undone.
 ///
-/// Returns FULL, SOME, or NOT for enforcement level, or a negative code. The
-/// caller is expected to treat anything below FULL as a failure unless it has
-/// explicitly opted into weaker enforcement.
+/// Split out so the irreversible call sits by itself and the rest -- reading
+/// caller-supplied pointers, opening paths, assembling rules -- can be driven
+/// by tests and by the fuzzer without confining the process doing the driving.
+/// Keeping it as one function rather than a copy means what gets fuzzed is
+/// what actually runs.
 ///
 /// # Safety
 /// Every pointer in `plan` must be valid for its stated length.
-#[no_mangle]
-pub unsafe extern "C" fn hlyn_seal(plan: *const Plan) -> i32 {
-    if plan.is_null() {
-        return EARGS;
-    }
-    let plan = &*plan;
-
+unsafe fn build(plan: &Plan) -> Result<RulesetCreated, i32> {
     let (reads, writes, execs) = match (
         list(plan.reads, plan.nreads),
         list(plan.writes, plan.nwrites),
         list(plan.execs, plan.nexecs),
     ) {
         (Some(a), Some(b), Some(c)) => (a, b, c),
-        _ => return EARGS,
+        _ => return Err(EARGS),
     };
     let (binds, connects) = match (
         numbers(plan.binds, plan.nbinds),
         numbers(plan.connects, plan.nconnects),
     ) {
         (Some(a), Some(b)) => (a, b),
-        _ => return EARGS,
+        _ => return Err(EARGS),
     };
 
     let abi = WANT;
@@ -190,13 +211,13 @@ pub unsafe extern "C" fn hlyn_seal(plan: *const Plan) -> i32 {
         .handle_access(AccessFs::from_all(abi))
     {
         Ok(value) => value,
-        Err(_) => return EBUILD,
+        Err(_) => return Err(EBUILD),
     };
 
     if plan.flags & NET != 0 {
         ruleset = match ruleset.handle_access(AccessNet::from_all(abi)) {
             Ok(value) => value,
-            Err(_) => return EBUILD,
+            Err(_) => return Err(EBUILD),
         };
     }
 
@@ -210,13 +231,13 @@ pub unsafe extern "C" fn hlyn_seal(plan: *const Plan) -> i32 {
     if !scope.is_empty() {
         ruleset = match ruleset.scope(scope) {
             Ok(value) => value,
-            Err(_) => return EBUILD,
+            Err(_) => return Err(EBUILD),
         };
     }
 
     let mut made = match ruleset.create() {
         Ok(value) => value,
-        Err(_) => return EBUILD,
+        Err(_) => return Err(EBUILD),
     };
 
     for (paths, pick) in [
@@ -229,11 +250,11 @@ pub unsafe extern "C" fn hlyn_seal(plan: *const Plan) -> i32 {
             // O_PATH open; a path that cannot be opened cannot be granted.
             let fd = match PathFd::new(path) {
                 Ok(value) => value,
-                Err(_) => return ERULE,
+                Err(_) => return Err(ERULE),
             };
             made = match made.add_rule(PathBeneath::new(fd, pick(dir))) {
                 Ok(value) => value,
-                Err(_) => return ERULE,
+                Err(_) => return Err(ERULE),
             };
         }
     }
@@ -242,17 +263,37 @@ pub unsafe extern "C" fn hlyn_seal(plan: *const Plan) -> i32 {
         for port in binds {
             made = match made.add_rule(NetPort::new(port, AccessNet::BindTcp)) {
                 Ok(value) => value,
-                Err(_) => return ERULE,
+                Err(_) => return Err(ERULE),
             };
         }
         for port in connects {
             made = match made.add_rule(NetPort::new(port, AccessNet::ConnectTcp)) {
                 Ok(value) => value,
-                Err(_) => return ERULE,
+                Err(_) => return Err(ERULE),
             };
         }
     }
 
+    Ok(made)
+}
+
+/// Apply `plan` to the calling process. One-way, and irreversible.
+///
+/// Returns FULL, SOME, or NOT for enforcement level, or a negative code. The
+/// caller is expected to treat anything below FULL as a failure unless it has
+/// explicitly opted into weaker enforcement.
+///
+/// # Safety
+/// Every pointer in `plan` must be valid for its stated length.
+#[no_mangle]
+pub unsafe extern "C" fn hlyn_seal(plan: *const Plan) -> i32 {
+    if plan.is_null() {
+        return EARGS;
+    }
+    let made = match build(&*plan) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
     match made.restrict_self() {
         Ok(status) => match status.ruleset {
             RulesetStatus::FullyEnforced => FULL,
@@ -260,6 +301,26 @@ pub unsafe extern "C" fn hlyn_seal(plan: *const Plan) -> i32 {
             RulesetStatus::NotEnforced => NOT,
         },
         Err(_) => ESEAL,
+    }
+}
+
+/// Assemble a ruleset from `plan` and throw it away without applying it.
+///
+/// The fuzz target for everything `seal` does before the point of no return.
+/// Compiled only under the `fuzz` feature, so it is absent from the shipped
+/// library; a build that could assemble a ruleset and not apply it is a build
+/// with an off switch, which is the one thing this must not have.
+///
+/// # Safety
+/// Every pointer in `plan` must be valid for its stated length.
+#[cfg(feature = "fuzz")]
+pub unsafe fn hlyn_build_only(plan: *const Plan) -> i32 {
+    if plan.is_null() {
+        return EARGS;
+    }
+    match build(&*plan) {
+        Ok(_) => FULL,
+        Err(code) => code,
     }
 }
 

@@ -1,0 +1,38 @@
+[package]
+name = "hlyn-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.hlyn]
+path = ".."
+features = ["fuzz"]
+
+[[bin]]
+name = "plan"
+path = "fuzz_targets/plan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marshal"
+path = "fuzz_targets/marshal.rs"
+test = false
+doc = false
+bench = false
+
+# The fuzzer needs the panic hook and the frame pointers; the workspace release
+# profile sets panic = "abort", which libFuzzer cannot work with.
+[profile.release]
+debug = 1
+panic = "unwind"
+
+[workspace]

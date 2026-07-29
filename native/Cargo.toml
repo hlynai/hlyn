@@ -12,6 +12,13 @@ name = "hlyn"
 # from a test harness.
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Exposes the ruleset-assembly path without the irreversible last step, so the
+# fuzzer can drive it. Off by default and never enabled for the shipped
+# library: a build that can assemble a ruleset and decline to apply it is a
+# build with an off switch.
+fuzz = []
+
 [dependencies]
 # Maintained under the landlock-lsm organisation by Landlock's own kernel
 # author. All ABI detection, struct layout, and access-bit masking live here
