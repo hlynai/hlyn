@@ -262,3 +262,287 @@ pub unsafe extern "C" fn hlyn_seal(plan: *const Plan) -> i32 {
         Err(_) => ESEAL,
     }
 }
+
+/// What can and cannot be tested here.
+///
+/// `hlyn_seal` is irreversible: a single successful call confines the test
+/// binary itself, and every test after it would run inside that confinement.
+/// So nothing below ever reaches `restrict_self`. What is covered is the part
+/// that can be got wrong silently -- the pointer marshalling, which decides
+/// whether a malformed request is refused or read out of bounds, and the
+/// rights pickers, which decide what a granted path may actually do. The
+/// enforcement path itself is proved from the Python suite, against a real
+/// kernel, where a wrong answer shows up as a process that lived when it
+/// should have died.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    /// Keeps the `CString`s alive for as long as the pointers are used.
+    fn strings(items: &[&str]) -> (Vec<CString>, Vec<*const c_char>) {
+        let owned: Vec<CString> = items.iter().map(|s| CString::new(*s).unwrap()).collect();
+        let pointers = owned.iter().map(|s| s.as_ptr()).collect();
+        (owned, pointers)
+    }
+
+    #[test]
+    fn an_empty_list_needs_no_pointer() {
+        // The count is checked before the pointer, so a caller passing no
+        // paths may pass null. Python's ctypes does exactly this for an empty
+        // array, and treating it as an error would refuse every empty policy.
+        assert_eq!(unsafe { list(std::ptr::null(), 0) }, Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_null_array_with_a_nonzero_count_is_refused() {
+        // The dangerous shape: a length that promises entries behind a pointer
+        // that has none. Reading it would be out of bounds.
+        assert_eq!(unsafe { list(std::ptr::null(), 1) }, None);
+    }
+
+    #[test]
+    fn paths_are_borrowed_in_order() {
+        let (_keep, pointers) = strings(&["/etc", "/srv/data", "/"]);
+        let got = unsafe { list(pointers.as_ptr(), pointers.len()) };
+        assert_eq!(got, Some(vec!["/etc", "/srv/data", "/"]));
+    }
+
+    #[test]
+    fn a_null_entry_inside_the_array_is_refused() {
+        let (_keep, mut pointers) = strings(&["/etc", "/srv"]);
+        pointers[1] = std::ptr::null();
+        assert_eq!(unsafe { list(pointers.as_ptr(), pointers.len()) }, None);
+    }
+
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused() {
+        // Linux paths are bytes, so this is reachable from a caller that hands
+        // us a raw filename. Refusing is the only honest answer: we cannot
+        // grant a path we cannot represent, and silently skipping it would
+        // hand back a ruleset narrower than the one the caller asked for
+        // while reporting full enforcement.
+        let bad = CString::new(vec![0x2fu8, 0xff, 0xfe]).unwrap();
+        let pointers = [bad.as_ptr()];
+        assert_eq!(unsafe { list(pointers.as_ptr(), pointers.len()) }, None);
+    }
+
+    #[test]
+    fn a_count_shorter_than_the_array_borrows_only_that_many() {
+        let (_keep, pointers) = strings(&["/a", "/b", "/c"]);
+        assert_eq!(unsafe { list(pointers.as_ptr(), 2) }, Some(vec!["/a", "/b"]));
+    }
+
+    #[test]
+    fn ports_follow_the_same_rules_as_paths() {
+        assert_eq!(unsafe { numbers(std::ptr::null(), 0) }, Some(Vec::new()));
+        assert_eq!(unsafe { numbers(std::ptr::null(), 1) }, None);
+
+        let ports = [80u16, 443, 0, 65535];
+        let got = unsafe { numbers(ports.as_ptr(), ports.len()) };
+        assert_eq!(got, Some(vec![80, 443, 0, 65535]));
+    }
+
+    #[test]
+    fn a_shorter_port_count_borrows_only_that_many() {
+        let ports = [80u16, 443, 8080];
+        assert_eq!(unsafe { numbers(ports.as_ptr(), 1) }, Some(vec![80]));
+    }
+
+    #[test]
+    fn reading_a_file_does_not_require_directory_rights() {
+        // ReadDir on a regular file is a right the kernel drops, which would
+        // downgrade the whole ruleset to PartiallyEnforced and make our
+        // honesty check fire on a correct policy.
+        let file = readable(false);
+        assert!(file.contains(AccessFs::ReadFile));
+        assert!(!file.contains(AccessFs::ReadDir));
+
+        let dir = readable(true);
+        assert!(dir.contains(AccessFs::ReadFile));
+        assert!(dir.contains(AccessFs::ReadDir));
+    }
+
+    #[test]
+    fn reading_never_grants_writing() {
+        for dir in [true, false] {
+            let got = readable(dir);
+            assert!(!got.contains(AccessFs::WriteFile));
+            assert!(!got.contains(AccessFs::Truncate));
+            assert!(!got.contains(AccessFs::MakeReg));
+            assert!(!got.contains(AccessFs::RemoveFile));
+            assert!(!got.contains(AccessFs::Execute));
+        }
+    }
+
+    #[test]
+    fn writing_a_file_grants_neither_creation_nor_removal() {
+        let file = writable(false);
+        assert!(file.contains(AccessFs::WriteFile));
+        assert!(file.contains(AccessFs::ReadFile));
+        assert!(file.contains(AccessFs::Truncate));
+        for right in [
+            AccessFs::MakeReg,
+            AccessFs::MakeDir,
+            AccessFs::RemoveFile,
+            AccessFs::RemoveDir,
+            AccessFs::Refer,
+            AccessFs::ReadDir,
+        ] {
+            assert!(!file.contains(right), "{right:?} is meaningless on a file");
+        }
+    }
+
+    #[test]
+    fn writing_a_directory_grants_what_an_atomic_write_needs() {
+        // Every editor, compiler, and package manager writes by renaming a
+        // temporary file into place. Without Refer that rename is refused and
+        // the sandbox looks broken rather than strict.
+        let dir = writable(true);
+        for right in [
+            AccessFs::WriteFile,
+            AccessFs::ReadFile,
+            AccessFs::Truncate,
+            AccessFs::ReadDir,
+            AccessFs::MakeReg,
+            AccessFs::MakeDir,
+            AccessFs::RemoveFile,
+            AccessFs::RemoveDir,
+            AccessFs::MakeSym,
+            AccessFs::MakeSock,
+            AccessFs::MakeFifo,
+            AccessFs::Refer,
+        ] {
+            assert!(dir.contains(right), "a writable directory needs {right:?}");
+        }
+    }
+
+    #[test]
+    fn writing_never_grants_a_device_node_or_execution() {
+        // Minting a device is how a confined process reaches raw disk. Nothing
+        // an agent legitimately does needs it, and no policy field asks for it,
+        // so it must not arrive as a side effect of being granted write.
+        for dir in [true, false] {
+            let got = writable(dir);
+            assert!(!got.contains(AccessFs::MakeChar));
+            assert!(!got.contains(AccessFs::MakeBlock));
+            assert!(!got.contains(AccessFs::Execute));
+        }
+    }
+
+    #[test]
+    fn execution_does_not_vary_with_the_kind_of_path() {
+        // Both rights apply to a file and to the files beneath a directory,
+        // so an exec grant is the same shape either way.
+        assert_eq!(runnable(true), runnable(false));
+        let got = runnable(false);
+        assert!(got.contains(AccessFs::Execute));
+        // A program must be readable to be run.
+        assert!(got.contains(AccessFs::ReadFile));
+        assert!(!got.contains(AccessFs::WriteFile));
+    }
+
+    #[test]
+    fn the_three_pickers_are_distinct() {
+        // A copy-paste that made two of these agree would hand out rights
+        // nobody asked for, and no other test would notice.
+        assert_ne!(readable(true), writable(true));
+        assert_ne!(readable(true), runnable(true));
+        assert_ne!(writable(true), runnable(true));
+    }
+
+    #[test]
+    fn every_granted_right_is_one_the_target_abi_knows() {
+        // A right outside the handled set is dropped by the kernel and drags
+        // the ruleset down to PartiallyEnforced.
+        let handled = AccessFs::from_all(WANT);
+        for dir in [true, false] {
+            assert!(handled.contains(readable(dir)));
+            assert!(handled.contains(writable(dir)));
+            assert!(handled.contains(runnable(dir)));
+        }
+    }
+
+    #[test]
+    fn the_flag_bits_do_not_overlap() {
+        assert_eq!(SIGNAL & UNIX, 0);
+        assert_eq!(SIGNAL & NET, 0);
+        assert_eq!(UNIX & NET, 0);
+    }
+
+    #[test]
+    fn the_return_codes_are_all_different() {
+        let codes = [NOT, SOME, FULL, EARGS, EBUILD, ERULE, ESEAL];
+        for (i, a) in codes.iter().enumerate() {
+            for b in &codes[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        // The caller distinguishes "enforced less than asked" from "failed" by
+        // sign, so the levels must not be negative and the errors must be.
+        for level in [NOT, SOME, FULL] {
+            assert!(level >= 0);
+        }
+        for error in [EARGS, EBUILD, ERULE, ESEAL] {
+            assert!(error < 0);
+        }
+    }
+
+    #[test]
+    fn a_null_plan_is_refused_rather_than_dereferenced() {
+        assert_eq!(unsafe { hlyn_seal(std::ptr::null()) }, EARGS);
+    }
+
+    #[test]
+    fn a_malformed_plan_is_refused_before_anything_is_applied() {
+        // Every one of these is rejected during marshalling, so no ruleset is
+        // ever created and this test process is left unconfined. That is the
+        // only reason `hlyn_seal` can be called here at all.
+        let empty = || Plan {
+            reads: std::ptr::null(),
+            nreads: 0,
+            writes: std::ptr::null(),
+            nwrites: 0,
+            execs: std::ptr::null(),
+            nexecs: 0,
+            binds: std::ptr::null(),
+            nbinds: 0,
+            connects: std::ptr::null(),
+            nconnects: 0,
+            flags: 0,
+        };
+
+        let mut plan = empty();
+        plan.nreads = 1;
+        assert_eq!(unsafe { hlyn_seal(&plan) }, EARGS);
+
+        let mut plan = empty();
+        plan.nwrites = 2;
+        assert_eq!(unsafe { hlyn_seal(&plan) }, EARGS);
+
+        let mut plan = empty();
+        plan.nexecs = 1;
+        assert_eq!(unsafe { hlyn_seal(&plan) }, EARGS);
+
+        let mut plan = empty();
+        plan.nbinds = 1;
+        assert_eq!(unsafe { hlyn_seal(&plan) }, EARGS);
+
+        let mut plan = empty();
+        plan.nconnects = 1;
+        assert_eq!(unsafe { hlyn_seal(&plan) }, EARGS);
+
+        // Flags do not rescue a malformed plan.
+        let mut plan = empty();
+        plan.nreads = 1;
+        plan.flags = SIGNAL | UNIX | NET;
+        assert_eq!(unsafe { hlyn_seal(&plan) }, EARGS);
+    }
+
+    #[test]
+    fn the_abi_query_never_reports_a_negative_version() {
+        // Zero on a kernel without Landlock, a version number otherwise.
+        // Either way it is a number the caller can compare, not an errno.
+        assert!(hlyn_abi() >= 0);
+    }
+}

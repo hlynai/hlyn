@@ -1,0 +1,10 @@
+# Test bed for the native shim. Separate from the Python image because
+# cargo-mutants has to compile, and rebuilding it on every test run would make
+# the suite unusable. Nothing here is part of the shipped package.
+FROM rust:slim
+
+# Mutation testing: rebuilds the crate once per mutant, so it wants a warm
+# target directory and its own image rather than a fresh install each time.
+RUN cargo install --locked cargo-mutants
+
+WORKDIR /native

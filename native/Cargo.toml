@@ -7,7 +7,10 @@ description = "C-ABI shim over the upstream Landlock crate."
 
 [lib]
 name = "hlyn"
-crate-type = ["cdylib"]
+# rlib alongside cdylib so `cargo test` can link the crate as a library. The
+# shipped artifact is still the cdylib; this only makes the code reachable
+# from a test harness.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Maintained under the landlock-lsm organisation by Landlock's own kernel
