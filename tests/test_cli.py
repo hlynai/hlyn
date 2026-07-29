@@ -8,6 +8,7 @@ than merely launches.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
@@ -20,12 +21,22 @@ here = pytest.mark.skipif(not REAL, reason="no enforcement backend on this platf
 
 
 def hlyn(*args: str) -> subprocess.CompletedProcess:
+    # A deliberately bare environment, so these tests prove the CLI works from
+    # a clean shell rather than inheriting something from the test runner.
+    # HLYN_SHIM is the one exception: it names where the Landlock shim lives,
+    # and without forwarding it the CLI silently finds no shim, reports that it
+    # cannot enforce, and exits non-zero anywhere the build tree is not laid
+    # out exactly as expected.
+    env = {"PYTHONPATH": SRC, "PATH": "/usr/bin:/bin:/usr/local/bin"}
+    shim = os.environ.get("HLYN_SHIM")
+    if shim:
+        env["HLYN_SHIM"] = shim
     return subprocess.run(
         [sys.executable, "-m", "hlyn.cli", *args],
         capture_output=True,
         text=True,
         timeout=120,
-        env={"PYTHONPATH": SRC, "PATH": "/usr/bin:/bin:/usr/local/bin"},
+        env=env,
     )
 
 
