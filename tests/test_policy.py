@@ -14,9 +14,10 @@ import sysconfig
 
 import pytest
 
+from conftest import boot
 from hlyn import Policy, preset, presets, register, runtime
 from hlyn.error import Invalid, Unsupported
-from hlyn.policy import SAFE, paths, ports, prune, under
+from hlyn.policy import SAFE, names, paths, ports, prune, under
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +149,32 @@ def test_paths_rejects_nonsense():
         paths([""], "read")
 
 
+def test_paths_rejects_a_non_path_inside_a_list():
+    # A bare non-path is refused by `paths` itself, but an item inside a list
+    # is refused one level down, which is a different branch. Without this the
+    # list case can degrade into a raw TypeError from `os.fspath` -- still a
+    # refusal, but one that tells the caller nothing about which field or
+    # which item was wrong.
+    for bad in ([42], ["/srv", None], [object()]):
+        with pytest.raises(Invalid):
+            paths(bad, "read")
+
+
+def test_none_means_nothing_rather_than_everything():
+    # `False` and `True` are one keystroke apart in this codebase and worlds
+    # apart in effect: one seals the agent, the other opens it completely. A
+    # caller writing `net=None` means "no network", so `None` has to land on
+    # the deny side of that line for every field, not just the ones with an
+    # obvious test.
+    assert ports(None) is False
+    assert names(None) is False
+    assert paths(None, "read") is False
+
+    open_ended = Policy(read=None, write=None, exec=None, net=None, env=None)
+    for field in ("read", "write", "exec", "net", "env"):
+        assert getattr(open_ended, field) is False, f"{field} failed open on None"
+
+
 def test_prune_drops_covered_children():
     assert prune(["/usr", "/usr/lib", "/usr/lib/x", "/opt"]) == ("/opt", "/usr")
 
@@ -213,6 +240,21 @@ def test_env_allowlist_is_additive():
     assert kept["OPENAI_API_KEY"] == "sk-secret"
     assert "AWS_SECRET_ACCESS_KEY" not in kept
     assert "PATH" in kept
+
+
+def test_env_accepts_a_bare_name_like_a_list_of_one():
+    assert names("PATH") == ("PATH",)
+    assert Policy(env="OPENAI_API_KEY").keep(ENV)["OPENAI_API_KEY"] == "sk-secret"
+
+
+def test_env_rejects_a_name_that_is_not_one():
+    # An empty name matches no variable, so keeping it is harmless in itself.
+    # It is refused because it is almost always a typo or a stray comma in the
+    # caller's list, and a policy that quietly accepts nonsense is a policy the
+    # caller stops reading carefully.
+    for bad in ([""], ["PATH", ""], [None], [42]):
+        with pytest.raises(Invalid):
+            names(bad)
 
 
 def test_env_true_keeps_everything():
@@ -287,13 +329,26 @@ def test_web_allows_network_but_not_the_disk():
 
 
 def test_presets_are_computed_late_not_at_import():
-    # `coder` depends on the working directory, which is unknown at import.
-    here = os.getcwd()
-    try:
+    # `coder` depends on the working directory, which is unknown at import, so
+    # the check is that moving after import changes the answer.
+    #
+    # The move happens in a child process on purpose. Changing directory in the
+    # test runner leaks into every other test and into anything wrapping the
+    # run: a tool that resolves a relative path while this test holds the
+    # process at `/` gets a path that does not exist. That is not theoretical
+    # -- it is what this test used to do.
+    done = boot(
+        """
+        import os
+        from hlyn import preset
+        from hlyn.policy import under
+
         os.chdir("/")
-        assert any(under("/", item) or item == "/" for item in preset("coder").reads())
-    finally:
-        os.chdir(here)
+        reads = preset("coder").reads()
+        print(any(under("/", item) or item == "/" for item in reads))
+        """
+    )
+    assert done.stdout.strip() == "True", done.stderr
 
 
 def test_unknown_preset_names_the_known_ones():

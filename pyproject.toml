@@ -15,16 +15,45 @@ dependencies = []
 hlyn = "hlyn.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "hypothesis>=6"]
+dev = ["pytest>=8", "hypothesis>=6", "mutmut>=3"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hlyn"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Resolved against the rootdir, so the suite imports the package sitting next
+# to it rather than whatever happens to be installed. That matters for any
+# tool that runs the tests against a copy of the tree -- mutation testing
+# copies the source elsewhere and runs there, and without this the tests
+# silently import the unmutated original instead.
+pythonpath = ["src"]
 addopts = "-q --strict-markers"
 markers = [
     "linux: requires a Linux kernel with Landlock and seccomp",
     "mac: requires macOS Seatbelt",
     "escape: adversarial test that must fail the build if the escape succeeds",
+]
+
+# Mutation testing, run by tools/mutate.sh.
+#
+# Scoped to the policy layer on purpose. Everything below it is judged by
+# whether a real kernel refuses a real syscall, which a mutant cannot fake but
+# also cannot be measured this way; the policy layer is pure decision-making,
+# where a mutant that survives means a boundary nobody is checking.
+[tool.mutmut]
+source_paths = ["src/hlyn/"]
+pytest_add_cli_args_test_selection = [
+    "tests/test_policy.py",
+    "tests/test_policy_properties.py",
+]
+# mutmut re-reads this config, relative to the working directory, every time a
+# mutated function is called. One test deliberately runs policy code from a
+# different directory, which leaves mutmut unable to find its own source. The
+# test earns its place -- it is what proves presets read the working directory
+# at call time rather than baking it in at import -- so it is skipped here
+# rather than weakened.
+pytest_add_cli_args = [
+    "--deselect",
+    "tests/test_policy.py::test_presets_are_computed_late_not_at_import",
 ]
