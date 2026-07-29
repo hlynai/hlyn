@@ -464,7 +464,17 @@ mod tests {
     }
 
     #[test]
-    fn the_flag_bits_do_not_overlap() {
+    fn every_flag_is_a_distinct_single_bit() {
+        // A flag that came out as zero would not fail loudly. `flags & FLAG
+        // != 0` would simply never fire, so the thing it gates -- signal
+        // scoping, abstract-socket scoping, or the entire network layer --
+        // would be quietly absent from every ruleset while `seal` went on
+        // reporting full enforcement. Checking only that the bits do not
+        // overlap does not catch that: zero overlaps with nothing.
+        for (name, bit) in [("SIGNAL", SIGNAL), ("UNIX", UNIX), ("NET", NET)] {
+            assert_ne!(bit, 0, "{name} is zero, so it would gate nothing");
+            assert_eq!(bit.count_ones(), 1, "{name} must be exactly one bit");
+        }
         assert_eq!(SIGNAL & UNIX, 0);
         assert_eq!(SIGNAL & NET, 0);
         assert_eq!(UNIX & NET, 0);
@@ -540,9 +550,29 @@ mod tests {
     }
 
     #[test]
-    fn the_abi_query_never_reports_a_negative_version() {
-        // Zero on a kernel without Landlock, a version number otherwise.
-        // Either way it is a number the caller can compare, not an errno.
-        assert!(hlyn_abi() >= 0);
+    fn the_abi_query_agrees_with_whether_landlock_actually_works() {
+        // The contract is: zero when the kernel has no Landlock, the version
+        // it speaks otherwise. Never a raw errno, which a caller comparing
+        // `abi >= 4` would read as a very capable kernel.
+        //
+        // The independent check is whether a ruleset can be built at all.
+        // `create` performs landlock_create_ruleset; only `restrict_self`
+        // confines anything, so this is safe to run in the test process.
+        // HardRequirement means a kernel without Landlock refuses rather than
+        // quietly handing back an empty ruleset.
+        let usable = Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::from_all(ABI::V1))
+            .and_then(|r| r.create())
+            .is_ok();
+
+        let abi = hlyn_abi();
+        assert!(abi >= 0, "an errno leaked out as a version: {abi}");
+        assert_eq!(
+            abi > 0,
+            usable,
+            "reported ABI {abi} but Landlock is {}usable",
+            if usable { "" } else { "un" }
+        );
     }
 }

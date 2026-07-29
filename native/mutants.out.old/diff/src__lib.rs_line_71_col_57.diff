@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace | with & in writable
+@@ -63,17 +63,17 @@
+     }
+ }
+ 
+ /// `Refer` is included for directories because atomic writes rename a
+ /// temporary file into place, which crosses directories and is refused
+ /// without it. Device and block node creation are deliberately absent:
+ /// nothing an agent legitimately does requires minting a device.
+ fn writable(dir: bool) -> BitFlags<AccessFs> {
+-    let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;
++    let file = AccessFs::WriteFile | AccessFs::ReadFile & /* ~ changed by cargo-mutants ~ */ AccessFs::Truncate;
+     if !dir {
+         return file;
+     }
+     file | AccessFs::ReadDir
+         | AccessFs::MakeReg
+         | AccessFs::MakeDir
+         | AccessFs::RemoveFile
+         | AccessFs::RemoveDir

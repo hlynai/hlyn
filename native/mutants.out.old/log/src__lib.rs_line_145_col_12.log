@@ -1,0 +1,98 @@
+
+*** src/lib.rs:145:12: replace < with == in hlyn_abi
+
+*** mutation diff:
+--- src/lib.rs
++++ replace < with == in hlyn_abi
+@@ -137,17 +137,17 @@
+ /// No enforcement decision depends on it: what is actually enforced comes back
+ /// from `restrict_self` in `seal` below.
+ #[no_mangle]
+ pub extern "C" fn hlyn_abi() -> i32 {
+     // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION).
+     // Syscall 444 on every architecture: Landlock was added to the generic
+     // syscall table, so the number does not vary the way seccomp's does.
+     let out = unsafe { libc::syscall(444, 0, 0, 1) };
+-    if out < 0 {
++    if out == /* ~ changed by cargo-mutants ~ */ 0 {
+         0
+     } else {
+         out as i32
+     }
+ }
+ 
+ /// Apply `plan` to the calling process. One-way, and irreversible.
+ ///
+
+
+*** /usr/local/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin/cargo test --no-run --verbose --package=hlyn@0.0.1
+       Fresh unicode-ident v1.0.24
+       Fresh proc-macro2 v1.0.107
+       Fresh quote v1.0.47
+       Fresh syn v2.0.119
+       Fresh syn v3.0.3
+       Fresh libc v0.2.189
+       Fresh enumflags2_derive v0.7.12
+       Fresh thiserror-impl v2.0.19
+       Fresh thiserror v2.0.19
+       Fresh enumflags2 v0.7.12
+       Fresh landlock v0.4.7
+       Dirty hlyn v0.0.1 (/tmp/cargo-mutants-native-AeDWWo.tmp): the file `src/lib.rs` has changed (1785344210.251656008s, 1s after last build at 1785344209.915656008s)
+   Compiling hlyn v0.0.1 (/tmp/cargo-mutants-native-AeDWWo.tmp)
+     Running `/usr/local/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin/rustc --crate-name hlyn --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type cdylib --crate-type rlib --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=846faa9f2ae614e7 --out-dir /tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps --extern landlock=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps/liblandlock-67872747be24e4d2.rlib --extern libc=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps/liblibc-36843709d2145305.rlib`
+     Running `/usr/local/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin/rustc --crate-name hlyn --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=825c32eb730ec1c2 -C extra-filename=-de8b05fdfc6f9dae --out-dir /tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps --extern landlock=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps/liblandlock-67872747be24e4d2.rlib --extern libc=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps/liblibc-36843709d2145305.rlib`
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
+  Executable `/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps/hlyn-de8b05fdfc6f9dae`
+
+*** result: Success
+
+*** /usr/local/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin/cargo test --verbose --package=hlyn@0.0.1
+       Fresh unicode-ident v1.0.24
+       Fresh proc-macro2 v1.0.107
+       Fresh quote v1.0.47
+       Fresh libc v0.2.189
+       Fresh syn v2.0.119
+       Fresh syn v3.0.3
+       Fresh enumflags2_derive v0.7.12
+       Fresh thiserror-impl v2.0.19
+       Fresh thiserror v2.0.19
+       Fresh enumflags2 v0.7.12
+       Fresh landlock v0.4.7
+       Fresh hlyn v0.0.1 (/tmp/cargo-mutants-native-AeDWWo.tmp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running `/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps/hlyn-de8b05fdfc6f9dae`
+
+running 21 tests
+test tests::a_malformed_plan_is_refused_before_anything_is_applied ... ok
+test tests::a_null_array_with_a_nonzero_count_is_refused ... ok
+test tests::a_count_shorter_than_the_array_borrows_only_that_many ... ok
+test tests::a_null_entry_inside_the_array_is_refused ... ok
+test tests::a_null_plan_is_refused_rather_than_dereferenced ... ok
+test tests::a_path_that_is_not_utf8_is_refused ... ok
+test tests::a_shorter_port_count_borrows_only_that_many ... ok
+test tests::an_empty_list_needs_no_pointer ... ok
+test tests::every_flag_is_a_distinct_single_bit ... ok
+test tests::every_granted_right_is_one_the_target_abi_knows ... ok
+test tests::execution_does_not_vary_with_the_kind_of_path ... ok
+test tests::paths_are_borrowed_in_order ... ok
+test tests::ports_follow_the_same_rules_as_paths ... ok
+test tests::reading_a_file_does_not_require_directory_rights ... ok
+test tests::reading_never_grants_writing ... ok
+test tests::the_abi_query_agrees_with_whether_landlock_actually_works ... ok
+test tests::the_return_codes_are_all_different ... ok
+test tests::the_three_pickers_are_distinct ... ok
+test tests::writing_a_directory_grants_what_an_atomic_write_needs ... ok
+test tests::writing_a_file_grants_neither_creation_nor_removal ... ok
+test tests::writing_never_grants_a_device_node_or_execution ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests hlyn
+     Running `/usr/local/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin/rustdoc --edition=2021 --crate-type cdylib --crate-type rlib --color auto --crate-name hlyn --test src/lib.rs --test-run-directory /tmp/cargo-mutants-native-AeDWWo.tmp --extern hlyn=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps/libhlyn.rlib --extern landlock=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps/liblandlock-67872747be24e4d2.rlib --extern libc=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps/liblibc-36843709d2145305.rlib -L dependency=/tmp/cargo-mutants-native-AeDWWo.tmp/target/debug/deps -C embed-bitcode=no --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' --error-format human`
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+*** result: Success

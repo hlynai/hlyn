@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace | with & in writable
+@@ -67,17 +67,17 @@
+ /// temporary file into place, which crosses directories and is refused
+ /// without it. Device and block node creation are deliberately absent:
+ /// nothing an agent legitimately does requires minting a device.
+ fn writable(dir: bool) -> BitFlags<AccessFs> {
+     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;
+     if !dir {
+         return file;
+     }
+-    file | AccessFs::ReadDir
++    file & /* ~ changed by cargo-mutants ~ */ AccessFs::ReadDir
+         | AccessFs::MakeReg
+         | AccessFs::MakeDir
+         | AccessFs::RemoveFile
+         | AccessFs::RemoveDir
+         | AccessFs::MakeSym
+         | AccessFs::MakeSock
+         | AccessFs::MakeFifo
+         | AccessFs::Refer

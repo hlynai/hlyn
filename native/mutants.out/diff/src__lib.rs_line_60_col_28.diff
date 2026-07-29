@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace | with & in readable
+@@ -52,17 +52,17 @@
+ /// them anyway makes the kernel drop them and the ruleset report itself only
+ /// partially enforced. Since a correct policy always names some plain files --
+ /// `/dev/null` and the loader cache, at minimum -- getting this wrong would
+ /// downgrade every single ruleset we ever build.
+ type Pick = fn(bool) -> BitFlags<AccessFs>;
+ 
+ fn readable(dir: bool) -> BitFlags<AccessFs> {
+     if dir {
+-        AccessFs::ReadFile | AccessFs::ReadDir
++        AccessFs::ReadFile & /* ~ changed by cargo-mutants ~ */ AccessFs::ReadDir
+     } else {
+         AccessFs::ReadFile.into()
+     }
+ }
+ 
+ /// `Refer` is included for directories because atomic writes rename a
+ /// temporary file into place, which crosses directories and is refused
+ /// without it. Device and block node creation are deliberately absent:

@@ -1,0 +1,36 @@
+# Mutants that are provably equivalent to the original, excluded so that a
+# surviving mutant always means a missing test rather than noise.
+#
+# Nothing here is excluded for being inconvenient. Each entry is a case where
+# the mutated code cannot behave differently from the original, so no test
+# could ever kill it.
+exclude_re = [
+    # `|` -> `^` across AccessFs rights. enumflags2 guarantees every variant is
+    # a distinct, non-zero, single bit, so combining disjoint bits with XOR
+    # gives exactly the same set as OR. These three functions only ever combine
+    # AccessFs variants, so the guarantee holds for every operand.
+    "replace \\| with \\^ in (readable|writable|runnable)",
+
+    # `out < 0` -> `out <= 0` in hlyn_abi. The zero case takes the same branch
+    # either way: the else arm returns `0 as i32`, which is the same 0 the then
+    # arm returns. Negative and positive inputs are unaffected.
+    "replace < with <= in hlyn_abi",
+]
+
+# Known survivors, deliberately not excluded, because each one marks a real
+# limit rather than an equivalence:
+#
+#   hlyn_abi -> 0 / -> 1
+#       "the version the kernel speaks" has no second source of truth inside
+#       the process. The landlock crate refuses to expose runtime ABI
+#       detection on purpose, so the only honest oracle is whether Landlock
+#       works at all -- which kills `-> 0` but not `-> 1`. Killing `-> 1`
+#       would take a test that hardcodes the build machine's kernel version.
+#
+#   replace < with == in hlyn_abi
+#       differs only when the syscall returns an error, i.e. on a kernel
+#       without Landlock. Unreachable from a test bed that has Landlock.
+#
+#   1 << 0 -> 1 >> 0 in SIGNAL
+#       both are 1. Equivalent, but excluding it by line number would go stale
+#       the moment the file moves, and there is no name to match on.

@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ delete -
+@@ -38,17 +38,17 @@
+ const NET: u32 = 1 << 2; // enforce ports; without it Landlock ignores the network
+ 
+ // return codes
+ const NOT: i32 = 0; // nothing was enforced
+ const SOME: i32 = 1; // enforced, but the kernel dropped part of the request
+ const FULL: i32 = 2; // enforced exactly as asked
+ const EARGS: i32 = -1;
+ const EBUILD: i32 = -2;
+-const ERULE: i32 = -3;
++const ERULE: i32 =  /* ~ changed by cargo-mutants ~ */3;
+ const ESEAL: i32 = -4;
+ 
+ /// Which rights to grant, chosen by what the path actually is.
+ ///
+ /// Directory-only rights are meaningless on a regular file, and asking for
+ /// them anyway makes the kernel drop them and the ruleset report itself only
+ /// partially enforced. Since a correct policy always names some plain files --
+ /// `/dev/null` and the loader cache, at minimum -- getting this wrong would

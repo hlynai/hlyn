@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace | with & in writable
+@@ -69,17 +69,17 @@
+ /// nothing an agent legitimately does requires minting a device.
+ fn writable(dir: bool) -> BitFlags<AccessFs> {
+     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;
+     if !dir {
+         return file;
+     }
+     file | AccessFs::ReadDir
+         | AccessFs::MakeReg
+-        | AccessFs::MakeDir
++        & /* ~ changed by cargo-mutants ~ */ AccessFs::MakeDir
+         | AccessFs::RemoveFile
+         | AccessFs::RemoveDir
+         | AccessFs::MakeSym
+         | AccessFs::MakeSock
+         | AccessFs::MakeFifo
+         | AccessFs::Refer
+ }
+ 

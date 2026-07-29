@@ -1,0 +1,13 @@
+src/lib.rs:59:5: replace readable -> BitFlags<AccessFs> with BitFlags::new()
+src/lib.rs:59:5: replace readable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])
+src/lib.rs:59:5: replace readable -> BitFlags<AccessFs> with BitFlags::new(Default::default())
+src/lib.rs:59:5: replace readable -> BitFlags<AccessFs> with BitFlags::from(Default::default())
+src/lib.rs:71:5: replace writable -> BitFlags<AccessFs> with BitFlags::new()
+src/lib.rs:71:5: replace writable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])
+src/lib.rs:71:5: replace writable -> BitFlags<AccessFs> with BitFlags::new(Default::default())
+src/lib.rs:71:5: replace writable -> BitFlags<AccessFs> with BitFlags::from(Default::default())
+src/lib.rs:71:57: replace | with & in writable
+src/lib.rs:89:5: replace runnable -> BitFlags<AccessFs> with BitFlags::new()
+src/lib.rs:89:5: replace runnable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])
+src/lib.rs:89:5: replace runnable -> BitFlags<AccessFs> with BitFlags::new(Default::default())
+src/lib.rs:89:5: replace runnable -> BitFlags<AccessFs> with BitFlags::from(Default::default())

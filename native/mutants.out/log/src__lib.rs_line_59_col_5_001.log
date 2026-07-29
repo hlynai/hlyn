@@ -1,0 +1,85 @@
+
+*** src/lib.rs:59:5: replace readable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])
+
+*** mutation diff:
+--- src/lib.rs
++++ replace readable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])
+@@ -51,21 +51,17 @@
+ /// Directory-only rights are meaningless on a regular file, and asking for
+ /// them anyway makes the kernel drop them and the ruleset report itself only
+ /// partially enforced. Since a correct policy always names some plain files --
+ /// `/dev/null` and the loader cache, at minimum -- getting this wrong would
+ /// downgrade every single ruleset we ever build.
+ type Pick = fn(bool) -> BitFlags<AccessFs>;
+ 
+ fn readable(dir: bool) -> BitFlags<AccessFs> {
+-    if dir {
+-        AccessFs::ReadFile | AccessFs::ReadDir
+-    } else {
+-        AccessFs::ReadFile.into()
+-    }
++    BitFlags::from_iter([Default::default()]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// `Refer` is included for directories because atomic writes rename a
+ /// temporary file into place, which crosses directories and is refused
+ /// without it. Device and block node creation are deliberately absent:
+ /// nothing an agent legitimately does requires minting a device.
+ fn writable(dir: bool) -> BitFlags<AccessFs> {
+     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;
+
+
+*** /usr/local/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin/cargo test --no-run --verbose --package=hlyn@0.0.1
+       Fresh unicode-ident v1.0.24
+       Fresh proc-macro2 v1.0.107
+       Fresh quote v1.0.47
+       Fresh libc v0.2.189
+       Fresh syn v3.0.3
+       Fresh syn v2.0.119
+       Fresh thiserror-impl v2.0.19
+       Fresh enumflags2_derive v0.7.12
+       Fresh enumflags2 v0.7.12
+       Fresh thiserror v2.0.19
+       Fresh landlock v0.4.7
+       Dirty hlyn v0.0.1 (/tmp/cargo-mutants-native-2JRmPP.tmp): the file `src/lib.rs` has changed (1785344249.879635013s, 489000000ns after last build at 1785344249.390635013s)
+   Compiling hlyn v0.0.1 (/tmp/cargo-mutants-native-2JRmPP.tmp)
+     Running `/usr/local/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin/rustc --crate-name hlyn --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type cdylib --crate-type rlib --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=846faa9f2ae614e7 --out-dir /tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps --extern landlock=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps/liblandlock-67872747be24e4d2.rlib --extern libc=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps/liblibc-36843709d2145305.rlib`
+     Running `/usr/local/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin/rustc --crate-name hlyn --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=825c32eb730ec1c2 -C extra-filename=-de8b05fdfc6f9dae --out-dir /tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps --extern landlock=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps/liblandlock-67872747be24e4d2.rlib --extern libc=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps/liblibc-36843709d2145305.rlib`
+error[E0283]: type annotations needed
+  --> src/lib.rs:59:5
+   |
+59 |     BitFlags::from_iter([Default::default()]) /* ~ changed by cargo-mutants ~ */
+   |     ^^^^^^^^^^^^^^^^^^^ cannot infer type of the type parameter `T` declared on the associated function `from_iter`
+   |
+   = note: the type must implement `Into<BitFlags<AccessFs, u64>>`
+   = note: required for `BitFlags<AccessFs, u64>` to implement `FromIterator<_>`
+help: consider specifying a concrete type for the type parameter `T`
+   |
+59 |     BitFlags::from_iter::</* Type */>([Default::default()]) /* ~ changed by cargo-mutants ~ */
+   |                        ++++++++++++++
+
+error[E0283]: type annotations needed
+  --> src/lib.rs:59:5
+   |
+59 |     BitFlags::from_iter([Default::default()]) /* ~ changed by cargo-mutants ~ */
+   |     ^^^^^^^^^^^^^^^^^^^ cannot infer type of the type parameter `T` declared on the associated function `from_iter`
+   |
+   = note: the type must implement `Into<BitFlags<landlock::AccessFs, u64>>`
+   = note: required for `BitFlags<landlock::AccessFs, u64>` to implement `FromIterator<_>`
+help: consider specifying a concrete type for the type parameter `T`
+   |
+59 |     BitFlags::from_iter::</* Type */>([Default::default()]) /* ~ changed by cargo-mutants ~ */
+   |                        ++++++++++++++
+
+For more information about this error, try `rustc --explain E0283`.
+error: could not compile `hlyn` (lib) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `/usr/local/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin/rustc --crate-name hlyn --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type cdylib --crate-type rlib --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=846faa9f2ae614e7 --out-dir /tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps --extern landlock=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps/liblandlock-67872747be24e4d2.rlib --extern libc=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps/liblibc-36843709d2145305.rlib` (exit status: 1)
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `hlyn` (lib test) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `/usr/local/rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin/rustc --crate-name hlyn --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=825c32eb730ec1c2 -C extra-filename=-de8b05fdfc6f9dae --out-dir /tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps --extern landlock=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps/liblandlock-67872747be24e4d2.rlib --extern libc=/tmp/cargo-mutants-native-2JRmPP.tmp/target/debug/deps/liblibc-36843709d2145305.rlib` (exit status: 1)
+
+*** result: Failure(101)

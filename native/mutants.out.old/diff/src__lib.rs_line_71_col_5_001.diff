@@ -1,0 +1,33 @@
+--- src/lib.rs
++++ replace writable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])
+@@ -63,29 +63,17 @@
+     }
+ }
+ 
+ /// `Refer` is included for directories because atomic writes rename a
+ /// temporary file into place, which crosses directories and is refused
+ /// without it. Device and block node creation are deliberately absent:
+ /// nothing an agent legitimately does requires minting a device.
+ fn writable(dir: bool) -> BitFlags<AccessFs> {
+-    let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;
+-    if !dir {
+-        return file;
+-    }
+-    file | AccessFs::ReadDir
+-        | AccessFs::MakeReg
+-        | AccessFs::MakeDir
+-        | AccessFs::RemoveFile
+-        | AccessFs::RemoveDir
+-        | AccessFs::MakeSym
+-        | AccessFs::MakeSock
+-        | AccessFs::MakeFifo
+-        | AccessFs::Refer
++    BitFlags::from_iter([Default::default()]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// A program must be readable to run. Both rights apply to files and to the
+ /// files beneath a directory, so this does not vary.
+ fn runnable(_dir: bool) -> BitFlags<AccessFs> {
+     AccessFs::Execute | AccessFs::ReadFile
+ }
+ 

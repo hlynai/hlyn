@@ -1,0 +1,1575 @@
+[
+  {
+    "diff": "--- src/lib.rs\n+++ replace << with >>\n@@ -28,17 +28,17 @@\n     binds: *const u16,\n     nbinds: usize,\n     connects: *const u16,\n     nconnects: usize,\n     flags: u32,\n }\n \n // flags\n-const SIGNAL: u32 = 1 << 0; // confine signals to this agent\n+const SIGNAL: u32 = 1 >> /* ~ changed by cargo-mutants ~ */ 0; // confine signals to this agent\n const UNIX: u32 = 1 << 1; // confine abstract unix sockets to this agent\n const NET: u32 = 1 << 2; // enforce ports; without it Landlock ignores the network\n \n // return codes\n const NOT: i32 = 0; // nothing was enforced\n const SOME: i32 = 1; // enforced, but the kernel dropped part of the request\n const FULL: i32 = 2; // enforced exactly as asked\n const EARGS: i32 = -1;\n",
+    "file": "src/lib.rs",
+    "function": null,
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:36:23: replace << with >>",
+    "package": "hlyn",
+    "replacement": ">>",
+    "span": {
+      "end": {
+        "column": 25,
+        "line": 36
+      },
+      "start": {
+        "column": 23,
+        "line": 36
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace << with >>\n@@ -29,17 +29,17 @@\n     nbinds: usize,\n     connects: *const u16,\n     nconnects: usize,\n     flags: u32,\n }\n \n // flags\n const SIGNAL: u32 = 1 << 0; // confine signals to this agent\n-const UNIX: u32 = 1 << 1; // confine abstract unix sockets to this agent\n+const UNIX: u32 = 1 >> /* ~ changed by cargo-mutants ~ */ 1; // confine abstract unix sockets to this agent\n const NET: u32 = 1 << 2; // enforce ports; without it Landlock ignores the network\n \n // return codes\n const NOT: i32 = 0; // nothing was enforced\n const SOME: i32 = 1; // enforced, but the kernel dropped part of the request\n const FULL: i32 = 2; // enforced exactly as asked\n const EARGS: i32 = -1;\n const EBUILD: i32 = -2;\n",
+    "file": "src/lib.rs",
+    "function": null,
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:37:21: replace << with >>",
+    "package": "hlyn",
+    "replacement": ">>",
+    "span": {
+      "end": {
+        "column": 23,
+        "line": 37
+      },
+      "start": {
+        "column": 21,
+        "line": 37
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace << with >>\n@@ -30,17 +30,17 @@\n     connects: *const u16,\n     nconnects: usize,\n     flags: u32,\n }\n \n // flags\n const SIGNAL: u32 = 1 << 0; // confine signals to this agent\n const UNIX: u32 = 1 << 1; // confine abstract unix sockets to this agent\n-const NET: u32 = 1 << 2; // enforce ports; without it Landlock ignores the network\n+const NET: u32 = 1 >> /* ~ changed by cargo-mutants ~ */ 2; // enforce ports; without it Landlock ignores the network\n \n // return codes\n const NOT: i32 = 0; // nothing was enforced\n const SOME: i32 = 1; // enforced, but the kernel dropped part of the request\n const FULL: i32 = 2; // enforced exactly as asked\n const EARGS: i32 = -1;\n const EBUILD: i32 = -2;\n const ERULE: i32 = -3;\n",
+    "file": "src/lib.rs",
+    "function": null,
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:38:20: replace << with >>",
+    "package": "hlyn",
+    "replacement": ">>",
+    "span": {
+      "end": {
+        "column": 22,
+        "line": 38
+      },
+      "start": {
+        "column": 20,
+        "line": 38
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ delete -\n@@ -36,17 +36,17 @@\n const SIGNAL: u32 = 1 << 0; // confine signals to this agent\n const UNIX: u32 = 1 << 1; // confine abstract unix sockets to this agent\n const NET: u32 = 1 << 2; // enforce ports; without it Landlock ignores the network\n \n // return codes\n const NOT: i32 = 0; // nothing was enforced\n const SOME: i32 = 1; // enforced, but the kernel dropped part of the request\n const FULL: i32 = 2; // enforced exactly as asked\n-const EARGS: i32 = -1;\n+const EARGS: i32 =  /* ~ changed by cargo-mutants ~ */1;\n const EBUILD: i32 = -2;\n const ERULE: i32 = -3;\n const ESEAL: i32 = -4;\n \n /// Which rights to grant, chosen by what the path actually is.\n ///\n /// Directory-only rights are meaningless on a regular file, and asking for\n /// them anyway makes the kernel drop them and the ruleset report itself only\n",
+    "file": "src/lib.rs",
+    "function": null,
+    "genre": "UnaryOperator",
+    "name": "src/lib.rs:44:20: delete -",
+    "package": "hlyn",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 21,
+        "line": 44
+      },
+      "start": {
+        "column": 20,
+        "line": 44
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ delete -\n@@ -37,17 +37,17 @@\n const UNIX: u32 = 1 << 1; // confine abstract unix sockets to this agent\n const NET: u32 = 1 << 2; // enforce ports; without it Landlock ignores the network\n \n // return codes\n const NOT: i32 = 0; // nothing was enforced\n const SOME: i32 = 1; // enforced, but the kernel dropped part of the request\n const FULL: i32 = 2; // enforced exactly as asked\n const EARGS: i32 = -1;\n-const EBUILD: i32 = -2;\n+const EBUILD: i32 =  /* ~ changed by cargo-mutants ~ */2;\n const ERULE: i32 = -3;\n const ESEAL: i32 = -4;\n \n /// Which rights to grant, chosen by what the path actually is.\n ///\n /// Directory-only rights are meaningless on a regular file, and asking for\n /// them anyway makes the kernel drop them and the ruleset report itself only\n /// partially enforced. Since a correct policy always names some plain files --\n",
+    "file": "src/lib.rs",
+    "function": null,
+    "genre": "UnaryOperator",
+    "name": "src/lib.rs:45:21: delete -",
+    "package": "hlyn",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 22,
+        "line": 45
+      },
+      "start": {
+        "column": 21,
+        "line": 45
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ delete -\n@@ -38,17 +38,17 @@\n const NET: u32 = 1 << 2; // enforce ports; without it Landlock ignores the network\n \n // return codes\n const NOT: i32 = 0; // nothing was enforced\n const SOME: i32 = 1; // enforced, but the kernel dropped part of the request\n const FULL: i32 = 2; // enforced exactly as asked\n const EARGS: i32 = -1;\n const EBUILD: i32 = -2;\n-const ERULE: i32 = -3;\n+const ERULE: i32 =  /* ~ changed by cargo-mutants ~ */3;\n const ESEAL: i32 = -4;\n \n /// Which rights to grant, chosen by what the path actually is.\n ///\n /// Directory-only rights are meaningless on a regular file, and asking for\n /// them anyway makes the kernel drop them and the ruleset report itself only\n /// partially enforced. Since a correct policy always names some plain files --\n /// `/dev/null` and the loader cache, at minimum -- getting this wrong would\n",
+    "file": "src/lib.rs",
+    "function": null,
+    "genre": "UnaryOperator",
+    "name": "src/lib.rs:46:20: delete -",
+    "package": "hlyn",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 21,
+        "line": 46
+      },
+      "start": {
+        "column": 20,
+        "line": 46
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ delete -\n@@ -39,17 +39,17 @@\n \n // return codes\n const NOT: i32 = 0; // nothing was enforced\n const SOME: i32 = 1; // enforced, but the kernel dropped part of the request\n const FULL: i32 = 2; // enforced exactly as asked\n const EARGS: i32 = -1;\n const EBUILD: i32 = -2;\n const ERULE: i32 = -3;\n-const ESEAL: i32 = -4;\n+const ESEAL: i32 =  /* ~ changed by cargo-mutants ~ */4;\n \n /// Which rights to grant, chosen by what the path actually is.\n ///\n /// Directory-only rights are meaningless on a regular file, and asking for\n /// them anyway makes the kernel drop them and the ruleset report itself only\n /// partially enforced. Since a correct policy always names some plain files --\n /// `/dev/null` and the loader cache, at minimum -- getting this wrong would\n /// downgrade every single ruleset we ever build.\n",
+    "file": "src/lib.rs",
+    "function": null,
+    "genre": "UnaryOperator",
+    "name": "src/lib.rs:47:20: delete -",
+    "package": "hlyn",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 21,
+        "line": 47
+      },
+      "start": {
+        "column": 20,
+        "line": 47
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace readable -> BitFlags<AccessFs> with BitFlags::new()\n@@ -51,21 +51,17 @@\n /// Directory-only rights are meaningless on a regular file, and asking for\n /// them anyway makes the kernel drop them and the ruleset report itself only\n /// partially enforced. Since a correct policy always names some plain files --\n /// `/dev/null` and the loader cache, at minimum -- getting this wrong would\n /// downgrade every single ruleset we ever build.\n type Pick = fn(bool) -> BitFlags<AccessFs>;\n \n fn readable(dir: bool) -> BitFlags<AccessFs> {\n-    if dir {\n-        AccessFs::ReadFile | AccessFs::ReadDir\n-    } else {\n-        AccessFs::ReadFile.into()\n-    }\n+    BitFlags::new() /* ~ changed by cargo-mutants ~ */\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "readable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 64
+        },
+        "start": {
+          "column": 1,
+          "line": 58
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:59:5: replace readable -> BitFlags<AccessFs> with BitFlags::new()",
+    "package": "hlyn",
+    "replacement": "BitFlags::new()",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 63
+      },
+      "start": {
+        "column": 5,
+        "line": 59
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace readable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])\n@@ -51,21 +51,17 @@\n /// Directory-only rights are meaningless on a regular file, and asking for\n /// them anyway makes the kernel drop them and the ruleset report itself only\n /// partially enforced. Since a correct policy always names some plain files --\n /// `/dev/null` and the loader cache, at minimum -- getting this wrong would\n /// downgrade every single ruleset we ever build.\n type Pick = fn(bool) -> BitFlags<AccessFs>;\n \n fn readable(dir: bool) -> BitFlags<AccessFs> {\n-    if dir {\n-        AccessFs::ReadFile | AccessFs::ReadDir\n-    } else {\n-        AccessFs::ReadFile.into()\n-    }\n+    BitFlags::from_iter([Default::default()]) /* ~ changed by cargo-mutants ~ */\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "readable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 64
+        },
+        "start": {
+          "column": 1,
+          "line": 58
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:59:5: replace readable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])",
+    "package": "hlyn",
+    "replacement": "BitFlags::from_iter([Default::default()])",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 63
+      },
+      "start": {
+        "column": 5,
+        "line": 59
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace readable -> BitFlags<AccessFs> with BitFlags::new(Default::default())\n@@ -51,21 +51,17 @@\n /// Directory-only rights are meaningless on a regular file, and asking for\n /// them anyway makes the kernel drop them and the ruleset report itself only\n /// partially enforced. Since a correct policy always names some plain files --\n /// `/dev/null` and the loader cache, at minimum -- getting this wrong would\n /// downgrade every single ruleset we ever build.\n type Pick = fn(bool) -> BitFlags<AccessFs>;\n \n fn readable(dir: bool) -> BitFlags<AccessFs> {\n-    if dir {\n-        AccessFs::ReadFile | AccessFs::ReadDir\n-    } else {\n-        AccessFs::ReadFile.into()\n-    }\n+    BitFlags::new(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "readable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 64
+        },
+        "start": {
+          "column": 1,
+          "line": 58
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:59:5: replace readable -> BitFlags<AccessFs> with BitFlags::new(Default::default())",
+    "package": "hlyn",
+    "replacement": "BitFlags::new(Default::default())",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 63
+      },
+      "start": {
+        "column": 5,
+        "line": 59
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace readable -> BitFlags<AccessFs> with BitFlags::from(Default::default())\n@@ -51,21 +51,17 @@\n /// Directory-only rights are meaningless on a regular file, and asking for\n /// them anyway makes the kernel drop them and the ruleset report itself only\n /// partially enforced. Since a correct policy always names some plain files --\n /// `/dev/null` and the loader cache, at minimum -- getting this wrong would\n /// downgrade every single ruleset we ever build.\n type Pick = fn(bool) -> BitFlags<AccessFs>;\n \n fn readable(dir: bool) -> BitFlags<AccessFs> {\n-    if dir {\n-        AccessFs::ReadFile | AccessFs::ReadDir\n-    } else {\n-        AccessFs::ReadFile.into()\n-    }\n+    BitFlags::from(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "readable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 64
+        },
+        "start": {
+          "column": 1,
+          "line": 58
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:59:5: replace readable -> BitFlags<AccessFs> with BitFlags::from(Default::default())",
+    "package": "hlyn",
+    "replacement": "BitFlags::from(Default::default())",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 63
+      },
+      "start": {
+        "column": 5,
+        "line": 59
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in readable\n@@ -52,17 +52,17 @@\n /// them anyway makes the kernel drop them and the ruleset report itself only\n /// partially enforced. Since a correct policy always names some plain files --\n /// `/dev/null` and the loader cache, at minimum -- getting this wrong would\n /// downgrade every single ruleset we ever build.\n type Pick = fn(bool) -> BitFlags<AccessFs>;\n \n fn readable(dir: bool) -> BitFlags<AccessFs> {\n     if dir {\n-        AccessFs::ReadFile | AccessFs::ReadDir\n+        AccessFs::ReadFile & /* ~ changed by cargo-mutants ~ */ AccessFs::ReadDir\n     } else {\n         AccessFs::ReadFile.into()\n     }\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "readable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 64
+        },
+        "start": {
+          "column": 1,
+          "line": 58
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:60:28: replace | with & in readable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 29,
+        "line": 60
+      },
+      "start": {
+        "column": 28,
+        "line": 60
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in readable\n@@ -52,17 +52,17 @@\n /// them anyway makes the kernel drop them and the ruleset report itself only\n /// partially enforced. Since a correct policy always names some plain files --\n /// `/dev/null` and the loader cache, at minimum -- getting this wrong would\n /// downgrade every single ruleset we ever build.\n type Pick = fn(bool) -> BitFlags<AccessFs>;\n \n fn readable(dir: bool) -> BitFlags<AccessFs> {\n     if dir {\n-        AccessFs::ReadFile | AccessFs::ReadDir\n+        AccessFs::ReadFile ^ /* ~ changed by cargo-mutants ~ */ AccessFs::ReadDir\n     } else {\n         AccessFs::ReadFile.into()\n     }\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "readable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 64
+        },
+        "start": {
+          "column": 1,
+          "line": 58
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:60:28: replace | with ^ in readable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 29,
+        "line": 60
+      },
+      "start": {
+        "column": 28,
+        "line": 60
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace writable -> BitFlags<AccessFs> with BitFlags::new()\n@@ -63,29 +63,17 @@\n     }\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n-    let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n-    if !dir {\n-        return file;\n-    }\n-    file | AccessFs::ReadDir\n-        | AccessFs::MakeReg\n-        | AccessFs::MakeDir\n-        | AccessFs::RemoveFile\n-        | AccessFs::RemoveDir\n-        | AccessFs::MakeSym\n-        | AccessFs::MakeSock\n-        | AccessFs::MakeFifo\n-        | AccessFs::Refer\n+    BitFlags::new() /* ~ changed by cargo-mutants ~ */\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n     AccessFs::Execute | AccessFs::ReadFile\n }\n \n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:71:5: replace writable -> BitFlags<AccessFs> with BitFlags::new()",
+    "package": "hlyn",
+    "replacement": "BitFlags::new()",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 83
+      },
+      "start": {
+        "column": 5,
+        "line": 71
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace writable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])\n@@ -63,29 +63,17 @@\n     }\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n-    let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n-    if !dir {\n-        return file;\n-    }\n-    file | AccessFs::ReadDir\n-        | AccessFs::MakeReg\n-        | AccessFs::MakeDir\n-        | AccessFs::RemoveFile\n-        | AccessFs::RemoveDir\n-        | AccessFs::MakeSym\n-        | AccessFs::MakeSock\n-        | AccessFs::MakeFifo\n-        | AccessFs::Refer\n+    BitFlags::from_iter([Default::default()]) /* ~ changed by cargo-mutants ~ */\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n     AccessFs::Execute | AccessFs::ReadFile\n }\n \n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:71:5: replace writable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])",
+    "package": "hlyn",
+    "replacement": "BitFlags::from_iter([Default::default()])",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 83
+      },
+      "start": {
+        "column": 5,
+        "line": 71
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace writable -> BitFlags<AccessFs> with BitFlags::new(Default::default())\n@@ -63,29 +63,17 @@\n     }\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n-    let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n-    if !dir {\n-        return file;\n-    }\n-    file | AccessFs::ReadDir\n-        | AccessFs::MakeReg\n-        | AccessFs::MakeDir\n-        | AccessFs::RemoveFile\n-        | AccessFs::RemoveDir\n-        | AccessFs::MakeSym\n-        | AccessFs::MakeSock\n-        | AccessFs::MakeFifo\n-        | AccessFs::Refer\n+    BitFlags::new(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n     AccessFs::Execute | AccessFs::ReadFile\n }\n \n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:71:5: replace writable -> BitFlags<AccessFs> with BitFlags::new(Default::default())",
+    "package": "hlyn",
+    "replacement": "BitFlags::new(Default::default())",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 83
+      },
+      "start": {
+        "column": 5,
+        "line": 71
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace writable -> BitFlags<AccessFs> with BitFlags::from(Default::default())\n@@ -63,29 +63,17 @@\n     }\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n-    let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n-    if !dir {\n-        return file;\n-    }\n-    file | AccessFs::ReadDir\n-        | AccessFs::MakeReg\n-        | AccessFs::MakeDir\n-        | AccessFs::RemoveFile\n-        | AccessFs::RemoveDir\n-        | AccessFs::MakeSym\n-        | AccessFs::MakeSock\n-        | AccessFs::MakeFifo\n-        | AccessFs::Refer\n+    BitFlags::from(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n     AccessFs::Execute | AccessFs::ReadFile\n }\n \n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:71:5: replace writable -> BitFlags<AccessFs> with BitFlags::from(Default::default())",
+    "package": "hlyn",
+    "replacement": "BitFlags::from(Default::default())",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 83
+      },
+      "start": {
+        "column": 5,
+        "line": 71
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in writable\n@@ -63,17 +63,17 @@\n     }\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n-    let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n+    let file = AccessFs::WriteFile | AccessFs::ReadFile & /* ~ changed by cargo-mutants ~ */ AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:71:57: replace | with & in writable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 58,
+        "line": 71
+      },
+      "start": {
+        "column": 57,
+        "line": 71
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in writable\n@@ -63,17 +63,17 @@\n     }\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n-    let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n+    let file = AccessFs::WriteFile | AccessFs::ReadFile ^ /* ~ changed by cargo-mutants ~ */ AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:71:57: replace | with ^ in writable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 58,
+        "line": 71
+      },
+      "start": {
+        "column": 57,
+        "line": 71
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in writable\n@@ -63,17 +63,17 @@\n     }\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n-    let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n+    let file = AccessFs::WriteFile & /* ~ changed by cargo-mutants ~ */ AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:71:36: replace | with & in writable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 37,
+        "line": 71
+      },
+      "start": {
+        "column": 36,
+        "line": 71
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in writable\n@@ -63,17 +63,17 @@\n     }\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n-    let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n+    let file = AccessFs::WriteFile ^ /* ~ changed by cargo-mutants ~ */ AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:71:36: replace | with ^ in writable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 37,
+        "line": 71
+      },
+      "start": {
+        "column": 36,
+        "line": 71
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ delete ! in writable\n@@ -64,17 +64,17 @@\n }\n \n /// `Refer` is included for directories because atomic writes rename a\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n-    if !dir {\n+    if  /* ~ changed by cargo-mutants ~ */dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "UnaryOperator",
+    "name": "src/lib.rs:72:8: delete ! in writable",
+    "package": "hlyn",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 9,
+        "line": 72
+      },
+      "start": {
+        "column": 8,
+        "line": 72
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in writable\n@@ -75,17 +75,17 @@\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n-        | AccessFs::Refer\n+        & /* ~ changed by cargo-mutants ~ */ AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n     AccessFs::Execute | AccessFs::ReadFile\n }\n \n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:83:9: replace | with & in writable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 83
+      },
+      "start": {
+        "column": 9,
+        "line": 83
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in writable\n@@ -75,17 +75,17 @@\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n-        | AccessFs::Refer\n+        ^ /* ~ changed by cargo-mutants ~ */ AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n     AccessFs::Execute | AccessFs::ReadFile\n }\n \n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:83:9: replace | with ^ in writable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 83
+      },
+      "start": {
+        "column": 9,
+        "line": 83
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in writable\n@@ -74,17 +74,17 @@\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n-        | AccessFs::MakeFifo\n+        & /* ~ changed by cargo-mutants ~ */ AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n     AccessFs::Execute | AccessFs::ReadFile\n }\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:82:9: replace | with & in writable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 82
+      },
+      "start": {
+        "column": 9,
+        "line": 82
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in writable\n@@ -74,17 +74,17 @@\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n-        | AccessFs::MakeFifo\n+        ^ /* ~ changed by cargo-mutants ~ */ AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n     AccessFs::Execute | AccessFs::ReadFile\n }\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:82:9: replace | with ^ in writable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 82
+      },
+      "start": {
+        "column": 9,
+        "line": 82
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in writable\n@@ -73,17 +73,17 @@\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n-        | AccessFs::MakeSock\n+        & /* ~ changed by cargo-mutants ~ */ AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n     AccessFs::Execute | AccessFs::ReadFile\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:81:9: replace | with & in writable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 81
+      },
+      "start": {
+        "column": 9,
+        "line": 81
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in writable\n@@ -73,17 +73,17 @@\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n-        | AccessFs::MakeSock\n+        ^ /* ~ changed by cargo-mutants ~ */ AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n     AccessFs::Execute | AccessFs::ReadFile\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:81:9: replace | with ^ in writable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 81
+      },
+      "start": {
+        "column": 9,
+        "line": 81
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in writable\n@@ -72,17 +72,17 @@\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n-        | AccessFs::MakeSym\n+        & /* ~ changed by cargo-mutants ~ */ AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:80:9: replace | with & in writable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 80
+      },
+      "start": {
+        "column": 9,
+        "line": 80
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in writable\n@@ -72,17 +72,17 @@\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n-        | AccessFs::MakeSym\n+        ^ /* ~ changed by cargo-mutants ~ */ AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:80:9: replace | with ^ in writable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 80
+      },
+      "start": {
+        "column": 9,
+        "line": 80
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in writable\n@@ -71,17 +71,17 @@\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n-        | AccessFs::RemoveDir\n+        & /* ~ changed by cargo-mutants ~ */ AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:79:9: replace | with & in writable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 79
+      },
+      "start": {
+        "column": 9,
+        "line": 79
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in writable\n@@ -71,17 +71,17 @@\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n-        | AccessFs::RemoveDir\n+        ^ /* ~ changed by cargo-mutants ~ */ AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:79:9: replace | with ^ in writable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 79
+      },
+      "start": {
+        "column": 9,
+        "line": 79
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in writable\n@@ -70,17 +70,17 @@\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n-        | AccessFs::RemoveFile\n+        & /* ~ changed by cargo-mutants ~ */ AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:78:9: replace | with & in writable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 78
+      },
+      "start": {
+        "column": 9,
+        "line": 78
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in writable\n@@ -70,17 +70,17 @@\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n-        | AccessFs::RemoveFile\n+        ^ /* ~ changed by cargo-mutants ~ */ AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:78:9: replace | with ^ in writable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 78
+      },
+      "start": {
+        "column": 9,
+        "line": 78
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in writable\n@@ -69,17 +69,17 @@\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n-        | AccessFs::MakeDir\n+        & /* ~ changed by cargo-mutants ~ */ AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:77:9: replace | with & in writable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 77
+      },
+      "start": {
+        "column": 9,
+        "line": 77
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in writable\n@@ -69,17 +69,17 @@\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n         | AccessFs::MakeReg\n-        | AccessFs::MakeDir\n+        ^ /* ~ changed by cargo-mutants ~ */ AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:77:9: replace | with ^ in writable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 77
+      },
+      "start": {
+        "column": 9,
+        "line": 77
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in writable\n@@ -68,17 +68,17 @@\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n-        | AccessFs::MakeReg\n+        & /* ~ changed by cargo-mutants ~ */ AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:76:9: replace | with & in writable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 76
+      },
+      "start": {
+        "column": 9,
+        "line": 76
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in writable\n@@ -68,17 +68,17 @@\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n     file | AccessFs::ReadDir\n-        | AccessFs::MakeReg\n+        ^ /* ~ changed by cargo-mutants ~ */ AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:76:9: replace | with ^ in writable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 76
+      },
+      "start": {
+        "column": 9,
+        "line": 76
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in writable\n@@ -67,17 +67,17 @@\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n-    file | AccessFs::ReadDir\n+    file & /* ~ changed by cargo-mutants ~ */ AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:75:10: replace | with & in writable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 11,
+        "line": 75
+      },
+      "start": {
+        "column": 10,
+        "line": 75
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in writable\n@@ -67,17 +67,17 @@\n /// temporary file into place, which crosses directories and is refused\n /// without it. Device and block node creation are deliberately absent:\n /// nothing an agent legitimately does requires minting a device.\n fn writable(dir: bool) -> BitFlags<AccessFs> {\n     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;\n     if !dir {\n         return file;\n     }\n-    file | AccessFs::ReadDir\n+    file ^ /* ~ changed by cargo-mutants ~ */ AccessFs::ReadDir\n         | AccessFs::MakeReg\n         | AccessFs::MakeDir\n         | AccessFs::RemoveFile\n         | AccessFs::RemoveDir\n         | AccessFs::MakeSym\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "writable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 84
+        },
+        "start": {
+          "column": 1,
+          "line": 66
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:75:10: replace | with ^ in writable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 11,
+        "line": 75
+      },
+      "start": {
+        "column": 10,
+        "line": 75
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace runnable -> BitFlags<AccessFs> with BitFlags::new()\n@@ -81,17 +81,17 @@\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n-    AccessFs::Execute | AccessFs::ReadFile\n+    BitFlags::new() /* ~ changed by cargo-mutants ~ */\n }\n \n /// Borrow a C string array as paths.\n unsafe fn list(items: *const *const c_char, count: usize) -> Option<Vec<&'static str>> {\n     if count == 0 {\n         return Some(Vec::new());\n     }\n     if items.is_null() {\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "runnable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 90
+        },
+        "start": {
+          "column": 1,
+          "line": 86
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:89:5: replace runnable -> BitFlags<AccessFs> with BitFlags::new()",
+    "package": "hlyn",
+    "replacement": "BitFlags::new()",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 89
+      },
+      "start": {
+        "column": 5,
+        "line": 89
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace runnable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])\n@@ -81,17 +81,17 @@\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n-    AccessFs::Execute | AccessFs::ReadFile\n+    BitFlags::from_iter([Default::default()]) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Borrow a C string array as paths.\n unsafe fn list(items: *const *const c_char, count: usize) -> Option<Vec<&'static str>> {\n     if count == 0 {\n         return Some(Vec::new());\n     }\n     if items.is_null() {\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "runnable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 90
+        },
+        "start": {
+          "column": 1,
+          "line": 86
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:89:5: replace runnable -> BitFlags<AccessFs> with BitFlags::from_iter([Default::default()])",
+    "package": "hlyn",
+    "replacement": "BitFlags::from_iter([Default::default()])",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 89
+      },
+      "start": {
+        "column": 5,
+        "line": 89
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace runnable -> BitFlags<AccessFs> with BitFlags::new(Default::default())\n@@ -81,17 +81,17 @@\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n-    AccessFs::Execute | AccessFs::ReadFile\n+    BitFlags::new(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Borrow a C string array as paths.\n unsafe fn list(items: *const *const c_char, count: usize) -> Option<Vec<&'static str>> {\n     if count == 0 {\n         return Some(Vec::new());\n     }\n     if items.is_null() {\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "runnable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 90
+        },
+        "start": {
+          "column": 1,
+          "line": 86
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:89:5: replace runnable -> BitFlags<AccessFs> with BitFlags::new(Default::default())",
+    "package": "hlyn",
+    "replacement": "BitFlags::new(Default::default())",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 89
+      },
+      "start": {
+        "column": 5,
+        "line": 89
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace runnable -> BitFlags<AccessFs> with BitFlags::from(Default::default())\n@@ -81,17 +81,17 @@\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n-    AccessFs::Execute | AccessFs::ReadFile\n+    BitFlags::from(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Borrow a C string array as paths.\n unsafe fn list(items: *const *const c_char, count: usize) -> Option<Vec<&'static str>> {\n     if count == 0 {\n         return Some(Vec::new());\n     }\n     if items.is_null() {\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "runnable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 90
+        },
+        "start": {
+          "column": 1,
+          "line": 86
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:89:5: replace runnable -> BitFlags<AccessFs> with BitFlags::from(Default::default())",
+    "package": "hlyn",
+    "replacement": "BitFlags::from(Default::default())",
+    "span": {
+      "end": {
+        "column": 43,
+        "line": 89
+      },
+      "start": {
+        "column": 5,
+        "line": 89
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with & in runnable\n@@ -81,17 +81,17 @@\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n-    AccessFs::Execute | AccessFs::ReadFile\n+    AccessFs::Execute & /* ~ changed by cargo-mutants ~ */ AccessFs::ReadFile\n }\n \n /// Borrow a C string array as paths.\n unsafe fn list(items: *const *const c_char, count: usize) -> Option<Vec<&'static str>> {\n     if count == 0 {\n         return Some(Vec::new());\n     }\n     if items.is_null() {\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "runnable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 90
+        },
+        "start": {
+          "column": 1,
+          "line": 86
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:89:23: replace | with & in runnable",
+    "package": "hlyn",
+    "replacement": "&",
+    "span": {
+      "end": {
+        "column": 24,
+        "line": 89
+      },
+      "start": {
+        "column": 23,
+        "line": 89
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace | with ^ in runnable\n@@ -81,17 +81,17 @@\n         | AccessFs::MakeSock\n         | AccessFs::MakeFifo\n         | AccessFs::Refer\n }\n \n /// A program must be readable to run. Both rights apply to files and to the\n /// files beneath a directory, so this does not vary.\n fn runnable(_dir: bool) -> BitFlags<AccessFs> {\n-    AccessFs::Execute | AccessFs::ReadFile\n+    AccessFs::Execute ^ /* ~ changed by cargo-mutants ~ */ AccessFs::ReadFile\n }\n \n /// Borrow a C string array as paths.\n unsafe fn list(items: *const *const c_char, count: usize) -> Option<Vec<&'static str>> {\n     if count == 0 {\n         return Some(Vec::new());\n     }\n     if items.is_null() {\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "runnable",
+      "return_type": "-> BitFlags<AccessFs>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 90
+        },
+        "start": {
+          "column": 1,
+          "line": 86
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:89:23: replace | with ^ in runnable",
+    "package": "hlyn",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 24,
+        "line": 89
+      },
+      "start": {
+        "column": 23,
+        "line": 89
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace hlyn_abi -> i32 with 0\n@@ -136,22 +136,17 @@\n /// A read-only version query, used only for reporting what a machine can do.\n /// No enforcement decision depends on it: what is actually enforced comes back\n /// from `restrict_self` in `seal` below.\n #[no_mangle]\n pub extern \"C\" fn hlyn_abi() -> i32 {\n     // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION).\n     // Syscall 444 on every architecture: Landlock was added to the generic\n     // syscall table, so the number does not vary the way seccomp's does.\n-    let out = unsafe { libc::syscall(444, 0, 0, 1) };\n-    if out < 0 {\n-        0\n-    } else {\n-        out as i32\n-    }\n+    0 /* ~ changed by cargo-mutants ~ */\n }\n \n /// Apply `plan` to the calling process. One-way, and irreversible.\n ///\n /// Returns FULL, SOME, or NOT for enforcement level, or a negative code. The\n /// caller is expected to treat anything below FULL as a failure unless it has\n /// explicitly opted into weaker enforcement.\n ///\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "hlyn_abi",
+      "return_type": "-> i32",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 150
+        },
+        "start": {
+          "column": 1,
+          "line": 134
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:144:5: replace hlyn_abi -> i32 with 0",
+    "package": "hlyn",
+    "replacement": "0",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 149
+      },
+      "start": {
+        "column": 5,
+        "line": 144
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace hlyn_abi -> i32 with 1\n@@ -136,22 +136,17 @@\n /// A read-only version query, used only for reporting what a machine can do.\n /// No enforcement decision depends on it: what is actually enforced comes back\n /// from `restrict_self` in `seal` below.\n #[no_mangle]\n pub extern \"C\" fn hlyn_abi() -> i32 {\n     // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION).\n     // Syscall 444 on every architecture: Landlock was added to the generic\n     // syscall table, so the number does not vary the way seccomp's does.\n-    let out = unsafe { libc::syscall(444, 0, 0, 1) };\n-    if out < 0 {\n-        0\n-    } else {\n-        out as i32\n-    }\n+    1 /* ~ changed by cargo-mutants ~ */\n }\n \n /// Apply `plan` to the calling process. One-way, and irreversible.\n ///\n /// Returns FULL, SOME, or NOT for enforcement level, or a negative code. The\n /// caller is expected to treat anything below FULL as a failure unless it has\n /// explicitly opted into weaker enforcement.\n ///\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "hlyn_abi",
+      "return_type": "-> i32",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 150
+        },
+        "start": {
+          "column": 1,
+          "line": 134
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:144:5: replace hlyn_abi -> i32 with 1",
+    "package": "hlyn",
+    "replacement": "1",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 149
+      },
+      "start": {
+        "column": 5,
+        "line": 144
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace hlyn_abi -> i32 with -1\n@@ -136,22 +136,17 @@\n /// A read-only version query, used only for reporting what a machine can do.\n /// No enforcement decision depends on it: what is actually enforced comes back\n /// from `restrict_self` in `seal` below.\n #[no_mangle]\n pub extern \"C\" fn hlyn_abi() -> i32 {\n     // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION).\n     // Syscall 444 on every architecture: Landlock was added to the generic\n     // syscall table, so the number does not vary the way seccomp's does.\n-    let out = unsafe { libc::syscall(444, 0, 0, 1) };\n-    if out < 0 {\n-        0\n-    } else {\n-        out as i32\n-    }\n+    -1 /* ~ changed by cargo-mutants ~ */\n }\n \n /// Apply `plan` to the calling process. One-way, and irreversible.\n ///\n /// Returns FULL, SOME, or NOT for enforcement level, or a negative code. The\n /// caller is expected to treat anything below FULL as a failure unless it has\n /// explicitly opted into weaker enforcement.\n ///\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "hlyn_abi",
+      "return_type": "-> i32",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 150
+        },
+        "start": {
+          "column": 1,
+          "line": 134
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "src/lib.rs:144:5: replace hlyn_abi -> i32 with -1",
+    "package": "hlyn",
+    "replacement": "-1",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 149
+      },
+      "start": {
+        "column": 5,
+        "line": 144
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace < with == in hlyn_abi\n@@ -137,17 +137,17 @@\n /// No enforcement decision depends on it: what is actually enforced comes back\n /// from `restrict_self` in `seal` below.\n #[no_mangle]\n pub extern \"C\" fn hlyn_abi() -> i32 {\n     // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION).\n     // Syscall 444 on every architecture: Landlock was added to the generic\n     // syscall table, so the number does not vary the way seccomp's does.\n     let out = unsafe { libc::syscall(444, 0, 0, 1) };\n-    if out < 0 {\n+    if out == /* ~ changed by cargo-mutants ~ */ 0 {\n         0\n     } else {\n         out as i32\n     }\n }\n \n /// Apply `plan` to the calling process. One-way, and irreversible.\n ///\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "hlyn_abi",
+      "return_type": "-> i32",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 150
+        },
+        "start": {
+          "column": 1,
+          "line": 134
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:145:12: replace < with == in hlyn_abi",
+    "package": "hlyn",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 13,
+        "line": 145
+      },
+      "start": {
+        "column": 12,
+        "line": 145
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace < with > in hlyn_abi\n@@ -137,17 +137,17 @@\n /// No enforcement decision depends on it: what is actually enforced comes back\n /// from `restrict_self` in `seal` below.\n #[no_mangle]\n pub extern \"C\" fn hlyn_abi() -> i32 {\n     // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION).\n     // Syscall 444 on every architecture: Landlock was added to the generic\n     // syscall table, so the number does not vary the way seccomp's does.\n     let out = unsafe { libc::syscall(444, 0, 0, 1) };\n-    if out < 0 {\n+    if out > /* ~ changed by cargo-mutants ~ */ 0 {\n         0\n     } else {\n         out as i32\n     }\n }\n \n /// Apply `plan` to the calling process. One-way, and irreversible.\n ///\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "hlyn_abi",
+      "return_type": "-> i32",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 150
+        },
+        "start": {
+          "column": 1,
+          "line": 134
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:145:12: replace < with > in hlyn_abi",
+    "package": "hlyn",
+    "replacement": ">",
+    "span": {
+      "end": {
+        "column": 13,
+        "line": 145
+      },
+      "start": {
+        "column": 12,
+        "line": 145
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace < with <= in hlyn_abi\n@@ -137,17 +137,17 @@\n /// No enforcement decision depends on it: what is actually enforced comes back\n /// from `restrict_self` in `seal` below.\n #[no_mangle]\n pub extern \"C\" fn hlyn_abi() -> i32 {\n     // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION).\n     // Syscall 444 on every architecture: Landlock was added to the generic\n     // syscall table, so the number does not vary the way seccomp's does.\n     let out = unsafe { libc::syscall(444, 0, 0, 1) };\n-    if out < 0 {\n+    if out <= /* ~ changed by cargo-mutants ~ */ 0 {\n         0\n     } else {\n         out as i32\n     }\n }\n \n /// Apply `plan` to the calling process. One-way, and irreversible.\n ///\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "hlyn_abi",
+      "return_type": "-> i32",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 150
+        },
+        "start": {
+          "column": 1,
+          "line": 134
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:145:12: replace < with <= in hlyn_abi",
+    "package": "hlyn",
+    "replacement": "<=",
+    "span": {
+      "end": {
+        "column": 13,
+        "line": 145
+      },
+      "start": {
+        "column": 12,
+        "line": 145
+      }
+    }
+  }
+]

@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace | with & in writable
+@@ -71,17 +71,17 @@
+     let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;
+     if !dir {
+         return file;
+     }
+     file | AccessFs::ReadDir
+         | AccessFs::MakeReg
+         | AccessFs::MakeDir
+         | AccessFs::RemoveFile
+-        | AccessFs::RemoveDir
++        & /* ~ changed by cargo-mutants ~ */ AccessFs::RemoveDir
+         | AccessFs::MakeSym
+         | AccessFs::MakeSock
+         | AccessFs::MakeFifo
+         | AccessFs::Refer
+ }
+ 
+ /// A program must be readable to run. Both rights apply to files and to the
+ /// files beneath a directory, so this does not vary.

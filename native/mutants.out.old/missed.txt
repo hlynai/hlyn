@@ -1,0 +1,16 @@
+src/lib.rs:36:23: replace << with >>
+src/lib.rs:60:28: replace | with ^ in readable
+src/lib.rs:71:36: replace | with ^ in writable
+src/lib.rs:83:9: replace | with ^ in writable
+src/lib.rs:82:9: replace | with ^ in writable
+src/lib.rs:81:9: replace | with ^ in writable
+src/lib.rs:80:9: replace | with ^ in writable
+src/lib.rs:79:9: replace | with ^ in writable
+src/lib.rs:78:9: replace | with ^ in writable
+src/lib.rs:77:9: replace | with ^ in writable
+src/lib.rs:76:9: replace | with ^ in writable
+src/lib.rs:75:10: replace | with ^ in writable
+src/lib.rs:89:23: replace | with ^ in runnable
+src/lib.rs:144:5: replace hlyn_abi -> i32 with 1
+src/lib.rs:145:12: replace < with == in hlyn_abi
+src/lib.rs:145:12: replace < with <= in hlyn_abi

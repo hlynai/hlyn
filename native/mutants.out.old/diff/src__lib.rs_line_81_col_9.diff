@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace | with & in writable
+@@ -73,17 +73,17 @@
+         return file;
+     }
+     file | AccessFs::ReadDir
+         | AccessFs::MakeReg
+         | AccessFs::MakeDir
+         | AccessFs::RemoveFile
+         | AccessFs::RemoveDir
+         | AccessFs::MakeSym
+-        | AccessFs::MakeSock
++        & /* ~ changed by cargo-mutants ~ */ AccessFs::MakeSock
+         | AccessFs::MakeFifo
+         | AccessFs::Refer
+ }
+ 
+ /// A program must be readable to run. Both rights apply to files and to the
+ /// files beneath a directory, so this does not vary.
+ fn runnable(_dir: bool) -> BitFlags<AccessFs> {
+     AccessFs::Execute | AccessFs::ReadFile
