@@ -470,3 +470,106 @@ def test_a_missing_path_is_refused_loudly(tmp_path):
     with pytest.raises(Invalid) as caught:
         landlock.load(Policy(read=[str(tmp_path / "nope")]))
     assert "nope" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# under-enforcement: the failure mode that looks like success
+# ---------------------------------------------------------------------------
+#
+# On an older kernel the ruleset is applied with whatever rights that kernel
+# understands and the rest are dropped, which is what `BestEffort` means. The
+# process ends up confined less than the caller asked for, and every syscall
+# after that succeeds normally -- there is nothing to notice. `load` is the one
+# place that can catch it, and only if it treats anything short of full
+# enforcement as a failure.
+#
+# The kernel here is new enough that it never under-enforces, so the shim's
+# answer is substituted directly. That is the whole point: these tests are
+# about what this side does with the answer, on a machine where the real answer
+# can never be anything but FULL.
+
+
+class _Shim:
+    """Stands in for the loaded library, reporting whatever it is told to."""
+
+    def __init__(self, seal: int, abi: int = 6):
+        self._seal = seal
+        self._abi = abi
+
+    def hlyn_seal(self, _plan):
+        return self._seal
+
+    def hlyn_abi(self):
+        return self._abi
+
+
+@pytest.fixture
+def shim(monkeypatch):
+    """Swap in a shim that reports a chosen enforcement level.
+
+    Nothing is applied to this process: the fake never reaches the kernel, so
+    these tests can run in the test runner itself rather than a child.
+    """
+
+    def use(level: int, abi: int = 6):
+        from hlyn.core import landlock
+
+        monkeypatch.setattr(landlock, "_lib", _Shim(level, abi))
+        return landlock
+
+    return use
+
+
+def test_partial_enforcement_raises_instead_of_returning(shim):
+    from hlyn.error import Failed
+    from hlyn.policy import Policy
+
+    landlock = shim(1)  # SOME: the kernel took part of the ruleset
+    with pytest.raises(Failed) as caught:
+        landlock.load(Policy())
+    said = str(caught.value)
+    assert "part" in said, f"the message does not say what went wrong: {said}"
+    # The caller has to be able to tell "weaker than asked" from "not confined
+    # at all", because only one of those leaves them with a live process that
+    # believes it is safe.
+    assert "IS confined" in said
+
+
+def test_no_enforcement_at_all_raises(shim):
+    from hlyn.error import Failed
+    from hlyn.policy import Policy
+
+    landlock = shim(0)  # NOT: nothing was applied
+    with pytest.raises(Failed) as caught:
+        landlock.load(Policy())
+    assert "NOT confined" in str(caught.value)
+
+
+def test_full_enforcement_is_the_only_case_that_returns(shim):
+    landlock = shim(2)  # FULL
+    from hlyn.policy import Policy
+
+    assert landlock.load(Policy()) == 6
+
+
+@pytest.mark.parametrize(
+    ("code", "why"),
+    [
+        (-1, "arguments"),
+        (-2, "ruleset"),
+        (-3, "path"),
+        (-4, "refused"),
+        (-99, "unknown"),
+    ],
+)
+def test_every_shim_failure_raises_and_says_which(shim, code, why):
+    # A negative code is the shim reporting it could not do its job. None of
+    # them may be mistaken for a confined process, including one this version
+    # has never heard of.
+    from hlyn.error import Failed
+    from hlyn.policy import Policy
+
+    landlock = shim(code)
+    with pytest.raises(Failed) as caught:
+        landlock.load(Policy())
+    assert why in str(caught.value)
