@@ -1,0 +1,33 @@
+"""Runtime containment layer for AI agents.
+
+Confinement is applied by the kernel, is scoped to the calling process, and
+cannot be lifted once set. There is deliberately no way to turn it off.
+"""
+
+from __future__ import annotations
+
+from .error import Error, Failed, Invalid, Sealed, Unsupported
+from .jail import on, probe, run, sealed, spawn
+from .policy import SAFE, Policy, preset, presets, register, runtime
+
+__version__ = "0.0.1"
+
+__all__ = [
+    "on",
+    "run",
+    "spawn",
+    "probe",
+    "sealed",
+    "Policy",
+    "preset",
+    "presets",
+    "register",
+    "runtime",
+    "SAFE",
+    "Error",
+    "Invalid",
+    "Unsupported",
+    "Sealed",
+    "Failed",
+    "__version__",
+]

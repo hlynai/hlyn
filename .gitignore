@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.DS_Store
+
+# Rust build output. The .so this ships is built by the packaging step, not
+# committed source.
+native/target/
+
+.venv/
+venv/
