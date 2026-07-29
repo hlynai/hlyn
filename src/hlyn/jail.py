@@ -17,19 +17,21 @@ import pickle
 import shutil
 import sys
 import tempfile
-from typing import Any, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from types import ModuleType
+from typing import Any
 
 from . import log
 from .error import Failed, Invalid, Sealed
 from .policy import Policy, preset
 
-__all__ = ["on", "run", "spawn", "probe", "back", "sealed"]
+__all__ = ["back", "on", "probe", "run", "sealed", "spawn"]
 
 
 _sealed = False
 
 
-def back():
+def back() -> ModuleType:
     """The enforcement backend for this machine.
 
     Imported lazily so that a Linux-only or macOS-only module is never loaded
@@ -54,13 +56,14 @@ def sealed() -> bool:
     return _sealed
 
 
-def probe() -> dict:
+def probe() -> dict[str, object]:
     """What this machine can enforce. Changes nothing.
 
     Worth calling before shipping: it is the difference between believing a
     boundary exists and knowing it does.
     """
-    return back().probe()
+    out: dict[str, object] = back().probe()
+    return out
 
 
 def _plan(policy: object, edits: Mapping[str, Any]) -> Policy:
@@ -100,7 +103,7 @@ def _scratch(policy: Policy) -> tuple[Policy, str | None]:
     return policy, None
 
 
-def on(policy: object = None, **edits: Any) -> dict:
+def on(policy: object = None, **edits: Any) -> dict[str, object]:
     """Confine this process. Permanently.
 
         import hlyn; hlyn.on()                     # deny all but the runtime
@@ -157,11 +160,11 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
         try:
             on(plan)
             out = ("ok", fn())
-        except BaseException as exc:  # report it rather than die silently
+        except BaseException as exc:  # noqa: BLE001 - report it rather than die silently
             out, code = ("no", exc), 1
         try:
             body = pickle.dumps(out)
-        except Exception:
+        except Exception:  # noqa: BLE001 - any pickling failure, not a known set
             # A result or exception that will not pickle must not look like a
             # crash, which is what an empty pipe would mean.
             body = pickle.dumps(("no", Failed(f"the result could not be returned: {out[0]}")))
@@ -185,7 +188,10 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
             )
         raise Failed(f"the confined child returned nothing (exit {os.WEXITSTATUS(status)})")
 
-    kind, value = pickle.loads(body)
+    # The bytes come from a child this process forked moments ago, over a pipe
+    # nothing else holds. It is not untrusted input; it is this program's own
+    # return value coming back across a process boundary.
+    kind, value = pickle.loads(body)  # noqa: S301
     if kind == "ok":
         return value
     raise value
@@ -217,4 +223,6 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
         plan = plan.with_(exec=grant)
 
     on(plan)
-    os.execv(where, list(cmd))
+    # No shell, deliberately: the command is executed as given, so nothing in
+    # it is ever interpreted as shell syntax.
+    os.execv(where, list(cmd))  # noqa: S606

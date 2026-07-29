@@ -16,11 +16,12 @@ Adding a framework is a drop-in file here. Nothing else needs to change.
 from __future__ import annotations
 
 import functools
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .. import jail, log
 
-__all__ = ["wrap", "tool", "attach"]
+__all__ = ["attach", "tool", "wrap"]
 
 
 def wrap(fn: Callable[..., Any], policy: object = None, **edits: Any) -> Callable[..., Any]:

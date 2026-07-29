@@ -10,7 +10,6 @@ from __future__ import annotations
 import sys
 
 import pytest
-
 from conftest import jail, killed
 
 pytestmark = pytest.mark.skipif(

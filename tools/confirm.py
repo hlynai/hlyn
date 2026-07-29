@@ -89,10 +89,10 @@ CASES = [
 
 def body(text: str, name: str) -> tuple[int, int]:
     """Where `name`'s definition starts and ends, so edits stay inside it."""
-    start = re.search(rf"^def {re.escape(name)}\(", text, re.M)
+    start = re.search(rf"^def {re.escape(name)}\(", text, re.MULTILINE)
     if not start:
         raise SystemExit(f"{SRC}: no function named {name}")
-    after = re.search(r"^(def |class |# ---)", text[start.end() :], re.M)
+    after = re.search(r"^(def |class |# ---)", text[start.end() :], re.MULTILINE)
     end = start.end() + (after.start() if after else len(text) - start.end())
     return start.start(), end
 
@@ -103,6 +103,7 @@ def suite_passes() -> bool:
         cwd=ROOT,
         capture_output=True,
         text=True,
+        check=False,
     )
     return done.returncode == 0
 

@@ -7,7 +7,7 @@ from "this machine cannot enforce it".
 
 from __future__ import annotations
 
-__all__ = ["Error", "Invalid", "Unsupported", "Sealed", "Failed"]
+__all__ = ["Error", "Failed", "Invalid", "Sealed", "Unsupported"]
 
 
 class Error(Exception):

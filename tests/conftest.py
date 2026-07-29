@@ -48,6 +48,7 @@ def jail(
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
     # A test whose body never compiled proves nothing, but it exits non-zero
     # and so reads exactly like a successfully blocked escape. Fail loudly
@@ -67,7 +68,11 @@ def boot(code: str) -> subprocess.CompletedProcess:
     """
     src = "\n".join(["import sys", f"sys.path.insert(0, {SRC!r})", textwrap.dedent(code)])
     done = subprocess.run(
-        [sys.executable, "-c", src], capture_output=True, text=True, timeout=120
+        [sys.executable, "-c", src],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
     )
     for fault in ("SyntaxError", "IndentationError", "ModuleNotFoundError"):
         if fault in done.stderr:

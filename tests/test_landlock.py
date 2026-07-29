@@ -13,7 +13,6 @@ import socket
 import sys
 
 import pytest
-
 from conftest import jail
 
 pytestmark = pytest.mark.skipif(
@@ -197,7 +196,7 @@ def test_a_symlink_cannot_leave_the_grant(box):
 
 
 def test_dotdot_cannot_leave_the_grant(box):
-    inside, outside = box
+    inside, _ = box
     done = jail(
         f"""
         try:

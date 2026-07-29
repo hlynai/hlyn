@@ -21,4 +21,19 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends clang lld \
  && rm -rf /var/lib/apt/lists/*
 
+# Supply chain. cargo-audit checks the dependency tree against RustSec's
+# advisory database; cargo-deny additionally enforces licences and refuses
+# duplicate or unmaintained crates.
+RUN cargo install --locked cargo-audit cargo-deny
+
+# The advisory database is a git repository, and cargo-deny shells out to clone
+# it. cargo-audit has its own git implementation and does not need this, which
+# is why the gap only shows up on the second tool.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
+# rust:slim ships without clippy.
+RUN rustup component add clippy
+
 WORKDIR /native

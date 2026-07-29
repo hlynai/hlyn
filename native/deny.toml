@@ -1,0 +1,38 @@
+# Supply-chain policy for the native shim.
+#
+# The whole reason this crate exists is to avoid hand-rolling Landlock's struct
+# layouts and ABI detection, which means trusting someone else's code in the
+# one place where a mistake is silent. That trade is only worth making if the
+# tree stays small and is checked -- twelve crates, all of them build-time
+# except landlock and libc.
+
+[advisories]
+version = 2
+# A yanked crate is one the author withdrew. Sometimes that is a trivial
+# packaging mistake and sometimes it is a security hole; either way it is not
+# something to link into a sandbox without noticing.
+yanked = "deny"
+
+[licenses]
+version = 2
+# The shim links landlock directly, so its licence terms are ours as well.
+# Kept to exactly what the tree uses, so adding a dependency under a new
+# licence is a decision someone has to make rather than one that slips through.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Currently two copies of syn, one under enumflags2's derive macro and one
+# under thiserror's. Both are build-time only and neither ends up in the
+# shipped library, so this is worth seeing and not worth failing on.
+multiple-versions = "warn"
+# A wildcard version is an open invitation to whatever gets published next.
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

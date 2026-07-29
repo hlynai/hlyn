@@ -22,7 +22,6 @@ from hypothesis import strategies as st
 from hlyn.error import Invalid, Unsupported
 from hlyn.policy import Policy, paths, ports, prune, under
 
-
 # ---------------------------------------------------------------------------
 # strategies
 # ---------------------------------------------------------------------------

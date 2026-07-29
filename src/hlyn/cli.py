@@ -15,13 +15,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import Sequence
+from collections.abc import Sequence
 
 from . import jail
 from .error import Error
 from .policy import Policy, presets
 
-__all__ = ["main", "build"]
+__all__ = ["build", "main"]
 
 
 def build() -> argparse.ArgumentParser:
@@ -33,13 +33,18 @@ def build() -> argparse.ArgumentParser:
 
     def grants(p: argparse.ArgumentParser) -> None:
         p.add_argument("-p", "--preset", metavar="NAME", help=f"one of: {', '.join(sorted(presets))}")
-        p.add_argument("--read", action="append", metavar="PATH", default=[], help="readable path (repeatable)")
-        p.add_argument("--write", action="append", metavar="PATH", default=[], help="writable path (repeatable)")
-        p.add_argument("--exec", action="append", metavar="PATH", default=[], help="runnable program (repeatable)")
+        p.add_argument("--read", action="append", metavar="PATH", default=[],
+                       help="readable path (repeatable)")
+        p.add_argument("--write", action="append", metavar="PATH", default=[],
+                       help="writable path (repeatable)")
+        p.add_argument("--exec", action="append", metavar="PATH", default=[],
+                       help="runnable program (repeatable)")
         p.add_argument("--exec-any", action="store_true", help="allow running any program")
-        p.add_argument("--net", action="append", metavar="PORT", type=int, default=[], help="reachable TCP port (repeatable)")
+        p.add_argument("--net", action="append", metavar="PORT", type=int, default=[],
+                       help="reachable TCP port (repeatable)")
         p.add_argument("--net-any", action="store_true", help="allow all network access")
-        p.add_argument("--env", action="append", metavar="NAME", default=[], help="environment variable to keep (repeatable)")
+        p.add_argument("--env", action="append", metavar="NAME", default=[],
+                       help="environment variable to keep (repeatable)")
         p.add_argument("--env-any", action="store_true", help="keep the whole environment, secrets included")
         p.add_argument("--no-tmp", action="store_true", help="do not provide a private scratch directory")
         p.add_argument("--log", metavar="PATH", help="write the record here instead of stderr")
@@ -60,7 +65,7 @@ def build() -> argparse.ArgumentParser:
 def _policy(args: argparse.Namespace) -> Policy:
     """Turn flags into a policy, without applying anything."""
     base = jail._plan(args.preset, {}) if args.preset else Policy()
-    edits: dict = {}
+    edits: dict[str, object] = {}
     if args.read:
         edits["read"] = list(base.read or ()) + args.read if isinstance(base.read, tuple) else args.read
     if args.write:
@@ -103,12 +108,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.verb == "show":
         p = _policy(args)
+        # Resolved once each: `reads` walks the interpreter's own installation
+        # to work out what the runtime needs, which is not something to do
+        # twice per field just to render it.
+        reads, writes, runs = p.reads(), p.writes(), p.runs()
         print(
             json.dumps(
                 {
-                    "read": p.reads() if p.reads() is True else list(p.reads()),
-                    "write": p.writes() if p.writes() is True else list(p.writes()),
-                    "exec": p.runs() if isinstance(p.runs(), bool) else list(p.runs()),
+                    "read": reads if isinstance(reads, bool) else list(reads),
+                    "write": writes if isinstance(writes, bool) else list(writes),
+                    "exec": runs if isinstance(runs, bool) else list(runs),
                     "net": p.net if isinstance(p.net, bool) else list(p.net),
                     "env": "all" if p.env is True else sorted(p.keep().keys()),
                     "tmp": p.tmp,

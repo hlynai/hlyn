@@ -17,7 +17,7 @@ import platform
 from ..policy import Policy
 from . import landlock, seccomp
 
-__all__ = ["load", "ready", "seal", "probe"]
+__all__ = ["load", "probe", "ready", "seal"]
 
 
 def ready() -> bool:
@@ -30,7 +30,7 @@ def ready() -> bool:
     return landlock.ready() and seccomp.ready()
 
 
-def probe() -> dict:
+def probe() -> dict[str, object]:
     """What this machine can actually enforce, without enforcing anything."""
     abi = landlock.abi()
     filter = seccomp.ready()

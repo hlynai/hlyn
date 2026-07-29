@@ -15,7 +15,7 @@ import sys
 from ..error import Unsupported
 from ..policy import Policy
 
-__all__ = ["load", "ready", "seal", "probe"]
+__all__ = ["load", "probe", "ready", "seal"]
 
 
 def ready() -> bool:
@@ -23,7 +23,7 @@ def ready() -> bool:
     return False
 
 
-def probe() -> dict:
+def probe() -> dict[str, object]:
     return {
         "platform": sys.platform,
         "machine": platform.machine(),

@@ -13,12 +13,11 @@ import sys
 import sysconfig
 
 import pytest
-
 from conftest import boot
+
 from hlyn import Policy, preset, presets, register, runtime
 from hlyn.error import Invalid, Unsupported
 from hlyn.policy import SAFE, names, paths, ports, prune, under
-
 
 # ---------------------------------------------------------------------------
 # deny by default

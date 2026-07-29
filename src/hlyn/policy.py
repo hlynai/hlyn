@@ -11,16 +11,18 @@ enforce it.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import site
 import sys
 import sysconfig
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from typing import Callable, Iterable, Mapping
+from typing import Literal
 
 from .error import Invalid, Unsupported
 
-__all__ = ["Policy", "preset", "register", "presets", "runtime", "SAFE"]
+__all__ = ["SAFE", "Policy", "preset", "presets", "register", "runtime"]
 
 
 # Environment variables kept when `env` scrubbing is on. Locale, paths, and the
@@ -200,19 +202,20 @@ def _roots() -> tuple[str, ...]:
         out.add(os.path.dirname(os.path.abspath(os.path.realpath(sys.executable))))
     try:
         config = sysconfig.get_paths()
-    except Exception:  # a broken sysconfig must not stop us from confining
+    except Exception:  # noqa: BLE001 - a broken sysconfig must not stop us confining
         config = {}
     for key in ("stdlib", "platstdlib", "purelib", "platlib", "data"):
-        item = config.get(key)
-        if item:
-            out.add(os.path.abspath(item))
-    try:
+        found = config.get(key)
+        if found:
+            out.add(os.path.abspath(found))
+    # A site layout this cannot read must not stop the process being
+    # confined; the worst case is a narrower policy, which is the safe way to
+    # be wrong.
+    with contextlib.suppress(Exception):
         out.update(os.path.abspath(item) for item in site.getsitepackages())
-    except Exception:
-        pass
     try:
         user = site.getusersitepackages()
-    except Exception:
+    except Exception:  # noqa: BLE001 - same reason: a narrower policy, not a crash
         user = None
     if isinstance(user, str) and user:
         out.add(os.path.abspath(user))
@@ -313,10 +316,10 @@ def runtime() -> tuple[str, ...]:
 
     # Import-path entries that belong to the interpreter. Entries outside these
     # roots are the user's own code and are not granted here.
-    for item in sys.path:
-        if not item or not os.path.isabs(item):
+    for entry in sys.path:
+        if not entry or not os.path.isabs(entry):
             continue
-        item = os.path.abspath(item)
+        item = os.path.abspath(entry)
         if any(under(item, root) for root in out):
             out.add(item)
 
@@ -376,7 +379,7 @@ class Policy:
     # because a caller who writes `write=["/out"]` expects to read back what
     # they wrote, and a named executable has to be readable to be run.
 
-    def reads(self) -> tuple[str, ...] | bool:
+    def reads(self) -> tuple[str, ...] | Literal[True]:
         """Everything readable, including the interpreter's own files."""
         if self.read is True:
             return True
@@ -388,7 +391,7 @@ class Policy:
             out.append(os.path.abspath(self.tmp))
         return prune(out)
 
-    def writes(self) -> tuple[str, ...] | bool:
+    def writes(self) -> tuple[str, ...] | Literal[True]:
         """Everything writable. The discard device is always included."""
         if self.write is True:
             return True
@@ -423,7 +426,7 @@ class Policy:
             allow.update(self.env)
         return {key: value for key, value in source.items() if key in allow}
 
-    def with_(self, **edits: object) -> "Policy":
+    def with_(self, **edits: object) -> Policy:
         """A copy with fields replaced. The original is untouched."""
         return replace(self, **edits)  # type: ignore[arg-type]
 
@@ -455,9 +458,9 @@ def preset(name: str) -> Policy:
 
 
 register("strict", lambda: Policy(tmp=False))
-register("coder", lambda: Policy(read=[os.getcwd()], write=[os.getcwd()], exec=True))
+register("coder", lambda: Policy(read=(os.getcwd(),), write=(os.getcwd(),), exec=True))
 register("web", lambda: Policy(net=True))
-register("data", lambda: Policy(read=[os.getcwd()], write=[os.getcwd()]))
+register("data", lambda: Policy(read=(os.getcwd(),), write=(os.getcwd(),)))
 # `debug` deliberately confines almost nothing. It exists to answer "what does
 # my agent actually touch?" before a real policy is written, and is the one
 # preset that must never be mistaken for protection.

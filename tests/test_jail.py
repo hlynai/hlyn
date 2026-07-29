@@ -9,7 +9,6 @@ from __future__ import annotations
 import sys
 
 import pytest
-
 from conftest import boot
 
 import hlyn

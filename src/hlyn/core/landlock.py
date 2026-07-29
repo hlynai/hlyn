@@ -13,12 +13,13 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
-from typing import Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from ..error import Failed, Invalid, Unsupported
 from ..policy import Policy
 
-__all__ = ["abi", "ready", "load", "seal"]
+__all__ = ["abi", "load", "ready", "seal"]
 
 
 # flags, matching native/src/lib.rs
@@ -121,7 +122,7 @@ def ready() -> bool:
 # -- turning a policy into a plan -------------------------------------------
 
 
-def _paths(value, missing: list[str]) -> list[bytes]:
+def _paths(value: tuple[str, ...] | bool, missing: list[str]) -> list[bytes]:
     """Encode a grant as paths. `True` means the whole tree."""
     if value is True:
         return [b"/"]
@@ -136,7 +137,7 @@ def _paths(value, missing: list[str]) -> list[bytes]:
     return out
 
 
-def _array(items: Sequence[bytes]):
+def _array(items: Sequence[bytes]) -> tuple[Any, int]:
     """A C array of string pointers, or NULL when empty."""
     if not items:
         return None, 0
@@ -144,7 +145,7 @@ def _array(items: Sequence[bytes]):
     return block, len(items)
 
 
-def _ports(items: Sequence[int]):
+def _ports(items: Sequence[int]) -> tuple[Any, int]:
     if not items:
         return None, 0
     block = (ctypes.c_uint16 * len(items))(*items)

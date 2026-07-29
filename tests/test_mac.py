@@ -11,7 +11,6 @@ import os
 import sys
 
 import pytest
-
 from conftest import jail
 
 pytestmark = pytest.mark.skipif(
@@ -253,8 +252,9 @@ def test_profile_grants_the_root_directory_node():
 def test_framework_python_can_reach_its_inner_interpreter():
     # bin/pythonX.Y is a stub that re-execs Resources/Python.app. Granting
     # execute on the stub alone fails with a bare posix_spawn error.
-    from hlyn.policy import loader
     import os as _os
+
+    from hlyn.policy import loader
 
     inner = _os.path.join(sys.prefix, "Resources")
     if not _os.path.exists(inner):

@@ -12,10 +12,9 @@ from __future__ import annotations
 import sys
 
 import pytest
-
 from conftest import boot
 
-from hlyn.hooks import SPOTS, attach, tool, wrap
+from hlyn.hooks import SPOTS, attach, wrap
 
 REAL = sys.platform in ("linux", "darwin")
 here = pytest.mark.skipif(not REAL, reason="no enforcement backend on this platform")

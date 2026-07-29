@@ -24,12 +24,12 @@ import ctypes
 import ctypes.util
 import os
 import sys
-from typing import Iterable
+from collections.abc import Iterable
 
 from ..error import Failed, Invalid, Unsupported
 from ..policy import Policy
 
-__all__ = ["load", "ready", "seal", "profile", "probe"]
+__all__ = ["load", "probe", "profile", "ready", "seal"]
 
 
 # The interpreter cannot start without these. They grant no access to user
@@ -85,7 +85,7 @@ def ready() -> bool:
     return True
 
 
-def probe() -> dict:
+def probe() -> dict[str, object]:
     """What this machine can actually enforce, without enforcing anything."""
     import platform as system
 

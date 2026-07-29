@@ -17,12 +17,12 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import platform
-from typing import Iterable
+from collections.abc import Iterable
 
 from ..error import Failed, Unsupported
 from ..policy import Policy
 
-__all__ = ["load", "ready", "SHUT", "why"]
+__all__ = ["SHUT", "load", "ready", "why"]
 
 
 # -- libseccomp constants ---------------------------------------------------
@@ -228,7 +228,7 @@ def ready() -> bool:
 
 def _nr(name: str) -> int:
     """Resolve a syscall name on this architecture, or BAD if it has none."""
-    return lib().seccomp_syscall_resolve_name(name.encode())
+    return int(lib().seccomp_syscall_resolve_name(name.encode()))
 
 
 def _rule(ctx: int, action: int, name: str, args: Iterable[Arg] = ()) -> None:

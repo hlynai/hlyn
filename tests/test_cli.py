@@ -13,7 +13,6 @@ import subprocess
 import sys
 
 import pytest
-
 from conftest import SRC
 
 REAL = sys.platform in ("linux", "darwin")
@@ -37,6 +36,7 @@ def hlyn(*args: str) -> subprocess.CompletedProcess:
         text=True,
         timeout=120,
         env=env,
+        check=False,
     )
 
 

@@ -19,13 +19,14 @@ version deliberately does not have.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
 import time
 from typing import Any, TextIO
 
-__all__ = ["emit", "sink", "seal", "deny", "allow", "off"]
+__all__ = ["allow", "deny", "emit", "off", "seal", "sink"]
 
 
 _where: TextIO | None = None
@@ -42,7 +43,10 @@ def sink(target: bool | str | TextIO = True) -> None:
     if target is True:
         _where = None  # resolved to stderr at write time
     elif isinstance(target, str):
-        _where = open(target, "a", buffering=1, encoding="utf-8")
+        # Held open for the life of the process on purpose: this is a sink,
+        # not a one-shot write, and reopening per record would lose ordering
+        # between agents sharing a file.
+        _where = open(target, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
     else:
         _where = target
 
@@ -58,12 +62,12 @@ def emit(kind: str, **fields: Any) -> None:
     if not _on:
         return
     row = {"t": round(time.time(), 3), "kind": kind, "pid": os.getpid(), **fields}
-    try:
+    # Never raises: a record that cannot be written must not take the agent
+    # down with it. The boundary is what matters; the log is evidence about it.
+    with contextlib.suppress(Exception):
         stream = _where if _where is not None else sys.stderr
         stream.write(json.dumps(row, default=str) + "\n")
         stream.flush()
-    except Exception:
-        pass
 
 
 def _shape(value: Any) -> Any:

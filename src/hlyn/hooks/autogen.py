@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import attach as _attach, wrap
+from . import attach as _attach
+from . import wrap
 
 __all__ = ["attach"]
 

@@ -20,6 +20,49 @@ dev = ["pytest>=8", "hypothesis>=6", "mutmut>=3"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/hlyn"]
 
+[tool.ruff]
+# The longest lines here are argparse declarations, where one flag per line is
+# more readable than the same flag wrapped across three.
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F",  # pycodestyle, pyflakes
+    "I",            # import order
+    "UP",           # constructs that a supported Python does better
+    "B",            # bugbear: the mistakes that look correct
+    "SIM", "FURB",  # simplifications
+    "S",            # bandit: worth having in a security tool
+    "BLE",          # blind excepts, which this codebase uses deliberately and
+                    # therefore has to justify one at a time
+    "PLC", "PLE", "PLW",
+    "RUF",
+]
+ignore = [
+    # Lazy imports are load-bearing here. The platform backends must never be
+    # imported on the platform they cannot run on, and `import hlyn` has to
+    # stay cheap enough that nothing about it can fail before a policy exists.
+    "PLC0415",
+    # Module-level state -- the loaded shim, the seal flag, the log sink -- is
+    # deliberately process-wide, because that is the scope of the thing it
+    # describes. A process is either sealed or it is not.
+    "PLW0603",
+]
+# PLR is deliberately absent: it counts branches and arguments, and the
+# functions here that trip it are the ones that must handle every case.
+
+[tool.ruff.lint.per-file-ignores]
+# A test suite is asserts and subprocesses; flagging them says nothing.
+# Hardcoded /tmp paths in tests are the subject under test, not a mistake.
+"tests/*" = ["S101", "S603", "S607", "S108"]
+"tools/*" = ["S101", "S603", "S607"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src/hlyn"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Resolved against the rootdir, so the suite imports the package sitting next
