@@ -105,17 +105,35 @@ def ports(value: object, field: str = "net") -> tuple[int, ...] | bool:
     for item in value:
         if isinstance(item, bool):
             raise Invalid(f"{field}: expected a port number, got {item!r}.")
-        if isinstance(item, str) and not item.isdigit():
-            raise Unsupported(
-                f"{field}: host names are not enforceable yet, so {item!r} is refused "
-                f"rather than silently ignored. The kernel filters ports, not hosts. "
-                f"Use net=False to block all network access, net=True to allow it, or "
-                f"name the ports, e.g. net=[443]."
-            )
-        try:
+        if isinstance(item, str):
+            if not item.isdigit():
+                raise Unsupported(
+                    f"{field}: host names are not enforceable yet, so {item!r} is refused "
+                    f"rather than silently ignored. The kernel filters ports, not hosts. "
+                    f"Use net=False to block all network access, net=True to allow it, or "
+                    f"name the ports, e.g. net=[443]."
+                )
             port = int(item)
-        except (TypeError, ValueError):
-            raise Invalid(f"{field}: expected a port number, got {item!r}.") from None
+        elif isinstance(item, int):
+            port = item
+        else:
+            # Accept anything that converts to a whole number exactly, so a
+            # numpy integer or a Decimal works. Refuse anything that would have
+            # to be rounded: `int(1.5)` is 1, so accepting it would open a port
+            # the caller never named -- the same quiet substitution that host
+            # names are refused for above.
+            try:
+                port = int(item)
+            except (TypeError, ValueError):
+                raise Invalid(
+                    f"{field}: expected a port number, got {item!r} "
+                    f"({type(item).__name__})."
+                ) from None
+            if port != item:
+                raise Invalid(
+                    f"{field}: {item!r} is not a whole port number. Rounding it to "
+                    f"{port} would grant a different port than the one named."
+                )
         if not 0 < port < 65536:
             raise Invalid(f"{field}: {port} is not a port number (1-65535).")
         out.append(port)

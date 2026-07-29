@@ -314,6 +314,138 @@ def test_running_a_program_outside_the_grant_is_refused():
 
 
 # ---------------------------------------------------------------------------
+# network ports: the one enforcement path seccomp cannot help with
+#
+# A named-port net policy (net=[8080]) is deliberately left alone by seccomp
+# (core/seccomp.py only writes socket()-domain rules for the bool cases): a
+# classic BPF filter cannot dereference the sockaddr connect() is given, so it
+# has no way to tell "port 8080" from "port 9000". Only Landlock's NetPort can
+# express that distinction, which makes this the one place where the whole
+# boundary rests on a single backend with no second layer behind it. That is
+# exactly why it needs to be proven directly rather than trusted by inspection.
+# ---------------------------------------------------------------------------
+
+
+def test_a_granted_port_is_reachable():
+    # ECONNREFUSED (nothing listening) proves the connect() itself was let
+    # through. A PermissionError here would mean the grant does nothing.
+    done = jail(
+        """
+        import socket
+        try:
+            socket.create_connection(("127.0.0.1", 8080), timeout=1)
+        except ConnectionRefusedError:
+            print("REACHED"); raise SystemExit(0)
+        except PermissionError:
+            print("BLOCKED"); raise SystemExit(1)
+        print("UNEXPECTED"); raise SystemExit(1)
+        """,
+        policy="Policy(net=[8080])",
+        seal=SEAL,
+    )
+    assert done.returncode == 0, f"a granted port was not reachable: {done.stdout} {done.stderr}"
+
+
+def test_an_ungranted_port_is_refused():
+    done = jail(
+        """
+        import socket
+        try:
+            socket.create_connection(("127.0.0.1", 9000), timeout=1)
+        except PermissionError:
+            print("REFUSED"); raise SystemExit(0)
+        print("ESCAPED"); raise SystemExit(1)
+        """,
+        policy="Policy(net=[8080])",
+        seal=SEAL,
+    )
+    assert done.returncode == 0, f"connected to a port outside the grant: {done.stdout}"
+
+
+def test_an_adjacent_port_is_refused():
+    # An off-by-one in the port comparison would be invisible unless the port
+    # right next to a granted one is checked specifically.
+    done = jail(
+        """
+        import socket
+        for port in (8079, 8081):
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=1)
+            except PermissionError:
+                continue
+            print("ESCAPED", port); raise SystemExit(1)
+        print("REFUSED"); raise SystemExit(0)
+        """,
+        policy="Policy(net=[8080])",
+        seal=SEAL,
+    )
+    assert done.returncode == 0, f"an adjacent port was reachable: {done.stdout}"
+
+
+def test_ipv6_gets_the_same_port_enforcement_as_ipv4():
+    # Landlock's net rules are matched by port number, not address family.
+    # Nothing in core/seccomp.py distinguishes AF_INET from AF_INET6 either
+    # (net is False is the only condition it checks), so IPv6 traffic for a
+    # named-port policy reaches Landlock exactly as unfiltered as IPv4 does.
+    # If Landlock's own port match were somehow IPv4-only, this is the test
+    # that would catch it.
+    done = jail(
+        """
+        import socket
+        try:
+            socket.create_connection(("::1", 9000), timeout=1)
+        except PermissionError:
+            print("REFUSED"); raise SystemExit(0)
+        except OSError as exc:
+            print("NO IPV6", exc); raise SystemExit(0)
+        print("ESCAPED"); raise SystemExit(1)
+        """,
+        policy="Policy(net=[8080])",
+        seal=SEAL,
+    )
+    assert done.returncode == 0, f"IPv6 bypassed port enforcement: {done.stdout}"
+
+
+def test_a_connect_only_grant_does_not_allow_binding():
+    # policy.py grants outbound reach for named ports, deliberately not a
+    # listener (jail.py comment: "accepting inbound connections... an agent
+    # should have to ask for separately"). A bind() succeeding here would mean
+    # that design decision silently is not what ships.
+    done = jail(
+        """
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("0.0.0.0", 8080))
+        except PermissionError:
+            print("REFUSED"); raise SystemExit(0)
+        print("ESCAPED"); raise SystemExit(1)
+        """,
+        policy="Policy(net=[8080])",
+        seal=SEAL,
+    )
+    assert done.returncode == 0, f"bound a listener from a connect-only grant: {done.stdout}"
+
+
+def test_socket_creation_itself_is_not_gated():
+    # Landlock and seccomp both hook bind()/connect(), not socket(). A policy
+    # denying socket() outright would be a stricter boundary than documented
+    # and would break anything that constructs a socket object before
+    # deciding whether to use it.
+    done = jail(
+        """
+        import socket
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        print("OK")
+        """,
+        policy="Policy(net=[8080])",
+        seal=SEAL,
+    )
+    assert done.returncode == 0, f"plain socket() was blocked: {done.stdout} {done.stderr}"
+    assert "OK" in done.stdout
+
+
+# ---------------------------------------------------------------------------
 # what the machine reports
 # ---------------------------------------------------------------------------
 

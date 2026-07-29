@@ -6,7 +6,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends libseccomp2 \
  && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir pytest
+RUN pip install --no-cache-dir pytest hypothesis
 
 WORKDIR /work
 ENV PYTHONPATH=/work/src

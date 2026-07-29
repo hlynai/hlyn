@@ -15,7 +15,7 @@ dependencies = []
 hlyn = "hlyn.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "hypothesis>=6"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hlyn"]
