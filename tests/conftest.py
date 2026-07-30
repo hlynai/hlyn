@@ -53,7 +53,7 @@ def jail(
     # A test whose body never compiled proves nothing, but it exits non-zero
     # and so reads exactly like a successfully blocked escape. Fail loudly
     # instead of letting a broken test masquerade as a passing one.
-    for fault in ("SyntaxError", "IndentationError", "ModuleNotFoundError"):
+    for fault in ("SyntaxError", "IndentationError", "ModuleNotFoundError", "NameError"):
         if fault in done.stderr:
             raise AssertionError(f"the test body is broken, not the sandbox:\n{done.stderr}")
     return done
@@ -74,7 +74,7 @@ def boot(code: str) -> subprocess.CompletedProcess:
         timeout=120,
         check=False,
     )
-    for fault in ("SyntaxError", "IndentationError", "ModuleNotFoundError"):
+    for fault in ("SyntaxError", "IndentationError", "ModuleNotFoundError", "NameError"):
         if fault in done.stderr:
             raise AssertionError(f"the test body is broken, not the sandbox:\n{done.stderr}")
     return done

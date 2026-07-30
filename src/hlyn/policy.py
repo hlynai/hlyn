@@ -91,6 +91,18 @@ def ports(value: object, field: str = "net") -> tuple[int, ...] | bool:
     dereference the `sockaddr` pointer passed to `connect`. Accepting
     `net=["api.openai.com"]` here would imply an enforcement that does not
     exist, which is the one failure mode a containment layer must never have.
+
+    Named ports are **TCP only**, and this is worth reading twice, because it
+    is the one place where naming a port grants more than it appears to.
+    Landlock's network rules cover TCP bind and connect; UDP is outside them,
+    so `net=[443]` leaves UDP open. Traffic can still leave over DNS or QUIC.
+
+    It is left open rather than refused because closing it would take the whole
+    of UDP with it -- the same wall that stops host filtering stops us reading
+    a UDP port number, so it is all of UDP or none, and none breaks every
+    hostname lookup the agent makes. `net=False` blocks the lot, TCP and UDP
+    together, by refusing to create the socket at all; that is the setting to
+    use when nothing may leave.
     """
     if isinstance(value, bool):
         return value
@@ -350,6 +362,11 @@ class Policy:
 
     Frozen on purpose. A policy that can be edited after it has been checked
     is a policy that can be edited by whatever compromised the agent.
+
+    One caveat, stated here because it is the only field that grants more than
+    it reads: naming ports in `net` restricts **TCP only**. UDP stays open, so
+    traffic can still leave over DNS or QUIC. `net=False` closes everything.
+    See `ports` for why it cannot currently be narrower than that.
     """
 
     read: tuple[str, ...] | bool = ()

@@ -41,7 +41,7 @@ def build() -> argparse.ArgumentParser:
                        help="runnable program (repeatable)")
         p.add_argument("--exec-any", action="store_true", help="allow running any program")
         p.add_argument("--net", action="append", metavar="PORT", type=int, default=[],
-                       help="reachable TCP port (repeatable)")
+                       help="reachable TCP port, repeatable (TCP only: UDP stays open)")
         p.add_argument("--net-any", action="store_true", help="allow all network access")
         p.add_argument("--env", action="append", metavar="NAME", default=[],
                        help="environment variable to keep (repeatable)")

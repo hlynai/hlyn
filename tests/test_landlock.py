@@ -445,6 +445,62 @@ def test_socket_creation_itself_is_not_gated():
 
 
 # ---------------------------------------------------------------------------
+# the limit of a named port, pinned so it cannot drift quietly
+# ---------------------------------------------------------------------------
+#
+# Landlock's network rules cover TCP bind and connect and nothing else, so a
+# policy naming ports does not restrict UDP. That is a documented limit rather
+# than a bug -- seccomp cannot read a UDP port number any more than it can read
+# a host name, so the only alternative is refusing all of UDP, which breaks
+# every hostname lookup an agent makes.
+#
+# Both tests below run the whole backend, not just Landlock, because a limit
+# proved against one layer says nothing about what a user actually gets.
+
+BOTH = "linux.load"
+
+
+def test_a_named_port_does_not_restrict_udp():
+    # If this test ever fails, the limit has been closed and the docstrings on
+    # `ports` and `Policy`, plus the CLI help, are now lying in the other
+    # direction. Fix them, then delete this test.
+    done = jail(
+        """
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.sendto(b"x", ("127.0.0.1", 9))  # discard port, nothing listening
+        print("UDP OPEN")
+        """,
+        before="from hlyn.core import linux",
+        policy="Policy(net=[443])",
+        seal=BOTH,
+    )
+    assert "UDP OPEN" in done.stdout, (
+        "UDP is now restricted by a named port. That is an improvement, but the "
+        f"documented behaviour no longer matches: {done.stdout} {done.stderr}"
+    )
+
+
+def test_closing_the_network_closes_udp_too():
+    # The remedy the documentation points at has to actually work: net=False
+    # refuses the socket itself, so there is no UDP to send on.
+    done = jail(
+        """
+        import socket
+        try:
+            socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        except PermissionError:
+            print("REFUSED"); raise SystemExit(0)
+        print("ESCAPED"); raise SystemExit(1)
+        """,
+        before="from hlyn.core import linux",
+        policy="Policy(net=False)",
+        seal=BOTH,
+    )
+    assert "REFUSED" in done.stdout, f"net=False left UDP reachable: {done.stdout}"
+
+
+# ---------------------------------------------------------------------------
 # what the machine reports
 # ---------------------------------------------------------------------------
 

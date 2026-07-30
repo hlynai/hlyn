@@ -188,6 +188,14 @@ def load(policy: Policy) -> int:
             # Named ports grant outbound reach only. Binding a port accepts
             # inbound connections, which is a listener an agent should have to
             # ask for separately rather than receive by implication.
+            #
+            # These rules bind TCP alone. Landlock's network access covers TCP
+            # bind and connect and nothing else, so UDP is unrestricted here
+            # and traffic can still leave over DNS or QUIC. It is not an
+            # oversight: seccomp cannot read a UDP port number any more than it
+            # can read a host name, so the only reachable alternative is
+            # refusing all of UDP, which breaks every hostname lookup. `net`
+            # set to False closes both by refusing the socket outright.
             connects = policy.net
 
     ra, na = _array(reads)
