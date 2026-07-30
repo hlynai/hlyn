@@ -214,3 +214,112 @@ def test_threads_started_after_sealing_are_confined():
         """
     )
     assert "refused" in done.stdout, done.stdout + done.stderr
+
+
+# ---------------------------------------------------------------------------
+# closing the network used to close local IPC with it
+# ---------------------------------------------------------------------------
+#
+# `connect`, `bind`, `sendto` and friends carry no address family, so refusing
+# them by syscall number to close the network refused them on AF_UNIX too. The
+# old test only *created* an AF_UNIX socket and so never noticed; anything that
+# actually used one -- multiprocessing, a local database, SysLogHandler -- was
+# broken by `net=False`.
+
+
+def test_a_unix_socket_still_connects_when_the_network_is_closed():
+    done = boot(
+        """
+        import os, socket, time, hlyn
+        os.makedirs("/tmp/ipc", exist_ok=True)
+        s = "/tmp/ipc/s.sock"
+        if os.path.exists(s): os.unlink(s)
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(s); srv.listen(1)
+        if os.fork() == 0:
+            try:
+                srv.settimeout(8); conn, _ = srv.accept(); conn.send(b"ok"); time.sleep(1)
+            except Exception: pass
+            os._exit(0)
+        srv.close(); time.sleep(0.3)
+        hlyn.on(read=["/tmp/ipc"], write=["/tmp/ipc"], net=False, log=False)
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); c.settimeout(5)
+        try:
+            c.connect(s); print("connected", c.recv(4), flush=True)
+        except OSError as exc:
+            print("BROKEN", type(exc).__name__, flush=True)
+        os._exit(0)
+        """
+    )
+    assert "connected" in done.stdout, done.stdout + done.stderr
+
+
+def test_tcp_is_still_refused_when_the_network_is_closed():
+    """The other half: local IPC working must not have reopened the network."""
+    done = boot(
+        """
+        import socket, hlyn
+        hlyn.on(read=["/tmp"], net=False, log=False)
+        try:
+            socket.socket().connect(("127.0.0.1", 80))
+            print("ESCAPED")
+        except OSError as exc:
+            print("refused", type(exc).__name__)
+        """
+    )
+    assert "refused" in done.stdout, done.stdout + done.stderr
+    assert "ESCAPED" not in done.stdout
+
+
+def test_sealing_with_a_network_socket_already_open_is_refused():
+    """An open connection survives sealing: writing to it is an ordinary write.
+
+    Nothing in the filter can tell that descriptor from a file, so the only
+    honest answer is to refuse before the boundary is claimed.
+    """
+    done = boot(
+        """
+        import socket, hlyn
+        s = socket.socket(); s.settimeout(1)
+        try: s.connect(("127.0.0.1", 9))
+        except OSError: pass
+        try:
+            hlyn.on(read=["/tmp"], net=False, log=False)
+            print("SEALED ANYWAY")
+        except hlyn.Unsupported as exc:
+            print("refused:", exc)
+        """
+    )
+    assert "refused:" in done.stdout, done.stdout + done.stderr
+    assert "already open" in done.stdout
+
+
+def test_a_socket_open_is_fine_when_the_network_is_not_closed():
+    """The check must only fire when the policy actually claims a closed network."""
+    done = boot(
+        """
+        import socket, hlyn
+        s = socket.socket()
+        hlyn.on(read=["/tmp"], net=True, log=False)
+        print("sealed")
+        """
+    )
+    assert "sealed" in done.stdout, done.stdout + done.stderr
+
+
+def test_a_child_cannot_shed_the_boundary():
+    """fork, exec, and a new session all inherit the domain."""
+    done = boot(
+        """
+        import os, subprocess, sys, hlyn
+        hlyn.on(read=["/tmp"], exec=True, log=False)
+        code = ("try:\\n open('/etc/shadow').read(); print('ESCAPED')\\n"
+                "except OSError: print('refused')\\n")
+        for argv in ([sys.executable, "-c", code],
+                     ["/usr/bin/setsid", sys.executable, "-c", code]):
+            got = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+            print(argv[0].split("/")[-1], got.stdout.strip())
+        """
+    )
+    assert "ESCAPED" not in done.stdout, done.stdout + done.stderr
+    assert done.stdout.count("refused") == 2, done.stdout + done.stderr

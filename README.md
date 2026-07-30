@@ -323,6 +323,22 @@ always apply.) Rather than report a boundary with a hole in it, `hlyn.on()`
 top of the program, or use `hlyn.run(fn)`, which forks a single-threaded child
 and confines that.
 
+**A granted socket is a grant of whatever is on the other end.** Reaching a
+Unix socket needs a filesystem grant for the socket file, so a socket outside
+the policy — `/var/run/docker.sock`, say — is refused like any other path. But
+once a socket *is* granted, the process behind it can hand the agent an open
+descriptor (`SCM_RIGHTS`) for any file it likes, and a descriptor that arrives
+this way was never opened by the agent, so no path rule applies to it. Granting
+a socket path therefore grants everything the service behind it can do. Treat
+it as you would `exec` on that service.
+
+**Anything the agent can make something else run, it can run.** An agent that
+writes into a directory a cron job, git hook, CI runner or watcher picks up
+from has executed code outside the boundary without ever crossing it — the
+sandbox did exactly what the policy said. `hlyn audit` flags the well-known
+locations (`/etc/cron.d`, `/etc/profile.d`, anything on `PATH`), but it cannot
+know about a watcher you wrote. What is writable is the whole question.
+
 **A hardlink inside a granted directory reaches the file it points at.** Grants
 are paths, and a hardlink is a genuine second path to the same file — so a link
 planted in a granted directory before sealing is readable through it, whatever
@@ -354,6 +370,11 @@ Most of the suite is escape attempts, each of which fails the build if the
 escape succeeds. Neither platform can run the other's kernel tests, so a pass
 on one machine is not a pass — Landlock and seccomp tests skip on macOS,
 Seatbelt tests skip on Linux.
+
+`tests/test_escape.py` holds the escapes that once worked. Each was found by
+attacking the package rather than testing it, each was confirmed by putting the
+bug back and watching the test go red, and each is a shape of mistake the rest
+of the suite did not catch.
 
 `tools/mutate.sh` and `tools/fuzz.sh` run mutation testing and fuzzing;
 `tools/confirm.py` re-checks that the suite catches a specific list of mistakes

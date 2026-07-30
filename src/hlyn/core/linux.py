@@ -12,8 +12,10 @@ is in place. seccomp goes last and seals the result.
 
 from __future__ import annotations
 
+import os
 import platform
 
+from ..error import Unsupported
 from ..policy import Policy
 from . import landlock, seccomp
 
@@ -59,8 +61,51 @@ def probe() -> dict[str, object]:
     return out
 
 
+# getsockopt(SOL_SOCKET, SO_DOMAIN) reports the address family of an existing
+# socket. Linux-only, which is why it lives here.
+DOMAIN = 39
+INET = (2, 10, 17)  # AF_INET, AF_INET6, AF_PACKET
+
+
+def wired() -> list[int]:
+    """Network sockets this process already holds.
+
+    Closing the network stops new ones being made and stops an existing one
+    being bound or connected. Neither touches a socket that is *already*
+    connected: `write` on it is an ordinary write, and no filter here can tell
+    that descriptor from a file. So the honest thing is to look before sealing.
+    """
+    import socket
+
+    out: list[int] = []
+    try:
+        held = os.listdir("/proc/self/fd")
+    except OSError:
+        return out
+    for name in held:
+        try:
+            fd = int(name)
+            kind = socket.socket(fileno=fd).getsockopt(socket.SOL_SOCKET, DOMAIN)
+        except (OSError, ValueError):
+            continue  # not a socket, or already gone
+        if kind in INET:
+            out.append(fd)
+    return out
+
+
 def load(policy: Policy) -> int:
     """Apply `policy` to the calling process. One-way, and irreversible."""
+    if policy.net is False:
+        open_sockets = wired()
+        if open_sockets:
+            raise Unsupported(
+                f"the network is closed by this policy, and {len(open_sockets)} network "
+                f"socket(s) are already open (fd {', '.join(map(str, sorted(open_sockets)))}). "
+                f"An open connection keeps working after sealing -- writing to it is an "
+                f"ordinary write, and nothing here can tell that descriptor from a file. "
+                f"Refusing rather than reporting a closed network with a live connection "
+                f"through it. Close them before calling hlyn.on(), or use hlyn.run(fn)."
+            )
     abi = landlock.load(policy)
     seccomp.load(policy)
     return abi

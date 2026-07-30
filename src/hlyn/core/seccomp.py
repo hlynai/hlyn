@@ -156,10 +156,24 @@ SHUT: dict[str, str] = {
     "syslog": "reads the kernel log",
 }
 
-# Syscalls refused when the network is closed. Denying socket() by family is
-# the airtight part; the rest close paths that an inherited descriptor could
-# still take.
-WIRE: tuple[str, ...] = ("connect", "sendto", "sendmsg", "sendmmsg", "bind", "listen")
+# Deliberately empty, and this used to be
+# ("connect", "sendto", "sendmsg", "sendmmsg", "bind", "listen").
+#
+# Those syscalls do not carry an address family. Refusing them by number to
+# close the network also refused every one of them on AF_UNIX -- which the
+# comment above INET claims is left alone, and which `multiprocessing`, a local
+# database socket and `SysLogHandler` all need. `net=False` quietly broke local
+# IPC while a test that only *created* an AF_UNIX socket kept passing.
+#
+# Removing them costs nothing, because each thing they blocked is blocked
+# better elsewhere. Creating an INET socket is refused by family below, which
+# is exact. TCP bind and connect on a socket that already exists -- an
+# inherited one -- are refused by Landlock, which sees the address family the
+# filter cannot. What is left is an inherited socket that is *already
+# connected*, and the list never covered that anyway: `write` and `send` were
+# not on it. `linux.wired` closes that hole properly by refusing to seal at
+# all while such a descriptor is open.
+WIRE: tuple[str, ...] = ()
 
 # Creating a new program. Refused when exec is off entirely; when exec names
 # specific paths, Landlock enforces per-path and these stay open.
