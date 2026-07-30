@@ -112,6 +112,37 @@ current LTS distributions ship older kernels, and some ship Landlock disabled
 at boot; `hlyn probe` answers the question for a specific machine, and is the
 only answer worth trusting.
 
+## What it costs
+
+Nothing sits between the agent and the kernel, so there is nothing in the path
+to add delay. The measured numbers, from `tools/bench.sh` on Linux 6.12
+(aarch64, Landlock ABI 6):
+
+**Once, at startup.** `hlyn.on()` takes about **2 ms** for a small policy and
+about **3 ms** for one naming 64 paths. Landlock opens a descriptor per granted
+path, so that half grows with the policy; the syscall filter compiles a fixed
+BPF program and stays flat at roughly 1 ms.
+
+**Afterwards, per call.** Only the calls that ask permission pay, and they ask
+once:
+
+| Call | Added |
+|---|---|
+| `open` | ~90 ns |
+| `bind` | ~0.5 µs |
+| `connect` | under its own variance; bounded at a few hundred ns |
+| `read`, `write`, `stat`, `getpid` | at or below the noise floor |
+
+A descriptor or connection that is already open is never re-checked, so
+throughput through it is untouched. For comparison, enforcing a network policy
+with a proxy in the connection path costs an extra TCP handshake and usually a
+TLS terminate and re-originate **per connection** — three to four orders of
+magnitude more, paid repeatedly rather than once.
+
+`tools/bench.py` documents the method, and each measuring process proves the
+boundary was actually applied before its numbers are believed — a filter that
+silently failed to load would benchmark beautifully.
+
 ## Known limits
 
 Stated here because a containment layer that overstates itself is worse than
@@ -154,7 +185,8 @@ Seatbelt tests skip on Linux.
 
 `tools/mutate.sh` and `tools/fuzz.sh` run mutation testing and fuzzing;
 `tools/confirm.py` re-checks that the suite catches a specific list of mistakes
-it has caught before.
+it has caught before. `tools/bench.sh` measures what confinement costs, and
+produces the numbers above.
 
 ## Licence
 
