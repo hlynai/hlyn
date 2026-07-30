@@ -12,6 +12,7 @@ pretends to restore anything on exit. The three entry points differ only in
 
 from __future__ import annotations
 
+import json
 import os
 import pickle
 import shutil
@@ -140,6 +141,16 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
 
     plan, box = _scratch(_plan(policy, edits))
 
+    # Read the signing key before the environment is scrubbed, which is in a
+    # moment. It is named by an environment variable and is not in the safe
+    # list -- correctly, since it is a secret -- so reading it any later gets
+    # nothing and the record comes out silently unsigned.
+    secret = None
+    if isinstance(plan.attest, str):
+        from . import attest as _attest
+
+        secret = _attest.key()
+
     # Scrub before sealing, not after: if the seal fails halfway, the secrets
     # are already gone rather than left sitting in a half-confined process.
     keep = plan.keep()
@@ -154,9 +165,36 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
     elif isinstance(plan.log, str):
         log.sink(plan.log)
 
-    level = back().load(plan)
+    # Opened before sealing, written after, so it cannot be a `with` block: the
+    # record describes a boundary that is already in place, and a confined
+    # process cannot open a path the policy does not grant. Requiring the
+    # policy to grant its own evidence file would add a writable path nobody
+    # asked for -- and one the agent could then edit. The descriptor is closed
+    # on every path below.
+    proof = (
+        open(plan.attest, "w", encoding="utf-8")  # noqa: SIM115
+        if isinstance(plan.attest, str)
+        else None
+    )
+
+    try:
+        level = back().load(plan)
+    except BaseException:
+        if proof is not None:
+            proof.close()
+        raise
+
     _sealed = True
     log.seal(plan, back().__name__, level, box)
+
+    if proof is not None:
+        from . import attest
+
+        with proof:
+            record = attest.make(plan, back().__name__, level, box)
+            json.dump(attest.sign(record, secret), proof, indent=2)
+            proof.write("\n")
+
     return {"policy": plan, "tmp": box, "level": level, "backend": back().__name__}
 
 

@@ -384,6 +384,7 @@ class Policy:
     env: tuple[str, ...] | bool = False
     tmp: bool | str = True
     log: bool | str = True
+    attest: bool | str = False
 
     def __post_init__(self) -> None:
         put = object.__setattr__  # frozen dataclass, so assign through the base
@@ -396,6 +397,8 @@ class Policy:
             raise Invalid(f"tmp: expected a bool or a directory, got {self.tmp!r}.")
         if not isinstance(self.log, (bool, str)):
             raise Invalid(f"log: expected a bool or a file path, got {self.log!r}.")
+        if not isinstance(self.attest, (bool, str)):
+            raise Invalid(f"attest: expected a file path or False, got {self.attest!r}.")
 
     # -- derived views ------------------------------------------------------
     #

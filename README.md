@@ -117,6 +117,7 @@ the right direction to be wrong in.
 | `env` | Environment variables that survive | Only names known not to carry secrets |
 | `tmp` | A private scratch directory | Yes |
 | `log` | Where the record goes | stderr |
+| `attest` | Where to write a record of what was enforced | Off |
 
 Each takes `False` for nothing, `True` for everything, or an explicit list.
 Presets cover the common shapes: `strict`, `coder`, `web`, `data`, and `debug`
@@ -186,6 +187,98 @@ magnitude more, paid repeatedly rather than once.
 boundary was actually applied before its numbers are believed — a filter that
 silently failed to load would benchmark beautifully.
 
+## Auditing a policy
+
+A policy can be valid, enforced exactly as written, and still hand the agent
+everything. The dangerous grants are rarely one field — they are two
+reasonable-looking fields that combine, and each half passes review on its own.
+
+```bash
+hlyn audit -f policy.toml
+```
+
+```
+!! critical the agent can read credentials (/root) and reach TCP 443
+              these are the two halves of exfiltration; either alone is a risk,
+              and together they are a route
+    fix:      remove one half. Closing the network is usually easier than
+              narrowing the read, and `net=False` closes UDP too
+    waive as: exfiltration:TCP 443
+```
+
+It exits non-zero when something is outstanding, so it belongs in CI rather
+than in a report someone means to read. Among what it looks for:
+
+| Finding | Why it matters |
+|---|---|
+| `write-exec` | Write a program and then run it — every other grant becomes a starting point |
+| `exfiltration` | Credentials readable *and* a network to send them over |
+| `credential-reach` | A grant covering `~/.ssh`, `~/.aws`, `/etc/shadow` — often without naming any of them, as `read=["/root"]` does |
+| `interpreter-exec` | `exec=["/usr/bin/python3"]` — the allowlist governs which *file* runs, and an interpreter runs whatever it is handed |
+| `hijack` | Write access somewhere programs get found and loaded |
+| `evidence` | The log written somewhere the agent can also write, so it can edit the record of what it did |
+| `widened` | A path named in the file that a broader one already covers, so the kernel never sees it |
+
+This is analysis, not proof — direct checks against the policy's own resolved
+grants, with no solver, because the policy model is small enough that a solver
+would be answering a question you can look up. It can tell you a grant is there
+and what it makes possible. It cannot tell you whether it is justified.
+
+## Accepting a risk
+
+A finding that cannot be waived gets the whole check switched off, so waiving
+is what keeps it on. What matters is that the decision is recorded:
+
+```toml
+[[accepted]]
+finding = "interpreter-exec:/usr/bin/python3"
+reason  = "the agent is a Python coding assistant; running Python is the job"
+by      = "karan@hlyn.dev"
+until   = "2026-12-31"
+```
+
+```bash
+hlyn audit -f policy.toml -a risks.toml
+```
+
+That file is a risk register, and it is the artifact SOC 2 and ISO 27001 ask
+for — produced as a side effect of a check that runs on every build rather than
+a spreadsheet someone remembers to update. Three rules, each because the
+alternative rots quietly:
+
+- **`until` is required.** A waiver with no end date is how a temporary
+  exception becomes permanent without anyone deciding it should. An expired one
+  stops waiving and becomes a finding.
+- **A waiver matching nothing is reported as stale.** The policy moved on; left
+  in place, it would silently waive the next real occurrence.
+- **Every field is required.** An acceptance with an empty reason records that
+  someone wanted the build to pass, not that anyone decided anything.
+
+Add `--ocsf` to emit findings as OCSF v1.7.0 Compliance Findings, so a SIEM
+ingests them with no parser written for us.
+
+## Attesting a run
+
+```bash
+hlyn run --attest run.json -f policy.toml -- python agent.py
+hlyn verify run.json
+```
+
+hlyn refuses to seal when the kernel would apply less than the whole policy —
+which is what makes a record worth keeping. A seal that happened is one that
+happened *in full*, so the record says which policy was **enforced**, not which
+was requested. It carries the policy as written, the grants as resolved, the
+kernel, the backend, and the ABI level.
+
+Worth being exact about what that buys, since attestation is a word that gets
+oversold. The record is tamper-**evident**: it carries a digest over its own
+contents, and an HMAC too when `HLYN_ATTEST_KEY` names a key file. It is **not**
+proof against the confined process itself — a process holding the signing key
+can sign what it likes, and no cryptography inside a machine settles a question
+about that machine. Real non-repudiation needs a signer the agent cannot reach.
+That is a deliberate hole: this package has no network component and does not
+pretend to be its own trust root.
+
 ## The record
 
 One JSON object per line, to stderr by default or to a file when the policy
@@ -248,7 +341,9 @@ Seatbelt tests skip on Linux.
 `tools/mutate.sh` and `tools/fuzz.sh` run mutation testing and fuzzing;
 `tools/confirm.py` re-checks that the suite catches a specific list of mistakes
 it has caught before. `tools/bench.sh` measures what confinement costs, and
-produces the numbers above.
+produces the numbers above. `tools/sbom.sh` writes a CycloneDX SBOM for both
+dependency trees — the Python package, which depends on nothing at runtime, and
+the Rust shim, where the real supply chain is.
 
 ## Licence
 

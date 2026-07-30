@@ -39,14 +39,14 @@ from typing import Any
 from .error import Invalid
 from .policy import Policy
 
-__all__ = ["build", "dumps", "load", "loads", "shape"]
+__all__ = ["build", "dumps", "load", "loads", "raw", "shape"]
 
 
 # Every field a policy file may set, which is every field `Policy` has. Kept as
 # an explicit tuple rather than read off the dataclass so that adding a field to
 # `Policy` is a deliberate decision to expose it in a file, not an automatic
 # one.
-FIELDS: tuple[str, ...] = ("read", "write", "exec", "net", "env", "tmp", "log")
+FIELDS: tuple[str, ...] = ("read", "write", "exec", "net", "env", "tmp", "log", "attest")
 
 # Paths in these fields resolve against the file's own directory. `net` and
 # `env` hold ports and variable names, and `tmp` and `log` are locations the
@@ -208,6 +208,27 @@ def loads(text: str, kind: str = "toml", root: str | None = None) -> Policy:
             "granted, say so explicitly, e.g. `read = []`."
         )
     return build(got, root)
+
+
+def raw(path: str | os.PathLike[str]) -> dict[str, Any]:
+    """The document as written, before it becomes a `Policy`.
+
+    Needed by the audit, which has findings about the difference between the
+    two: a path named in the file and then swallowed by a broader one in the
+    same field is gone by the time a `Policy` exists, and it is exactly the
+    kind of thing a reviewer should be told about.
+    """
+    where = os.path.abspath(os.fspath(path))
+    kind = os.path.splitext(where)[1].lstrip(".").lower()
+    parse = KINDS.get(kind)
+    if parse is None:
+        return {}
+    try:
+        with open(where, encoding="utf-8") as fh:
+            got = parse(fh.read())
+    except (OSError, Invalid):
+        return {}
+    return dict(got) if isinstance(got, Mapping) else {}
 
 
 def load(path: str | os.PathLike[str]) -> Policy:
