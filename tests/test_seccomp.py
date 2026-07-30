@@ -301,6 +301,142 @@ def test_subprocess_is_refused_when_exec_is_closed():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# routes around Landlock rather than through it
+# ---------------------------------------------------------------------------
+#
+# Landlock decides whether a path may be opened. Everything below reaches a
+# file, a program, or the outside world without resolving a path at all, so
+# Landlock never sees it and only the syscall filter can refuse it.
+
+
+def test_stealing_a_descriptor_from_another_process_is_shut():
+    # pidfd_getfd lifts an already-open descriptor out of another process.
+    # Landlock governs opening a path, not using a descriptor that is already
+    # open, so a sibling holding a secret file open would hand over the whole
+    # filesystem boundary without a path ever being resolved.
+    done = jail(
+        RAW + "\ncall(nr, 0, 0, 0)\nprint('ESCAPED')",
+        before="nr = seccomp._nr('pidfd_getfd')",
+    )
+    assert killed(done), f"pidfd_getfd was reachable: rc={done.returncode}"
+
+
+def test_running_a_program_with_no_path_is_shut():
+    # The fileless exec: write a program into anonymous memory, then run it
+    # straight from the descriptor. There is no path, so an exec allowlist --
+    # which Landlock enforces per path -- has nothing to match against.
+    done = jail(
+        RAW + """
+import os
+fd = os.memfd_create("payload")
+os.write(fd, open("/bin/true", "rb").read())
+call(nr, fd, empty, 0, 0, 0x1000)
+print('ESCAPED')
+""",
+        before=(
+            "nr = seccomp._nr('execveat')\n"
+            "import ctypes\n"
+            "empty = ctypes.cast(ctypes.create_string_buffer(b''), ctypes.c_void_p).value"
+        ),
+        policy="Policy(exec=['/bin/true'])",
+    )
+    assert killed(done), f"a program with no path ran: rc={done.returncode} {done.stdout}"
+
+
+def test_ordinary_execveat_still_works():
+    # The block is on one flag, not on the syscall. Refusing execveat outright
+    # would break every launcher that uses it in its ordinary form, so the same
+    # syscall is called here with a real path and no AT_EMPTY_PATH, and must
+    # run the program.
+    done = jail(
+        RAW + """
+import ctypes, os
+path = ctypes.create_string_buffer(b"/bin/true")
+argv = (ctypes.c_char_p * 2)(ctypes.cast(path, ctypes.c_char_p), None)
+envp = (ctypes.c_char_p * 1)(None)
+AT_FDCWD = -100
+
+pid = os.fork()
+if pid == 0:
+    call(nr, AT_FDCWD, ctypes.addressof(path),
+         ctypes.addressof(argv), ctypes.addressof(envp), 0)
+    os._exit(3)  # only reached if execveat refused to run it
+_, status = os.waitpid(pid, 0)
+print("RAN" if status == 0 else f"REFUSED {status}")
+""",
+        before="nr = seccomp._nr('execveat')",
+        policy="Policy(exec=['/bin/true'], read=['/bin'])",
+    )
+    assert "RAN" in done.stdout, f"an ordinary execveat was refused: {done.stdout} {done.stderr}"
+
+
+@pytest.mark.parametrize(("domain", "what"), [(40, "vsock"), (31, "bluetooth")])
+def test_a_domain_outside_the_network_policy_is_shut(domain, what):
+    # AF_VSOCK talks to the host rather than to the network, so `net` does not
+    # describe it; AF_BLUETOOTH likewise. Both are refused whatever `net` says.
+    #
+    # The socket is created once before sealing. Without that, a kernel that
+    # refuses the domain for its own reasons -- no vsock device, no bluetooth
+    # stack -- makes this test pass while proving nothing, which is exactly
+    # what it did before the check was added.
+    done = jail(
+        f"""
+        if not open_before:
+            print("UNAVAILABLE"); raise SystemExit(0)
+        try:
+            socket.socket({domain}, socket.SOCK_STREAM)
+        except PermissionError:
+            print("REFUSED"); raise SystemExit(0)
+        print("ESCAPED"); raise SystemExit(1)
+        """,
+        before=f"""
+import socket
+try:
+    socket.socket({domain}, socket.SOCK_STREAM).close()
+    open_before = True
+except OSError:
+    open_before = False
+""",
+        policy="Policy(net=True)",
+    )
+    if "UNAVAILABLE" in done.stdout:
+        pytest.skip(f"this kernel has no {what} support, so there is nothing to refuse")
+    assert "REFUSED" in done.stdout, f"{what} was reachable: {done.stdout}"
+
+
+def test_kernel_subsystems_over_netlink_are_shut():
+    # Netlink reaches kernel subsystems rather than the network. Protocol 0 is
+    # the exception and has its own test below.
+    done = jail(
+        """
+        import socket
+        try:
+            socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 9)  # NETLINK_AUDIT
+        except PermissionError:
+            print("REFUSED"); raise SystemExit(0)
+        print("ESCAPED"); raise SystemExit(1)
+        """,
+        policy="Policy(net=True)",
+    )
+    assert "REFUSED" in done.stdout, f"a netlink subsystem was reachable: {done.stdout}"
+
+
+def test_interface_enumeration_still_works():
+    # NETLINK_ROUTE is how getifaddrs(3) enumerates interfaces, and Python,
+    # Node, Go and most HTTP clients call it while starting up. Refusing it
+    # would break the agent before it ran.
+    done = jail(
+        """
+        import socket
+        socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0).close()  # NETLINK_ROUTE
+        print("OK")
+        """,
+        policy="Policy(net=True)",
+    )
+    assert "OK" in done.stdout, f"NETLINK_ROUTE was refused, which breaks startup: {done.stderr}"
+
+
 def test_shut_list_resolves_on_this_architecture():
     # A typo in a syscall name is silently skipped by design, since some
     # syscalls genuinely do not exist per architecture. That tolerance would

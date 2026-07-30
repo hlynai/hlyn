@@ -36,6 +36,7 @@ ENOSYS = 38
 NNP = 3  # SCMP_FLTATR_CTL_NNP
 TSYNC = 4  # SCMP_FLTATR_CTL_TSYNC
 
+NE = 1  # SCMP_CMP_NE
 EQ = 4  # SCMP_CMP_EQ
 MASKED = 7  # SCMP_CMP_MASKED_EQ
 
@@ -46,6 +47,26 @@ BAD = -1  # __NR_SCMP_ERROR: syscall unknown on this architecture
 INET = 2
 INET6 = 10
 PACKET = 17
+
+# Domains refused whatever the network policy says. `net` describes reach over
+# IP; these cross boundaries it does not describe, and no agent has a reason to
+# use either. VSOCK in particular talks to the hypervisor, so on a virtualised
+# host it points at the one place outside the machine entirely.
+VSOCK = 40
+BLUETOOTH = 31
+
+# Netlink talks to kernel subsystems rather than to the network. Protocol 0 is
+# NETLINK_ROUTE, which `getifaddrs(3)` needs -- Python, Node, Go and most HTTP
+# clients call it while starting up, so refusing it breaks the agent before it
+# runs. Writing through it still needs CAP_NET_ADMIN, which nothing here has.
+NETLINK = 16
+ROUTE = 0
+
+# execveat(2) flag. With it, the pathname may be empty and the program is taken
+# from the descriptor alone -- so a program written into anonymous memory can be
+# run without ever having a path. Landlock enforces an exec allowlist per path,
+# and has nothing to match against when there is no path.
+EMPTY = 0x1000  # AT_EMPTY_PATH
 
 # clone(2) flags that build a new namespace. Each is refused individually
 # because a masked comparison can only test for equality, not for "any of".
@@ -75,6 +96,19 @@ SHUT: dict[str, str] = {
     "ptrace": "reads and writes another process's memory",
     "process_vm_readv": "reads another process's memory",
     "process_vm_writev": "writes another process's memory",
+    # The same attack by a newer route, and the reason it is easy to miss:
+    # Landlock governs *opening* a path, not *using* a descriptor that is
+    # already open. `pidfd_getfd` lifts an open descriptor straight out of
+    # another process, so a sibling holding a secret file open hands over the
+    # whole filesystem boundary without a path ever being resolved.
+    #
+    # Its siblings `pidfd_open` and `pidfd_send_signal` are deliberately not
+    # here. A handle by itself steals nothing, blocking it does not stop the
+    # theft (a pidfd also arrives via clone(CLONE_PIDFD)), and signalling is
+    # already handled correctly one layer down -- Landlock's signal scoping
+    # allows it inside the agent's own domain and refuses it outside, which is
+    # the behaviour we want and a blanket refusal here would destroy.
+    "pidfd_getfd": "takes an open file descriptor from another process",
     # Loading code into the kernel.
     "init_module": "loads kernel code",
     "finit_module": "loads kernel code",
@@ -290,6 +324,18 @@ def load(policy: Policy) -> None:
         _rule(ctx, ERROR | ENOSYS, "clone3")
         for flag in NEW.values():
             _rule(ctx, KILL, "clone", [Arg(0, MASKED, flag, flag)])
+
+        # Running a program straight out of a descriptor, with no path for an
+        # allowlist to match. The flag is a plain register here, unlike clone3's
+        # struct, so the one dangerous form is refused and ordinary execveat
+        # keeps working. `memfd_create` itself stays open: making anonymous
+        # memory is not the dangerous step, and shared-memory users need it.
+        _rule(ctx, KILL, "execveat", [Arg(4, MASKED, EMPTY, EMPTY)])
+
+        # Kernel subsystems reachable through a socket, whatever `net` says.
+        for domain in (VSOCK, BLUETOOTH):
+            _rule(ctx, ERROR | EPERM, "socket", [Arg(0, EQ, domain, 0)])
+        _rule(ctx, ERROR | EPERM, "socket", [Arg(0, EQ, NETLINK, 0), Arg(2, NE, ROUTE, 0)])
 
         if policy.net is False:
             for domain in (INET, INET6, PACKET):
