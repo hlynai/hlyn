@@ -46,8 +46,11 @@ def test_allowing_any_program_does_not_grant_reading_everything():
         try:
             open("/etc/shadow").read()
             print("ESCAPED")
-        except OSError:
+        except PermissionError:
             print("refused")
+        except OSError as exc:
+            # Not a refusal. A missing file would otherwise read as one.
+            print("INCONCLUSIVE", type(exc).__name__)
         """
     )
     assert "refused" in done.stdout, done.stdout + done.stderr
@@ -61,8 +64,11 @@ def test_allowing_writing_anywhere_does_not_grant_reading_everything():
         try:
             open("/etc/shadow").read()
             print("ESCAPED")
-        except OSError:
+        except PermissionError:
             print("refused")
+        except OSError as exc:
+            # Not a refusal. A missing file would otherwise read as one.
+            print("INCONCLUSIVE", type(exc).__name__)
         """
     )
     assert "refused" in done.stdout, done.stdout + done.stderr
@@ -79,8 +85,11 @@ def test_the_coder_preset_confines_the_filesystem():
         try:
             open("/etc/shadow").read()
             print("ESCAPED")
-        except OSError:
+        except PermissionError:
             print("refused")
+        except OSError as exc:
+            # Not a refusal. A missing file would otherwise read as one.
+            print("INCONCLUSIVE", type(exc).__name__)
         """
     )
     assert "refused" in done.stdout, done.stdout + done.stderr
@@ -186,8 +195,10 @@ def test_run_still_works_from_a_threaded_parent():
             try:
                 open("/etc/shadow").read()
                 return "ESCAPED"
-            except OSError:
+            except PermissionError:
                 return "refused"
+            except OSError as exc:
+                return "INCONCLUSIVE " + type(exc).__name__
         print(hlyn.run(work, read=["/tmp"], log=False))
         """
     )
@@ -205,8 +216,10 @@ def test_threads_started_after_sealing_are_confined():
             try:
                 open("/etc/shadow").read()
                 out.append("ESCAPED")
-            except OSError:
+            except PermissionError:
                 out.append("refused")
+            except OSError as exc:
+                out.append("INCONCLUSIVE " + type(exc).__name__)
         t = threading.Thread(target=work)
         t.start()
         t.join()
@@ -263,8 +276,12 @@ def test_tcp_is_still_refused_when_the_network_is_closed():
         try:
             socket.socket().connect(("127.0.0.1", 80))
             print("ESCAPED")
+        except PermissionError:
+            print("refused")
         except OSError as exc:
-            print("refused", type(exc).__name__)
+            # ConnectionRefusedError means nothing was listening, which proves
+            # nothing about the policy. Only PermissionError is the policy.
+            print("INCONCLUSIVE", type(exc).__name__)
         """
     )
     assert "refused" in done.stdout, done.stdout + done.stderr
@@ -314,7 +331,8 @@ def test_a_child_cannot_shed_the_boundary():
         import os, subprocess, sys, hlyn
         hlyn.on(read=["/tmp"], exec=True, log=False)
         code = ("try:\\n open('/etc/shadow').read(); print('ESCAPED')\\n"
-                "except OSError: print('refused')\\n")
+                "except PermissionError: print('refused')\\n"
+                "except OSError as e: print('INCONCLUSIVE', type(e).__name__)\\n")
         for argv in ([sys.executable, "-c", code],
                      ["/usr/bin/setsid", sys.executable, "-c", code]):
             got = subprocess.run(argv, capture_output=True, text=True, timeout=20)
