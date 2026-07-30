@@ -9,6 +9,7 @@ from __future__ import annotations
 from .error import Error, Failed, Invalid, Sealed, Unsupported
 from .jail import on, probe, run, sealed, spawn
 from .policy import SAFE, Policy, preset, presets, register, runtime
+from .spec import load
 
 __version__ = "0.0.1"
 
@@ -21,6 +22,7 @@ __all__ = [
     "Sealed",
     "Unsupported",
     "__version__",
+    "load",
     "on",
     "preset",
     "presets",

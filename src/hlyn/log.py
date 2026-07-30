@@ -26,11 +26,22 @@ import sys
 import time
 from typing import Any, TextIO
 
-__all__ = ["allow", "deny", "emit", "off", "seal", "sink"]
+__all__ = ["allow", "deny", "emit", "off", "seal", "sink", "totals"]
 
 
 _where: TextIO | None = None
 _on = True
+
+# How many times each distinct record has been seen. See `_often` for why the
+# same refusal repeated four hundred times is not four hundred lines.
+_seen: dict[str, int] = {}
+
+# A cap on how many *distinct* records are tracked. A tight policy denies a
+# bounded set of things over and over, which is the case this exists for; an
+# agent walking a large tree produces unbounded distinct records, and a log
+# module must not be the thing that exhausts memory. Past the cap, nothing new
+# is tracked and records are written as they arrive.
+LIMIT = 10_000
 
 
 def sink(target: bool | str | TextIO = True) -> None:
@@ -57,14 +68,50 @@ def off() -> None:
     _on = False
 
 
+def _often(kind: str, fields: dict[str, Any]) -> int | None:
+    """How many times this exact record has been seen, or None to not track it.
+
+    One startup under a tight policy refuses the same handful of things over
+    and over -- the same missing config file, on every retry, in every worker.
+    Written out in full that is hundreds of identical lines burying the three
+    that differ, which is how a log stops being read.
+
+    So a record is written on the 1st, 2nd, 4th, 8th, 16th ... occurrence, and
+    counted silently in between. The shape of the problem is still visible, the
+    running total is on every line that does get written, and nothing needs to
+    survive to the end of the process for the log to be useful -- which matters
+    here, because a process refused by seccomp is killed rather than exiting.
+    """
+    key = json.dumps([kind, fields], sort_keys=True, default=str)
+    if key not in _seen and len(_seen) >= LIMIT:
+        return None
+    count = _seen[key] = _seen.get(key, 0) + 1
+    return count
+
+
+def totals() -> dict[str, int]:
+    """Every distinct record seen so far, and how often. For a final rollup."""
+    return {key: count for key, count in _seen.items() if count > 1}
+
+
 def emit(kind: str, **fields: Any) -> None:
-    """Write one record. Never raises: logging must not break the agent."""
+    """Write one record. Never raises: logging must not break the agent.
+
+    Repeats are collapsed rather than written out one by one; see `_often`.
+    """
     if not _on:
         return
-    row = {"t": round(time.time(), 3), "kind": kind, "pid": os.getpid(), **fields}
+
     # Never raises: a record that cannot be written must not take the agent
     # down with it. The boundary is what matters; the log is evidence about it.
     with contextlib.suppress(Exception):
+        seen = _often(kind, fields)
+        if seen is not None and seen > 1 and seen & (seen - 1):
+            return  # not a power of two, so counted and not written
+        row: dict[str, Any] = {"t": round(time.time(), 3), "kind": kind, "pid": os.getpid()}
+        row.update(fields)
+        if seen is not None and seen > 1:
+            row["seen"] = seen
         stream = _where if _where is not None else sys.stderr
         stream.write(json.dumps(row, default=str) + "\n")
         stream.flush()

@@ -17,11 +17,18 @@ from hlyn.policy import Policy
 
 @pytest.fixture
 def sink():
-    """Send records to a buffer, and put the sink back afterwards."""
+    """Send records to a buffer, and put the sink back afterwards.
+
+    The repeat counter is process-wide, so it is cleared here too: without
+    that, one test's records throttle the next test's identical ones and the
+    suite passes or fails depending on the order it ran in.
+    """
     buf = io.StringIO()
+    log._seen.clear()
     log.sink(buf)
     yield buf
     log.sink(True)
+    log._seen.clear()
 
 
 def rows(buf: io.StringIO) -> list[dict]:
@@ -77,6 +84,47 @@ def test_a_broken_sink_never_breaks_the_agent():
         log.emit("test")  # must not raise
     finally:
         log.sink(True)
+
+
+def test_the_same_refusal_repeated_does_not_repeat_in_the_log(sink):
+    """One startup under a tight policy denies the same thing hundreds of times."""
+    for _ in range(100):
+        log.deny("path", "EACCES", path="/etc/shadow")
+    # Written on the 1st, 2nd, 4th, 8th, 16th, 32nd and 64th.
+    assert len(rows(sink)) == 7
+
+
+def test_a_repeated_record_carries_its_running_total(sink):
+    for _ in range(4):
+        log.deny("path", "EACCES", path="/etc/shadow")
+    assert [r.get("seen") for r in rows(sink)] == [None, 2, 4]
+
+
+def test_records_that_differ_are_never_collapsed(sink):
+    """Throttling must not hide the one denial that is not like the others."""
+    log.deny("path", "EACCES", path="/etc/shadow")
+    log.deny("path", "EACCES", path="/root/.ssh/id_rsa")
+    assert [r["path"] for r in rows(sink)] == ["/etc/shadow", "/root/.ssh/id_rsa"]
+
+
+def test_a_first_occurrence_is_always_written_immediately(sink):
+    """Nothing may wait for process exit: seccomp kills rather than exits."""
+    log.deny("path", "EACCES", path="/etc/shadow")
+    assert len(rows(sink)) == 1
+
+
+def test_totals_report_what_was_collapsed(sink):
+    for _ in range(5):
+        log.deny("path", "EACCES", path="/etc/shadow")
+    assert list(log.totals().values()) == [5]
+
+
+def test_tracking_stops_rather_than_growing_without_bound(sink):
+    """An agent walking a large tree must not make the log module the leak."""
+    for n in range(log.LIMIT + 50):
+        log.emit("test", n=n)
+    assert len(log._seen) == log.LIMIT
+    assert len(rows(sink)) == log.LIMIT + 50
 
 
 def test_logging_can_be_turned_off(sink):

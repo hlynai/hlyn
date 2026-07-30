@@ -23,7 +23,7 @@ from typing import Any
 
 from . import log
 from .error import Failed, Invalid, Sealed
-from .policy import Policy, preset
+from .policy import Policy, preset, presets
 
 __all__ = ["back", "on", "probe", "run", "sealed", "spawn"]
 
@@ -69,23 +69,40 @@ def probe() -> dict[str, object]:
 def _plan(policy: object, edits: Mapping[str, Any]) -> Policy:
     """Resolve everything a caller may pass into a single Policy.
 
-    Accepts nothing at all, a preset name, a Policy, or plain keywords, so the
-    one-line and the fully-specified forms are the same call.
+    Accepts nothing at all, a preset name, a policy file, a Policy, or plain
+    keywords, so the one-line and the fully-specified forms are the same call.
     """
     if policy is None:
         base = Policy()
     elif isinstance(policy, Policy):
         base = policy
     elif isinstance(policy, str):
-        base = preset(policy)
+        # A preset name and a filename are both strings, so one has to be
+        # tried first. Presets win: they are a closed, known set, and a file
+        # called `coder` with no extension is not something to guess at.
+        base = preset(policy) if policy in presets else _read(policy)
+    elif isinstance(policy, os.PathLike):
+        base = _read(policy)
     elif isinstance(policy, Mapping):
         base = Policy(**policy)
     else:
         raise Invalid(
-            f"expected a preset name, a Policy, or keywords, got {type(policy).__name__}. "
-            'Try hlyn.on(), hlyn.on("coder"), or hlyn.on(read=["/src"]).'
+            f"expected a preset name, a policy file, a Policy, or keywords, got "
+            f"{type(policy).__name__}. Try hlyn.on(), hlyn.on(\"coder\"), "
+            f'hlyn.on("policy.toml"), or hlyn.on(read=["/src"]).'
         )
     return base.with_(**edits) if edits else base
+
+
+def _read(path: object) -> Policy:
+    """Load a policy file, or explain that it was neither a preset nor a file."""
+    from .spec import load
+
+    try:
+        return load(path)  # type: ignore[arg-type]
+    except Invalid as exc:
+        known = ", ".join(sorted(presets))
+        raise Invalid(f"{exc} (not a known preset either; those are: {known})") from None
 
 
 def _scratch(policy: Policy) -> tuple[Policy, str | None]:

@@ -63,6 +63,49 @@ hlyn probe
 Exits non-zero when the machine cannot enforce, so it works as a preflight gate
 in a pipeline rather than something to read.
 
+## Writing the first policy
+
+The hard part of deny-by-default is not enforcing it, it is knowing what to
+allow. Run the agent once with nothing confined and let it say:
+
+```bash
+hlyn watch -- python agent.py > policy.toml
+```
+
+That records every path and port the run touched and prints a policy covering
+them. Read it, cut it down, and check it in. Then use it:
+
+```bash
+hlyn run -f policy.toml -- python agent.py
+```
+
+A policy file is TOML, JSON, or YAML, and it is a document a security team can
+review and diff rather than a set of flags buried in a shell script:
+
+```toml
+read  = ["src", "/etc/ssl/certs"]   # relative paths resolve next to this file
+write = ["out"]
+net   = [443]
+exec  = false
+env   = ["OPENAI_API_KEY"]
+```
+
+`hlyn show --intent` turns a set of flags that already works into a starter
+file. Two things about this format are deliberate:
+
+- **An unrecognised field is an error, not a warning.** `reed = [...]` is
+  refused outright. Silently ignoring it would leave a boundary that differs
+  from the document everyone believes describes it.
+- **Relative paths resolve against the file, not the working directory**, so a
+  policy checked in beside its agent means the same thing from anywhere.
+
+Two honest caveats on `watch`. It confines nothing while running, so it is a
+drafting tool and never a boundary. And it observes what *Python* does, via
+audit hooks — it cannot see a C extension calling `open(2)` behind Python's
+back. A policy drafted this way can therefore come out too narrow, and the
+agent will hit a refusal the watch run never predicted. That is loud, safe, and
+the right direction to be wrong in.
+
 ## Policy
 
 | Field | Grants | Default |
@@ -142,6 +185,25 @@ magnitude more, paid repeatedly rather than once.
 `tools/bench.py` documents the method, and each measuring process proves the
 boundary was actually applied before its numbers are believed — a filter that
 silently failed to load would benchmark beautifully.
+
+## The record
+
+One JSON object per line, to stderr by default or to a file when the policy
+names one. The `seal` record states the boundary that was applied, and is the
+one record that always matters.
+
+Repeats are collapsed. A tight policy refuses the same thing over and over —
+the same missing config file, on every retry, in every worker — and written out
+in full that is hundreds of identical lines burying the three that differ. A
+record is written on the 1st, 2nd, 4th, 8th, 16th … occurrence, carrying its
+running total as `seen`, and counted silently in between. Nothing waits for
+process exit to be flushed, because a process refused by seccomp is killed
+rather than exited.
+
+What the log does **not** see is worth stating: kernel refusals as they happen.
+When Landlock denies a read, the agent gets `EACCES` straight from the syscall
+and no userspace code is consulted — which is exactly why the boundary is cheap
+and cannot be talked out of.
 
 ## Known limits
 

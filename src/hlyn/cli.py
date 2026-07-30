@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Sequence
 
-from . import jail
+from . import jail, spec
 from .error import Error
 from .policy import Policy, presets
 
@@ -33,6 +34,8 @@ def build() -> argparse.ArgumentParser:
 
     def grants(p: argparse.ArgumentParser) -> None:
         p.add_argument("-p", "--preset", metavar="NAME", help=f"one of: {', '.join(sorted(presets))}")
+        p.add_argument("-f", "--policy", metavar="FILE",
+                       help="read the policy from a .toml, .json or .yaml file")
         p.add_argument("--read", action="append", metavar="PATH", default=[],
                        help="readable path (repeatable)")
         p.add_argument("--write", action="append", metavar="PATH", default=[],
@@ -57,14 +60,33 @@ def build() -> argparse.ArgumentParser:
     sub.add_parser("probe", help="report what this machine can enforce")
     sub.add_parser("presets", help="list the built-in presets")
 
+    look = sub.add_parser("watch", help="run a command unconfined and print the policy it would need")
+    look.add_argument("--json", action="store_true", help="print as JSON rather than TOML")
+    look.add_argument("cmd", nargs=argparse.REMAINDER, help="-- command to run")
+
     show = sub.add_parser("show", help="print the policy a set of flags produces")
     grants(show)
+    show.add_argument("--intent", action="store_true",
+                      help="print what was asked for, as a policy file, instead of what it resolves to")
     return top
 
 
 def _policy(args: argparse.Namespace) -> Policy:
-    """Turn flags into a policy, without applying anything."""
-    base = jail._plan(args.preset, {}) if args.preset else Policy()
+    """Turn flags into a policy, without applying anything.
+
+    A file and a preset are both starting points, and flags edit whichever was
+    given. They are mutually exclusive on purpose: silently layering a file on
+    top of a preset would make the effective policy something neither document
+    states.
+    """
+    if args.preset and args.policy:
+        raise Error("give either --preset or --policy, not both: each is a whole policy.")
+    if args.policy:
+        base = spec.load(args.policy)
+    elif args.preset:
+        base = jail._plan(args.preset, {})
+    else:
+        base = Policy()
     edits: dict[str, object] = {}
     if args.read:
         edits["read"] = list(base.read or ()) + args.read if isinstance(base.read, tuple) else args.read
@@ -91,7 +113,114 @@ def _policy(args: argparse.Namespace) -> Policy:
     return base.with_(**edits) if edits else base
 
 
+SEED = """\
+# Written by `hlyn watch`. Imported automatically by every Python that starts
+# with this directory on PYTHONPATH, which is how the command being watched
+# ends up recording without being modified.
+import os, sys
+try:
+    import hlyn.watch
+    hlyn.watch.start()
+except Exception:
+    pass
+# Whatever sitecustomize would have run without us still has to run. Ours is
+# first on the path, not instead of theirs.
+_mine = os.path.dirname(os.path.abspath(__file__))
+sys.path = [p for p in sys.path if os.path.abspath(p or ".") != _mine]
+try:
+    import sitecustomize  # noqa: F401
+except ImportError:
+    pass
+"""
+
+
+def _watch(cmd: list[str], as_json: bool) -> int:
+    """Run `cmd` unconfined with recording turned on, then print what it needed.
+
+    The command is not modified and does not have to cooperate. A generated
+    `sitecustomize` on PYTHONPATH is imported by any Python that starts inside
+    this run -- the command itself and any Python it spawns -- which is what
+    makes the observation cover the whole tree rather than one process.
+    """
+    import subprocess
+    import tempfile
+
+    from . import watch
+
+    box = tempfile.mkdtemp(prefix="hlyn-watch-")
+    with open(os.path.join(box, "sitecustomize.py"), "w", encoding="utf-8") as fh:
+        fh.write(SEED)
+
+    seen = os.path.join(box, "seen.json")
+    where = os.environ.copy()
+    where[watch.CHANNEL] = seen
+    where["PYTHONPATH"] = os.pathsep.join([box, *filter(None, [where.get("PYTHONPATH")])])
+    # The package itself has to be importable by the child, which it is not if
+    # hlyn is being run from a checkout rather than an install.
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.path.isdir(os.path.join(root, "hlyn")):
+        where["PYTHONPATH"] = os.pathsep.join([where["PYTHONPATH"], root])
+
+    print("hlyn watch: running unconfined, recording what it touches", file=sys.stderr)
+    # The command's own output goes to stderr, not stdout. Our stdout carries
+    # exactly one thing -- the policy -- so `hlyn watch -- ... > policy.toml`
+    # produces a file that parses. Mixing the agent's prints into it produces
+    # one that does not, and the error arrives a step later where it makes no
+    # sense. The user still sees everything; only the stream differs.
+    done = subprocess.run(cmd, env=where, stdout=2, check=False)  # noqa: S603
+
+    watch._load(seen)
+    if not watch.seen():
+        print(
+            "hlyn watch: nothing was recorded. The command may not be Python, or may "
+            "have exited before importing anything.",
+            file=sys.stderr,
+        )
+        return done.returncode or 1
+
+    plan = watch.suggest()
+    print(f"\n# observed over one run of: {' '.join(cmd)}", file=sys.stderr)
+    print("# a draft to cut down, not a policy to trust\n", file=sys.stderr)
+    sys.stdout.write(spec.dumps(plan) if as_json else _toml(plan))
+    return done.returncode
+
+
+def _toml(plan: Policy) -> str:
+    """Render a policy as TOML, without taking on a dependency to write it.
+
+    Only the shapes a policy actually holds -- lists of strings, lists of
+    integers, and booleans -- so this is a rendering, not a TOML writer, and it
+    is not exported as one.
+    """
+    out = []
+    for field, value in spec.shape(plan).items():
+        if isinstance(value, bool):
+            out.append(f"{field} = {str(value).lower()}")
+        elif isinstance(value, str):
+            out.append(f"{field} = {json.dumps(value)}")
+        elif not value:
+            out.append(f"{field} = []")
+        else:
+            items = ",\n".join(f"  {json.dumps(item)}" for item in value)
+            out.append(f"{field} = [\n{items},\n]")
+    return "\n".join(out) + "\n"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    """The entry point. Every policy error reaches the user as a sentence.
+
+    A malformed policy is the most likely thing to go wrong here -- a typo in a
+    file, a host name in `net`, two starting points at once -- and a traceback
+    is a poor way to report a document someone can fix in five seconds.
+    """
+    try:
+        return _run(argv)
+    except Error as exc:
+        print(f"hlyn: {exc}", file=sys.stderr)
+        return 2
+
+
+def _run(argv: Sequence[str] | None = None) -> int:
     args = build().parse_args(list(sys.argv[1:] if argv is None else argv))
 
     if args.verb == "probe":
@@ -108,6 +237,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.verb == "show":
         p = _policy(args)
+        if args.intent:
+            # What was asked for, not what it becomes: this is the form a file
+            # holds, so `hlyn show --intent > policy.json` is how a set of
+            # flags that works becomes a document someone can review.
+            sys.stdout.write(spec.dumps(p))
+            return 0
         # Resolved once each: `reads` walks the interpreter's own installation
         # to work out what the runtime needs, which is not something to do
         # twice per field just to render it.
@@ -128,6 +263,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     cmd = [item for item in args.cmd if item != "--"]
+
+    if args.verb == "watch":
+        if not cmd:
+            print(
+                "hlyn watch: give a command after --, e.g. hlyn watch -- python agent.py",
+                file=sys.stderr,
+            )
+            return 2
+        return _watch(cmd, args.json)
+
     if not cmd:
         print("hlyn run: give a command after --, e.g. hlyn run -- python agent.py", file=sys.stderr)
         return 2
