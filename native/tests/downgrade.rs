@@ -25,8 +25,7 @@
 //! process of its own, which is exactly that guarantee.
 
 use landlock::{
-    Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetStatus, ABI,
+    Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus, ABI,
 };
 
 /// The ABI the shim is written against. Kept in step with `WANT` in lib.rs.

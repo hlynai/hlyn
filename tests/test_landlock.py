@@ -517,6 +517,38 @@ def test_ready_agrees_with_abi():
     assert landlock.ready() == (landlock.abi() > 0)
 
 
+def test_an_unopenable_path_is_named_in_the_error(tmp_path):
+    # A path that exists but cannot be opened gets past the existence check and
+    # fails inside the shim, which answers with one code for every rule failure.
+    # "a path could not be opened" is useless when the policy names forty of
+    # them, so the message has to say which one and why.
+    import os
+
+    from hlyn.core import landlock
+    from hlyn.error import Invalid
+    from hlyn.policy import Policy
+
+    if os.geteuid() == 0:
+        pytest.skip("root can open anything, so no path is unopenable")
+
+    shed = tmp_path / "shed"
+    shed.mkdir()
+    (shed / "tool").write_text("x")
+    shed.chmod(0o000)  # no search permission, so the child cannot be opened
+    try:
+        with pytest.raises(Invalid) as caught:
+            landlock.load(Policy(read=[str(shed / "tool")]))
+    finally:
+        shed.chmod(0o755)
+
+    said = str(caught.value)
+    assert "tool" in said, f"the error did not name the path: {said}"
+    # The file is there. Saying it is not would send the reader hunting for a
+    # typo instead of at the permissions.
+    assert "denied" in said.lower(), f"the error blamed the wrong thing: {said}"
+    assert "not exist" not in said, f"an existing file was reported missing: {said}"
+
+
 def test_a_missing_path_is_refused_loudly(tmp_path):
     # A typo in a security policy must never be silently dropped.
     from hlyn.core import landlock

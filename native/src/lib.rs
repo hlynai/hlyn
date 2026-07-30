@@ -15,6 +15,7 @@ use landlock::{
     Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetStatus, Scope, ABI,
 };
 use std::ffi::{c_char, CStr};
+use std::os::fd::{AsFd, AsRawFd};
 
 /// What a caller asks for. Arrays are borrowed for the duration of the call.
 ///
@@ -49,33 +50,30 @@ const EBUILD: i32 = -2;
 const ERULE: i32 = -3;
 const ESEAL: i32 = -4;
 
-/// Which rights to grant, chosen by what the path actually is.
+/// The rights a grant asks for, in their fullest form.
 ///
-/// Directory-only rights are meaningless on a regular file, and asking for
-/// them anyway makes the kernel drop them and the ruleset report itself only
-/// partially enforced. Since a correct policy always names some plain files --
-/// `/dev/null` and the loader cache, at minimum -- getting this wrong would
+/// Each of these names what the grant means on a directory. Anything in the
+/// set that a plain file cannot carry is removed later, by the crate rather
+/// than by us -- see `fit`. Asking for a directory-only right on a regular
+/// file makes the kernel drop it and the ruleset report itself only partially
+/// enforced, and since a correct policy always names some plain files
+/// (`/dev/null` and the loader cache, at minimum) getting that wrong would
 /// downgrade every single ruleset we ever build.
-type Pick = fn(bool) -> BitFlags<AccessFs>;
+type Pick = fn() -> BitFlags<AccessFs>;
 
-fn readable(dir: bool) -> BitFlags<AccessFs> {
-    if dir {
-        AccessFs::ReadFile | AccessFs::ReadDir
-    } else {
-        AccessFs::ReadFile.into()
-    }
+fn readable() -> BitFlags<AccessFs> {
+    AccessFs::ReadFile | AccessFs::ReadDir
 }
 
-/// `Refer` is included for directories because atomic writes rename a
-/// temporary file into place, which crosses directories and is refused
-/// without it. Device and block node creation are deliberately absent:
-/// nothing an agent legitimately does requires minting a device.
-fn writable(dir: bool) -> BitFlags<AccessFs> {
-    let file = AccessFs::WriteFile | AccessFs::ReadFile | AccessFs::Truncate;
-    if !dir {
-        return file;
-    }
-    file | AccessFs::ReadDir
+/// `Refer` is included because atomic writes rename a temporary file into
+/// place, which crosses directories and is refused without it. Device and
+/// block node creation are deliberately absent: nothing an agent legitimately
+/// does requires minting a device.
+fn writable() -> BitFlags<AccessFs> {
+    AccessFs::WriteFile
+        | AccessFs::ReadFile
+        | AccessFs::Truncate
+        | AccessFs::ReadDir
         | AccessFs::MakeReg
         | AccessFs::MakeDir
         | AccessFs::RemoveFile
@@ -86,10 +84,44 @@ fn writable(dir: bool) -> BitFlags<AccessFs> {
         | AccessFs::Refer
 }
 
-/// A program must be readable to run. Both rights apply to files and to the
-/// files beneath a directory, so this does not vary.
-fn runnable(_dir: bool) -> BitFlags<AccessFs> {
+/// A program must be readable to run. Both rights apply to a file and to the
+/// files beneath a directory, so this is the same either way.
+fn runnable() -> BitFlags<AccessFs> {
     AccessFs::Execute | AccessFs::ReadFile
+}
+
+/// Cut a grant down to what the thing it points at can actually carry.
+///
+/// Which rights are legal on a non-directory is the crate's question to
+/// answer, not ours: `from_file` is its own definition, so a future ABI adding
+/// a file right does not need a matching edit here.
+fn fit(want: BitFlags<AccessFs>, dir: bool, abi: ABI) -> BitFlags<AccessFs> {
+    if dir {
+        want
+    } else {
+        want & AccessFs::from_file(abi)
+    }
+}
+
+/// Whether an already-open descriptor points at a directory.
+///
+/// Deliberately asks the descriptor rather than the path. Resolving the path a
+/// second time would be a second answer to the same question, and the two can
+/// disagree -- a path that changes in between yields rights computed for one
+/// inode applied to another. It fails closed today (the kernel drops the
+/// mismatched rights and we refuse the seal rather than proceed), but a
+/// question asked once cannot be answered two ways.
+///
+/// `fstat` is explicitly permitted on an `O_PATH` descriptor, which is what
+/// `PathFd` holds.
+fn directory(fd: &PathFd) -> Option<bool> {
+    // SAFETY: `stat` is plain data, and the descriptor is owned by `fd` and
+    // stays open for this call.
+    let mut info: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd.as_fd().as_raw_fd(), &mut info) } != 0 {
+        return None;
+    }
+    Some(info.st_mode & libc::S_IFMT == libc::S_IFDIR)
 }
 
 /// Borrow a C string array as paths.
@@ -246,13 +278,18 @@ unsafe fn build(plan: &Plan) -> Result<RulesetCreated, i32> {
         (&execs, runnable as Pick),
     ] {
         for path in paths.iter() {
-            let dir = std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false);
             // O_PATH open; a path that cannot be opened cannot be granted.
+            // Everything after this asks the descriptor, not the path, so the
+            // rights and the inode they land on are the same answer.
             let fd = match PathFd::new(path) {
                 Ok(value) => value,
                 Err(_) => return Err(ERULE),
             };
-            made = match made.add_rule(PathBeneath::new(fd, pick(dir))) {
+            let dir = match directory(&fd) {
+                Some(value) => value,
+                None => return Err(ERULE),
+            };
+            made = match made.add_rule(PathBeneath::new(fd, fit(pick(), dir, abi))) {
                 Ok(value) => value,
                 Err(_) => return Err(ERULE),
             };
@@ -410,24 +447,33 @@ mod tests {
         assert_eq!(unsafe { numbers(ports.as_ptr(), 1) }, Some(vec![80]));
     }
 
+    /// What a grant comes to on a plain file, once `fit` has cut it down.
+    fn on_file(pick: Pick) -> BitFlags<AccessFs> {
+        fit(pick(), false, WANT)
+    }
+
+    /// What it comes to on a directory.
+    fn on_dir(pick: Pick) -> BitFlags<AccessFs> {
+        fit(pick(), true, WANT)
+    }
+
     #[test]
     fn reading_a_file_does_not_require_directory_rights() {
         // ReadDir on a regular file is a right the kernel drops, which would
         // downgrade the whole ruleset to PartiallyEnforced and make our
         // honesty check fire on a correct policy.
-        let file = readable(false);
+        let file = on_file(readable);
         assert!(file.contains(AccessFs::ReadFile));
         assert!(!file.contains(AccessFs::ReadDir));
 
-        let dir = readable(true);
+        let dir = on_dir(readable);
         assert!(dir.contains(AccessFs::ReadFile));
         assert!(dir.contains(AccessFs::ReadDir));
     }
 
     #[test]
     fn reading_never_grants_writing() {
-        for dir in [true, false] {
-            let got = readable(dir);
+        for got in [on_dir(readable), on_file(readable)] {
             assert!(!got.contains(AccessFs::WriteFile));
             assert!(!got.contains(AccessFs::Truncate));
             assert!(!got.contains(AccessFs::MakeReg));
@@ -438,7 +484,7 @@ mod tests {
 
     #[test]
     fn writing_a_file_grants_neither_creation_nor_removal() {
-        let file = writable(false);
+        let file = on_file(writable);
         assert!(file.contains(AccessFs::WriteFile));
         assert!(file.contains(AccessFs::ReadFile));
         assert!(file.contains(AccessFs::Truncate));
@@ -459,7 +505,7 @@ mod tests {
         // Every editor, compiler, and package manager writes by renaming a
         // temporary file into place. Without Refer that rename is refused and
         // the sandbox looks broken rather than strict.
-        let dir = writable(true);
+        let dir = on_dir(writable);
         for right in [
             AccessFs::WriteFile,
             AccessFs::ReadFile,
@@ -483,8 +529,7 @@ mod tests {
         // Minting a device is how a confined process reaches raw disk. Nothing
         // an agent legitimately does needs it, and no policy field asks for it,
         // so it must not arrive as a side effect of being granted write.
-        for dir in [true, false] {
-            let got = writable(dir);
+        for got in [on_dir(writable), on_file(writable)] {
             assert!(!got.contains(AccessFs::MakeChar));
             assert!(!got.contains(AccessFs::MakeBlock));
             assert!(!got.contains(AccessFs::Execute));
@@ -495,8 +540,8 @@ mod tests {
     fn execution_does_not_vary_with_the_kind_of_path() {
         // Both rights apply to a file and to the files beneath a directory,
         // so an exec grant is the same shape either way.
-        assert_eq!(runnable(true), runnable(false));
-        let got = runnable(false);
+        assert_eq!(on_dir(runnable), on_file(runnable));
+        let got = on_file(runnable);
         assert!(got.contains(AccessFs::Execute));
         // A program must be readable to be run.
         assert!(got.contains(AccessFs::ReadFile));
@@ -504,12 +549,40 @@ mod tests {
     }
 
     #[test]
+    fn a_descriptor_reports_what_it_actually_points_at() {
+        // The classification the rights depend on. It reads the descriptor the
+        // rule will be attached to, so there is no second path resolution that
+        // could answer differently.
+        let dir = PathFd::new("/").expect("open /");
+        assert_eq!(directory(&dir), Some(true));
+
+        // Not a regular file either -- a character device. Anything that is
+        // not a directory takes the file-shaped rights.
+        let node = PathFd::new("/dev/null").expect("open /dev/null");
+        assert_eq!(directory(&node), Some(false));
+    }
+
+    #[test]
+    fn fitting_a_grant_to_a_file_removes_only_what_a_file_cannot_hold() {
+        let legal = AccessFs::from_file(WANT);
+        for pick in [readable as Pick, writable as Pick, runnable as Pick] {
+            let full = pick();
+            // On a directory the grant is untouched.
+            assert_eq!(fit(full, true, WANT), full);
+            // On anything else it is exactly the part a file can carry --
+            // no more, and nothing dropped that was legal.
+            assert_eq!(fit(full, false, WANT), full & legal);
+            assert!(legal.contains(fit(full, false, WANT)));
+        }
+    }
+
+    #[test]
     fn the_three_pickers_are_distinct() {
         // A copy-paste that made two of these agree would hand out rights
         // nobody asked for, and no other test would notice.
-        assert_ne!(readable(true), writable(true));
-        assert_ne!(readable(true), runnable(true));
-        assert_ne!(writable(true), runnable(true));
+        assert_ne!(on_dir(readable), on_dir(writable));
+        assert_ne!(on_dir(readable), on_dir(runnable));
+        assert_ne!(on_dir(writable), on_dir(runnable));
     }
 
     #[test]
@@ -517,10 +590,9 @@ mod tests {
         // A right outside the handled set is dropped by the kernel and drags
         // the ruleset down to PartiallyEnforced.
         let handled = AccessFs::from_all(WANT);
-        for dir in [true, false] {
-            assert!(handled.contains(readable(dir)));
-            assert!(handled.contains(writable(dir)));
-            assert!(handled.contains(runnable(dir)));
+        for pick in [readable as Pick, writable as Pick, runnable as Pick] {
+            assert!(handled.contains(on_dir(pick)));
+            assert!(handled.contains(on_file(pick)));
         }
     }
 

@@ -320,6 +320,14 @@ def runtime() -> tuple[str, ...]:
     exec time, which does *not* change when `os.environ` is scrubbed. Granting
     `/proc/self` would hand back every secret the `env` control just removed.
 
+    That exclusion has a cost worth knowing about before it bites: **GPU
+    workloads need `/proc` writable**. CUDA writes thread names to
+    `/proc/<pid>/task/<tid>/comm`, so a sealed process doing local inference or
+    training fails in a way that points nowhere near this file. The fix is to
+    say so in the policy, `Policy(write=["/proc"])`, and the price is that
+    `/proc/self/environ` becomes readable again — so scrub the environment at
+    the source rather than relying on `env` alone if you take that route.
+
     The working directory and the running script's directory — that is the
     user's data, not the runtime's. A policy that silently read it would make
     `hlyn.on()` far more permissive than it looks.

@@ -32,10 +32,14 @@ NOT = 0
 SOME = 1
 FULL = 2
 
+# Failure codes, matching native/src/lib.rs. ERULE is named because it is the
+# one the caller can usually act on, and it gets a second look in `_blame`.
+ERULE = -3
+
 WHY = {
     -1: "the shim was called with arguments it could not read",
     -2: "the ruleset could not be built",
-    -3: "a path in the policy could not be opened",
+    ERULE: "a path in the policy could not be opened",
     -4: "the kernel refused to apply the ruleset",
 }
 
@@ -122,19 +126,55 @@ def ready() -> bool:
 # -- turning a policy into a plan -------------------------------------------
 
 
-def _paths(value: tuple[str, ...] | bool, missing: list[str]) -> list[bytes]:
-    """Encode a grant as paths. `True` means the whole tree."""
+def _paths(value: tuple[str, ...] | bool, refused: list[tuple[str, str]]) -> list[bytes]:
+    """Encode a grant as paths. `True` means the whole tree.
+
+    Each path is probed with the same open the shim will perform, rather than
+    with `os.path.exists`. They disagree in exactly the case that matters: a
+    file inside a directory the caller cannot search exists perfectly well and
+    still cannot be opened, and reporting that as "does not exist" sends the
+    reader looking for a typo instead of at the permissions.
+    """
     if value is True:
         return [b"/"]
     if value is False or not value:
         return []
     out = []
     for item in value:
-        if not os.path.exists(item):
-            missing.append(item)
+        try:
+            fd = os.open(item, os.O_PATH)
+        except OSError as exc:
+            why = exc.strerror or (os.strerror(exc.errno) if exc.errno else "cannot be opened")
+            refused.append((item, why))
             continue
+        os.close(fd)
         out.append(os.fsencode(item))
     return out
+
+
+def _blame(groups: Sequence[tuple[str, list[bytes]]]) -> str:
+    """Which granted path the kernel would not open, and what it said.
+
+    The shim answers with one code for every rule failure, which is the right
+    shape for a C ABI and the wrong shape for a person: "a path could not be
+    opened" does not say which path, and a policy naming forty of them is then
+    a guessing game. Rather than widen the ABI to carry a string back, the same
+    open is repeated here once the shim has already failed -- the happy path
+    pays nothing, and the failing path gets the name and the reason.
+
+    Best effort. If nothing fails the second time, the cause was transient or
+    was something other than an open, and the caller gets the plain message.
+    """
+    for field, items in groups:
+        for item in items:
+            try:
+                fd = os.open(item, os.O_PATH)
+            except OSError as exc:
+                where = os.fsdecode(item)
+                return f" The path {field} names, {where!r}, could not be opened: {exc.strerror}."
+            else:
+                os.close(fd)
+    return ""
 
 
 def _array(items: Sequence[bytes]) -> tuple[Any, int]:
@@ -161,15 +201,19 @@ def load(policy: Policy) -> int:
     """
     api = lib()
 
-    missing: list[str] = []
-    reads = _paths(policy.reads(), missing)
-    writes = _paths(policy.writes(), missing)
-    runs = _paths(policy.runs(), missing)
-    if missing:
+    refused: list[tuple[str, str]] = []
+    reads = _paths(policy.reads(), refused)
+    writes = _paths(policy.writes(), refused)
+    runs = _paths(policy.runs(), refused)
+    if refused:
+        # A typo in a security policy must never be silently dropped, so this
+        # refuses rather than granting what it can. The reason comes from the
+        # kernel, so "no such file" and "permission denied" read differently
+        # and the caller knows which one to go and fix.
         raise Invalid(
-            "these paths do not exist, so they cannot be granted: "
-            + ", ".join(sorted(set(missing)))
-            + ". Create them first, or remove them from the policy."
+            "these paths could not be opened, so they cannot be granted: "
+            + "; ".join(f"{path} ({why})" for path, why in sorted(set(refused)))
+            + ". Create them, fix their permissions, or remove them from the policy."
         )
 
     # Signals and abstract sockets are confined to this agent by default. They
@@ -231,7 +275,10 @@ def load(policy: Policy) -> int:
             "confinement is unavailable, so the process is NOT confined by "
             "this layer. Landlock needs Linux 5.13 or newer with the LSM enabled."
         )
-    raise Failed("landlock: " + WHY.get(got, f"unknown failure ({got})"))
+    said = "landlock: " + WHY.get(got, f"unknown failure ({got})")
+    if got == ERULE:
+        said += _blame([("read", reads), ("write", writes), ("exec", runs)])
+    raise Failed(said)
 
 
 # `seal` reads better at the call site in the orchestrator; `load` matches the
