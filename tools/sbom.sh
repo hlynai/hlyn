@@ -1,53 +1,46 @@
 #!/bin/sh
-# What is in the thing you are about to trust.
+# What is actually in the thing you are about to trust.
 #
-#   tools/sbom.sh          both, into dist/
-#   tools/sbom.sh rust     the shim's dependency tree only
-#   tools/sbom.sh python   the package only
+#   tools/sbom.sh            an SBOM for what ships, into dist/
+#   tools/sbom.sh --all      include the development trees as well
 #
-# Two SBOMs because there are two dependency trees and they are built by
-# different toolchains. The Python package depends on nothing at runtime, which
-# is itself the interesting fact and worth having stated in a machine-readable
-# file rather than asserted in a README. The Rust shim depends on the landlock
-# crate and what it pulls in, which is where the real supply chain is.
+# One document, not two. Syft reads `native/Cargo.lock` and the Python package
+# metadata in the same pass, so a single scan covers both ecosystems and a
+# second one would mostly restate the first.
+#
+# What is *excluded* is the part worth reading. `native/fuzz` has its own
+# lockfile pulling in libFuzzer's machinery -- `arbitrary`, `derive_arbitrary`
+# and their tree -- which is roughly twice the crate count of the shipped shim
+# and appears in no build that leaves this repository. An SBOM listing it
+# describes a supply chain nobody has, which is a worse answer than no SBOM at
+# all: the whole point of the document is that its reader can act on it.
 #
 # CycloneDX rather than SPDX for the output: it carries dependency
-# relationships and is what most scanners ingest without conversion.
+# relationships and most scanners ingest it without conversion.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-what=${1:-all}
 out="$root/dist"
 mkdir -p "$out"
 
-# Pinned by digest-free tag rather than :latest, so a rebuild a year from now
-# does not silently produce a different document from a different tool.
+# Pinned to a version rather than :latest, so a rebuild next year does not
+# quietly produce a different document from a different tool.
 SYFT=anchore/syft:v1.18.1
 
-run_rust() {
-    echo "=== rust dependencies ==="
-    docker build -q -f "$root/tools/Dockerfile.rust" -t hlyn-rust "$root" >/dev/null
-    # cargo-cyclonedx reads the lockfile, so this describes what actually gets
-    # compiled in rather than what the manifest permits.
-    docker run --rm -v "$root/native":/native -w /native hlyn-rust sh -c '
-        cargo install --quiet cargo-cyclonedx 2>/dev/null || true
-        cargo cyclonedx --format json --all
-    '
-    find "$root/native" -name "*.cdx.json" -exec cp {} "$out/" \;
-    echo "wrote $out/*.cdx.json"
-}
+# Build artefacts, the repository's own history, and the fuzzing harness. The
+# last of these is the one that matters; see above.
+skip="--exclude ./native/target --exclude ./dist --exclude ./.git"
+if [ "${1:-}" = "--all" ]; then
+    name=hlyn-everything
+else
+    name=hlyn
+    skip="$skip --exclude ./native/fuzz"
+fi
 
-run_python() {
-    echo "=== python package ==="
-    docker run --rm -v "$root":/src:ro -v "$out":/out \
-        "$SYFT" scan dir:/src -o cyclonedx-json=/out/hlyn-python.cdx.json \
-        --exclude './native/target' --exclude './dist' --exclude './.git'
-    echo "wrote $out/hlyn-python.cdx.json"
-}
+# shellcheck disable=SC2086 # skip is a list of flags and must word-split
+docker run --rm -v "$root":/src:ro -v "$out":/out \
+    "$SYFT" scan dir:/src --source-name hlyn --source-version "$(
+        sed -n 's/^version = "\(.*\)"/\1/p' "$root/pyproject.toml" | head -1
+    )" -o "cyclonedx-json=/out/$name.cdx.json" $skip
 
-case "$what" in
-    rust) run_rust ;;
-    python) run_python ;;
-    all) run_python; run_rust ;;
-    *) echo "usage: $0 [rust|python]" >&2; exit 2 ;;
-esac
+echo "wrote $out/$name.cdx.json"

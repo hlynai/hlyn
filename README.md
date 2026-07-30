@@ -341,9 +341,11 @@ Seatbelt tests skip on Linux.
 `tools/mutate.sh` and `tools/fuzz.sh` run mutation testing and fuzzing;
 `tools/confirm.py` re-checks that the suite catches a specific list of mistakes
 it has caught before. `tools/bench.sh` measures what confinement costs, and
-produces the numbers above. `tools/sbom.sh` writes a CycloneDX SBOM for both
-dependency trees — the Python package, which depends on nothing at runtime, and
-the Rust shim, where the real supply chain is.
+produces the numbers above. `tools/sbom.sh` writes a CycloneDX SBOM of what
+ships: twelve components, all of them the Rust shim's, since the Python package
+has no runtime dependencies at all. The fuzzing harness is excluded on purpose
+— its lockfile is about twice the size of the shipped one and appears in no
+build that leaves this repository.
 
 ## Licence
 
