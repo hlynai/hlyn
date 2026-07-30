@@ -69,9 +69,11 @@ fn readable() -> BitFlags<AccessFs> {
 /// place, which crosses directories and is refused without it. Device and
 /// block node creation are deliberately absent: nothing an agent legitimately
 /// does requires minting a device.
+///
+/// `ReadFile` is deliberately **not** here, and the reason is the one bug in
+/// this file that mattered. See `runnable`.
 fn writable() -> BitFlags<AccessFs> {
     AccessFs::WriteFile
-        | AccessFs::ReadFile
         | AccessFs::Truncate
         | AccessFs::ReadDir
         | AccessFs::MakeReg
@@ -84,10 +86,22 @@ fn writable() -> BitFlags<AccessFs> {
         | AccessFs::Refer
 }
 
-/// A program must be readable to run. Both rights apply to a file and to the
-/// files beneath a directory, so this is the same either way.
+/// Execute, and nothing else.
+///
+/// `ReadFile` used to be here, on the reasoning that a program must be
+/// readable to run. The reasoning is sound and the consequence was not: a
+/// grant of `True` becomes a rule on `/`, so `exec=True` handed out `ReadFile`
+/// over the entire filesystem and every `read` list in every policy silently
+/// stopped meaning anything. `hlyn.on("coder")` -- the first example in the
+/// README -- could read `/etc/shadow`. `writable` had the same hole.
+///
+/// It is also unnecessary, which is what makes this a clean fix rather than a
+/// trade. The policy layer already adds every named `exec` and `write` path to
+/// the read set (see `Policy.reads`), so a program named in `exec` is readable
+/// because the policy says so, not because this mask leaks it. What that layer
+/// will not do is widen `read` to `/` when nobody asked for it.
 fn runnable() -> BitFlags<AccessFs> {
-    AccessFs::Execute | AccessFs::ReadFile
+    AccessFs::Execute.into()
 }
 
 /// Cut a grant down to what the thing it points at can actually carry.
@@ -486,8 +500,12 @@ mod tests {
     fn writing_a_file_grants_neither_creation_nor_removal() {
         let file = on_file(writable);
         assert!(file.contains(AccessFs::WriteFile));
-        assert!(file.contains(AccessFs::ReadFile));
         assert!(file.contains(AccessFs::Truncate));
+        // Not ReadFile. Write does not imply read here, because a grant of
+        // `True` becomes a rule on `/` and this mask would then hand out read
+        // over the whole filesystem. Named write paths are still readable --
+        // the policy layer adds them to the read set, where it is visible.
+        assert!(!file.contains(AccessFs::ReadFile));
         for right in [
             AccessFs::MakeReg,
             AccessFs::MakeDir,
@@ -508,7 +526,6 @@ mod tests {
         let dir = on_dir(writable);
         for right in [
             AccessFs::WriteFile,
-            AccessFs::ReadFile,
             AccessFs::Truncate,
             AccessFs::ReadDir,
             AccessFs::MakeReg,
@@ -522,6 +539,7 @@ mod tests {
         ] {
             assert!(dir.contains(right), "a writable directory needs {right:?}");
         }
+        assert!(!dir.contains(AccessFs::ReadFile), "write must not imply read");
     }
 
     #[test]
@@ -538,14 +556,24 @@ mod tests {
 
     #[test]
     fn execution_does_not_vary_with_the_kind_of_path() {
-        // Both rights apply to a file and to the files beneath a directory,
-        // so an exec grant is the same shape either way.
+        // Execute applies to a file and to the files beneath a directory, so
+        // an exec grant is the same shape either way.
         assert_eq!(on_dir(runnable), on_file(runnable));
         let got = on_file(runnable);
         assert!(got.contains(AccessFs::Execute));
-        // A program must be readable to be run.
-        assert!(got.contains(AccessFs::ReadFile));
         assert!(!got.contains(AccessFs::WriteFile));
+    }
+
+    #[test]
+    fn execution_never_grants_reading() {
+        // The regression that mattered most. `exec=True` resolves to a rule on
+        // `/`, so a ReadFile bit in this mask made every `read` list in every
+        // policy meaningless -- `hlyn.on("coder")` could read /etc/shadow.
+        // Being able to read a program is real, and the policy layer supplies
+        // it per path (see `Policy.reads` and `programs`), where it is bounded
+        // and visible instead of universal and silent.
+        assert!(!on_file(runnable).contains(AccessFs::ReadFile));
+        assert!(!on_dir(runnable).contains(AccessFs::ReadFile));
     }
 
     #[test]

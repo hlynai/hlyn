@@ -22,7 +22,7 @@ from typing import Literal
 
 from .error import Invalid, Unsupported
 
-__all__ = ["SAFE", "Policy", "preset", "presets", "register", "runtime"]
+__all__ = ["SAFE", "Policy", "preset", "presets", "programs", "register", "runtime"]
 
 
 # Environment variables kept when `env` scrubbing is on. Locale, paths, and the
@@ -308,6 +308,33 @@ def loader() -> tuple[str, ...]:
     return prune(out)
 
 
+def programs() -> tuple[str, ...]:
+    """Where programs live, for `exec=True` to be able to run any of them.
+
+    A program has to be readable to be executed -- the kernel reads the ELF,
+    and `execve` returns `EACCES` without it. For named grants that costs
+    nothing, because `reads()` already adds every path in `exec`. For
+    `exec=True` there are no named paths to add, so this is the set.
+
+    It is these directories rather than `/` on purpose, and that distinction is
+    the whole fix for a real hole: granting read over `/` to make `exec=True`
+    work is what silently made every `read` list meaningless. The system's
+    program directories are not where secrets are. `/etc/shadow`, `~/.ssh` and
+    `/root` stay refused, which is the point.
+    """
+    out = {
+        "/bin",
+        "/sbin",
+        "/usr/bin",
+        "/usr/sbin",
+        "/usr/libexec",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        *loader(),
+    }
+    return prune(item for item in out if os.path.exists(item))
+
+
 def runtime() -> tuple[str, ...]:
     """Paths the interpreter must read to survive deny-by-default.
 
@@ -415,6 +442,11 @@ class Policy:
         out.extend(_items(self.read))
         out.extend(_items(self.write))
         out.extend(_items(self.exec))
+        # `exec=True` names nothing, so nothing above makes a program readable,
+        # and a program that cannot be read cannot be executed. The program
+        # directories are added rather than `/`; see `programs`.
+        if self.exec is True:
+            out.extend(programs())
         if isinstance(self.tmp, str):
             out.append(os.path.abspath(self.tmp))
         return prune(out)

@@ -192,6 +192,62 @@ def _ports(items: Sequence[int]) -> tuple[Any, int]:
     return block, len(items)
 
 
+def crowd() -> list[str]:
+    """Every thread in this process, by task id.
+
+    Read from `/proc/self/task` rather than counted with `threading`, because
+    `threading` only knows about threads Python created. A thread started by a
+    C extension -- CUDA, OpenMP, gRPC, a native HTTP client -- is invisible to
+    it and just as unconfined. Nothing is sealed yet at this point, so `/proc`
+    is readable here even though the policy will not grant it.
+    """
+    try:
+        return sorted(os.listdir("/proc/self/task"))
+    except OSError:
+        # No /proc to ask. Fall back to what Python knows, which is a floor
+        # rather than an answer, and better than assuming the process is alone.
+        import threading
+
+        return [str(n) for n in range(threading.active_count())]
+
+
+def _alone() -> None:
+    """Refuse to seal a process that has threads this cannot reach.
+
+    `landlock_restrict_self` applies the domain to the *calling thread*, and
+    Linux credentials are per-task, so a thread that already exists keeps the
+    access it had. seccomp has `TSYNC` and covers every thread; Landlock has no
+    equivalent, and there is no way to make another thread run code on demand.
+
+    The result would be a process whose main thread is confined and whose
+    logging handler, connection pool or async executor is not -- confinement
+    that reports success while a hole stays open, which is the one outcome this
+    package treats as worse than refusing. So it refuses.
+
+    The fix is nearly always to seal earlier. `hlyn.on()` belongs at the top of
+    the program, before anything starts a thread.
+    """
+    tasks = crowd()
+    if len(tasks) <= 1:
+        return
+
+    import threading
+
+    named = [t.name for t in threading.enumerate() if t is not threading.current_thread()]
+    who = ", ".join(named[:4]) if named else "started by a native library, not by Python"
+    if len(named) > 4:
+        who += f", +{len(named) - 4} more"
+
+    raise Unsupported(
+        f"this process has {len(tasks)} threads, and Landlock can only confine the one "
+        f"that calls it -- the rest ({who}) would keep the access they already have. "
+        f"Refusing rather than reporting a boundary that is not there. "
+        f"Call hlyn.on() before anything starts a thread, usually the first line of the "
+        f"program; or use hlyn.run(fn), which forks a single-threaded child and confines "
+        f"that instead."
+    )
+
+
 def load(policy: Policy) -> int:
     """Apply `policy` to the calling process. One-way, and irreversible.
 
@@ -200,6 +256,7 @@ def load(policy: Policy) -> int:
     confined and is not is the single worst outcome this package can produce.
     """
     api = lib()
+    _alone()
 
     refused: list[tuple[str, str]] = []
     reads = _paths(policy.reads(), refused)

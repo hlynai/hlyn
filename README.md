@@ -314,6 +314,23 @@ the same wall that stops host filtering stops us reading a UDP port — and that
 breaks every hostname lookup. `net=False` closes both by refusing the socket
 outright.
 
+**Seal before starting threads.** Landlock confines the thread that calls it,
+and Linux credentials are per-thread — a thread already running keeps the
+access it had, and there is no way to make it adopt the boundary. (seccomp has
+no such gap: `TSYNC` covers every thread, so the syscall filter and `net=False`
+always apply.) Rather than report a boundary with a hole in it, `hlyn.on()`
+**refuses to seal when the process has more than one thread**. Put it at the
+top of the program, or use `hlyn.run(fn)`, which forks a single-threaded child
+and confines that.
+
+**A hardlink inside a granted directory reaches the file it points at.** Grants
+are paths, and a hardlink is a genuine second path to the same file — so a link
+planted in a granted directory before sealing is readable through it, whatever
+the policy says about where it really lives. Nothing in a path-based design can
+tell the two names apart. It matters when something other than the agent can
+write to a granted directory beforehand; the answer is not to share those
+directories, and not to run as root.
+
 **GPU workloads need `/proc` writable.** CUDA writes thread names under
 `/proc/<pid>/task/<tid>/comm`, and `/proc` is excluded by default because
 `/proc/self/environ` still holds the environment captured at exec time and
