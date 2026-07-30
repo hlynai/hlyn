@@ -1,3 +1,0 @@
-src/lib.rs:36:23: replace << with >>
-src/lib.rs:144:5: replace hlyn_abi -> i32 with 1
-src/lib.rs:145:12: replace < with == in hlyn_abi

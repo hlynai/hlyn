@@ -20,6 +20,11 @@ dev = ["pytest>=8", "hypothesis>=6", "mutmut>=3"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/hlyn"]
 
+# Compiles the Landlock shim and puts it beside the package, so an installed
+# wheel can confine without a build tree next to it. See hatch_build.py.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
 [tool.ruff]
 # The longest lines here are argparse declarations, where one flag per line is
 # more readable than the same flag wrapped across three.
