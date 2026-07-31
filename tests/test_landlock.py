@@ -391,12 +391,16 @@ def test_ipv6_gets_the_same_port_enforcement_as_ipv4():
     done = jail(
         """
         import socket
+        # Checked before connecting, not caught after: catching every OSError
+        # from the connect below would also catch ConnectionRefusedError, which
+        # means "nothing is listening" and says nothing about the policy -- the
+        # same shape of false pass as trusting any OSError anywhere else.
+        if not socket.has_ipv6:
+            print("NO IPV6"); raise SystemExit(0)
         try:
             socket.create_connection(("::1", 9000), timeout=1)
         except PermissionError:
             print("REFUSED"); raise SystemExit(0)
-        except OSError as exc:
-            print("NO IPV6", exc); raise SystemExit(0)
         print("ESCAPED"); raise SystemExit(1)
         """,
         policy="Policy(net=[8080])",
