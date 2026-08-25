@@ -206,8 +206,11 @@ hlyn audit -f policy.toml
     waive as: exfiltration:TCP 443
 ```
 
-It exits non-zero when something is outstanding, so it belongs in CI rather
-than in a report someone means to read. Among what it looks for:
+It exits non-zero when something outstanding reaches `--severity` (`low` by
+default), so it belongs in CI rather than in a report someone means to read.
+The threshold decides what fails a build, never what gets reported — a finding
+below it is still printed, because a way to stop seeing a risk is not the same
+thing as a way to decide it does not block a release. Among what it looks for:
 
 | Finding | Why it matters |
 |---|---|

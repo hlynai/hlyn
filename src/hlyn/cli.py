@@ -225,12 +225,34 @@ def _toml(plan: Policy) -> str:
 MARK = {"critical": "!!", "high": " !", "medium": " ~", "low": " -", "note": " ."}
 
 
+def _fails(verdict: object, level: str) -> bool:
+    """Whether anything outstanding is severe enough to fail the build.
+
+    Outstanding means live findings plus expired waivers -- an acceptance that
+    has run out is a decision nobody has made any more, so the risk is back.
+
+    An unrecognised level is refused rather than treated as "fail on
+    everything" or "fail on nothing". Either default would turn a typo into a
+    gate that silently does something other than what the flag says.
+    """
+    from . import audit
+
+    bar = audit.RANK.get(level.lower())
+    if bar is None:
+        known = ", ".join(sorted(audit.RANK, key=lambda name: audit.RANK[name]))
+        raise Error(f"unknown severity {level!r}. Known severities, worst first: {known}.")
+    left = [*verdict.live, *(item for item, _ in verdict.expired)]  # type: ignore[attr-defined]
+    return any(audit.RANK.get(item.severity, 9) <= bar for item in left)
+
+
 def _audit(args: argparse.Namespace) -> int:
     """Report the dangerous grants in a policy, and fail the build on them.
 
-    Exits non-zero when something is outstanding, so this is a CI gate rather
-    than a report someone means to read. What counts as outstanding is the
-    point: a finding with a recorded, unexpired acceptance is not.
+    Exits non-zero when something outstanding reaches `--severity`, so this is
+    a CI gate rather than a report someone means to read. What counts as
+    outstanding is the point: a finding with a recorded, unexpired acceptance
+    is not. Everything found is still printed either way -- the threshold
+    decides what fails the build, never what gets reported.
     """
     from . import accept, audit, ocsf
 
@@ -243,11 +265,12 @@ def _audit(args: argparse.Namespace) -> int:
 
     taken = accept.load(args.accepted) if args.accepted else ()
     verdict = accept.apply(found, taken)
+    bad = _fails(verdict, args.severity)
 
     if args.ocsf:
         excused = {item.id: seat.reason for item, seat in verdict.waived}
         print(json.dumps(ocsf.findings(found, excused), indent=2))
-        return 0 if verdict.clean else 1
+        return 1 if bad else 0
 
     if args.json:
         print(json.dumps({
@@ -257,8 +280,13 @@ def _audit(args: argparse.Namespace) -> int:
             "expired": [{"finding": i.id, **s.shape()} for i, s in verdict.expired],
             "stale": [s.shape() for s in verdict.stale],
             "clean": verdict.clean,
+            # `clean` is whether anything at all is outstanding; `failed` is
+            # whether the exit code says so. They differ exactly when something
+            # outstanding sits below --severity, which is what the flag is for.
+            "severity": args.severity,
+            "failed": bad,
         }, indent=2))
-        return 0 if verdict.clean else 1
+        return 1 if bad else 0
 
     for item in verdict.live:
         print(f"{MARK.get(item.severity, '  ')} {item.severity:<8} {item.says}")
@@ -283,8 +311,11 @@ def _audit(args: argparse.Namespace) -> int:
     counted = f"{len(verdict.live)} outstanding, {len(verdict.waived)} accepted"
     if verdict.expired:
         counted += f", {len(verdict.expired)} expired"
+    if verdict.live and not bad:
+        # Otherwise a non-zero count beside a zero exit code reads as a bug.
+        counted += f" (nothing at {args.severity} or worse, so this passes)"
     print(counted)
-    return 0 if verdict.clean else 1
+    return 1 if bad else 0
 
 
 def _verify(args: argparse.Namespace) -> int:
@@ -369,7 +400,12 @@ def _run(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
-    cmd = [item for item in args.cmd if item != "--"]
+    # Only the separator argparse left at the front. Stripping every `--` would
+    # rewrite the command being run -- `hlyn run -- git log -- src` would launch
+    # `git log src`, which is a different command, silently.
+    cmd = list(args.cmd)
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
 
     if args.verb == "watch":
         if not cmd:
