@@ -225,6 +225,20 @@ def test_profile_uses_literal_for_files_and_subpath_for_directories():
     assert f'(subpath "{os.path.realpath("/usr/share/zoneinfo")}")' in text
 
 
+def test_profile_refuses_a_path_that_does_not_exist():
+    # It used to skip it. A typo in a security policy was therefore an error on
+    # Linux and a silently missing rule on macOS -- and policies get written on
+    # macOS and deployed on Linux, so the platform that drops the rule is the
+    # one where nobody finds out.
+    from hlyn.core import mac
+    from hlyn.error import Invalid
+    from hlyn.policy import Policy
+
+    with pytest.raises(Invalid) as caught:
+        mac.profile(Policy(read=["/tmp", "/definitely/not/here"]))
+    assert "/definitely/not/here" in str(caught.value)
+
+
 def test_profile_refuses_paths_it_cannot_express():
     from hlyn.core import mac
     from hlyn.error import Invalid

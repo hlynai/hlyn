@@ -124,16 +124,25 @@ def quote(path: str) -> str:
     return f'"{path}"'
 
 
-def where(paths: Iterable[str]) -> list[str]:
+def where(paths: Iterable[str], refused: list[str] | None = None) -> list[str]:
     """Render path filters, matching a whole tree or a single file.
 
     `subpath` covers a directory and everything under it. For a plain file it
     matches nothing useful, so files get `literal` instead.
+
+    A path that does not exist is collected in `refused` rather than skipped,
+    so `profile` can refuse the whole policy the way the Linux backend does. A
+    typo in a security policy must not be silently dropped on one platform and
+    refused on the other -- policies are written on macOS and deployed on
+    Linux, and a rule that vanishes on the machine it was authored on is one
+    nobody finds out about until it matters.
     """
     out = []
     for path in paths:
         item = real(path)
         if not os.path.exists(item):
+            if refused is not None:
+                refused.append(path)
             continue
         kind = "subpath" if os.path.isdir(item) else "literal"
         out.append(f"({kind} {quote(item)})")
@@ -148,27 +157,38 @@ def profile(policy: Policy) -> str:
     way to check it without spending the process.
     """
     lines = ["(version 1)", "(deny default)", *BASE]
+    refused: list[str] = []
 
     reads = policy.reads()
     if reads is True:
         lines.append("(allow file-read*)")
     else:
-        for item in where(reads):
+        for item in where(reads, refused):
             lines.append(f"(allow file-read* {item})")
 
     writes = policy.writes()
     if writes is True:
         lines.append("(allow file-write*)")
     else:
-        for item in where(writes):
+        for item in where(writes, refused):
             lines.append(f"(allow file-write* {item})")
 
     runs = policy.runs()
     if runs is True:
         lines.append("(allow process-exec)")
     elif runs:
-        for item in where(runs):
+        for item in where(runs, refused):
             lines.append(f"(allow process-exec {item})")
+
+    if refused:
+        # Same refusal as the Linux backend, for the same reason: a path the
+        # policy names and the sandbox cannot see is a grant the reader
+        # believes in and the kernel never hears about.
+        raise Invalid(
+            "these paths do not exist, so they cannot be granted: "
+            + "; ".join(sorted(set(refused)))
+            + ". Create them, or remove them from the policy."
+        )
 
     if policy.net is True:
         lines.append("(allow network*)")
