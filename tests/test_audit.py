@@ -112,6 +112,15 @@ def test_a_log_outside_every_writable_path_is_fine():
     assert not only(audit.check(Policy(write=["/srv/app"], log="/var/log/hlyn.log")), "evidence")
 
 
+def test_a_log_in_the_scratch_directory_is_caught_too():
+    # The rule reads the resolved grants, not the `write` field, because the
+    # scratch directory is a grant nobody typed. A log written into it is as
+    # editable as one written into a named directory, and reading `write`
+    # alone would report the policy clean.
+    found = only(audit.check(Policy(tmp="/srv/scratch", log="/srv/scratch/hlyn.log")), "evidence")
+    assert found and found[0].severity == "high"
+
+
 def test_writing_where_programs_are_found_is_a_hijack():
     assert only(audit.check(Policy(write=["/usr/local/bin"])), "hijack")
 

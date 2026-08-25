@@ -319,11 +319,17 @@ def _hijack(plan: Policy, asked: Mapping[str, object] | None) -> Iterator[Findin
 
 @rule("evidence")
 def _evidence(plan: Policy, asked: Mapping[str, object] | None) -> Iterator[Finding]:
-    """The agent can rewrite the record of what it did."""
+    """The agent can rewrite the record of what it did.
+
+    Checked against the resolved grants rather than the `write` field, because
+    what matters is where the agent can write, not where the document says so.
+    The scratch directory is a grant nobody typed, and a log written into it is
+    as editable as one written into a named directory.
+    """
     if not isinstance(plan.log, str):
         return
     where = os.path.abspath(plan.log)
-    for spot in _listed(plan.write):
+    for spot in _listed(plan.writes()):
         if under(where, spot):
             yield Finding(
                 "evidence", where, "high",

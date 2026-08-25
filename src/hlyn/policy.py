@@ -452,15 +452,21 @@ class Policy:
         return prune(out)
 
     def writes(self) -> tuple[str, ...] | Literal[True]:
-        """Everything writable. The discard device is always included."""
+        """Everything writable. The discard device is always included.
+
+        The log file is deliberately **not** here. It is opened before the seal
+        and the descriptor survives it, so writing the record needs no grant --
+        and granting it would hand the agent write access to the record of what
+        it did, which is the one thing `hlyn audit`'s `evidence` rule exists to
+        warn about. A boundary that quietly grants what its own audit calls
+        dangerous is worse than one that does neither.
+        """
         if self.write is True:
             return True
         out = list(_items(self.write))
         out.extend(item for item in _sink() if os.path.exists(item))
         if isinstance(self.tmp, str):
             out.append(os.path.abspath(self.tmp))
-        if isinstance(self.log, str):
-            out.append(os.path.abspath(self.log))
         return prune(out)
 
     def runs(self) -> tuple[str, ...] | bool:

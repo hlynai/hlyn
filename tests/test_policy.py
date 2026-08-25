@@ -292,8 +292,30 @@ def test_exec_is_a_legal_keyword():
     assert Policy(exec=False).exec is False
 
 
-def test_log_path_becomes_writable():
-    assert any(under("/var/log/a.jsonl", item) for item in Policy(log="/var/log/a.jsonl").writes())
+def test_the_log_is_not_writable_by_the_agent():
+    # It used to be, and that quietly granted the agent write access to the
+    # record of what it did -- the exact thing `hlyn audit`'s `evidence` rule
+    # warns about, arriving from the policy layer where the rule could not see
+    # it. The grant is also unnecessary: `log.sink` opens the file before the
+    # seal and the descriptor keeps working afterwards.
+    where = "/var/log/a.jsonl"
+    assert not any(under(where, item) for item in Policy(log=where).writes())
+
+
+def test_logging_still_works_once_the_file_is_open(tmp_path):
+    # The other half. Dropping the grant must not stop the record being
+    # written, or the fix would have traded evidence for a boundary.
+    import json
+
+    from hlyn import log
+
+    where = tmp_path / "record.jsonl"
+    log.sink(str(where))
+    try:
+        log.emit("seal", backend="test")
+    finally:
+        log.sink(True)
+    assert json.loads(where.read_text().splitlines()[0])["kind"] == "seal"
 
 
 # ---------------------------------------------------------------------------
