@@ -288,6 +288,42 @@ def test_tcp_is_still_refused_when_the_network_is_closed():
     assert "ESCAPED" not in done.stdout
 
 
+def test_looking_for_open_sockets_does_not_close_them():
+    """The check for live connections used to close every socket it inspected.
+
+    `socket.socket(fileno=...)` takes ownership of the descriptor, so the
+    throwaway wrapper `wired` built to ask one question closed the socket on
+    the way out -- AF_UNIX included, which is never reported and so was closed
+    with nothing said. `net=False` is the default policy, so this ran on every
+    plain `hlyn.on()`: the same local IPC breakage the syscall filter was fixed
+    for, arriving one layer up. Freed descriptor numbers are then handed to the
+    next `open`, which is the part that is worse than a broken socket.
+    """
+    done = boot(
+        """
+        import socket
+        from hlyn.core.linux import wired
+
+        near, far = socket.socketpair()      # AF_UNIX: never reported
+        out = socket.socket()                # AF_INET: reported
+        found = wired()
+
+        print("reported", out.fileno() in found)
+        try:
+            near.send(b"x"); print("unix alive")
+        except OSError as exc:
+            print("UNIX CLOSED", type(exc).__name__)
+        try:
+            out.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE); print("inet alive")
+        except OSError as exc:
+            print("INET CLOSED", type(exc).__name__)
+        """
+    )
+    assert "reported True" in done.stdout, f"wired() stopped finding sockets: {done.stdout}"
+    assert "unix alive" in done.stdout, done.stdout + done.stderr
+    assert "inet alive" in done.stdout, done.stdout + done.stderr
+
+
 def test_sealing_with_a_network_socket_already_open_is_refused():
     """An open connection survives sealing: writing to it is an ordinary write.
 

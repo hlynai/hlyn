@@ -74,6 +74,13 @@ def wired() -> list[int]:
     being bound or connected. Neither touches a socket that is *already*
     connected: `write` on it is an ordinary write, and no filter here can tell
     that descriptor from a file. So the honest thing is to look before sealing.
+
+    This only ever looks. `socket.socket(fileno=...)` *takes ownership* of the
+    descriptor, so a wrapper left to fall out of scope closes the socket it was
+    built to inspect -- silently, and for every socket in the process, not just
+    the ones reported. That would close local IPC to enforce a network policy,
+    which is the exact bug `WIRE` in the syscall filter was emptied to fix.
+    Every wrapper below is therefore detached before it is dropped.
     """
     import socket
 
@@ -85,9 +92,18 @@ def wired() -> list[int]:
     for name in held:
         try:
             fd = int(name)
-            kind = socket.socket(fileno=fd).getsockopt(socket.SOL_SOCKET, DOMAIN)
+        except ValueError:
+            continue
+        try:
+            sock = socket.socket(fileno=fd)
         except (OSError, ValueError):
             continue  # not a socket, or already gone
+        try:
+            kind = sock.getsockopt(socket.SOL_SOCKET, DOMAIN)
+        except OSError:
+            continue
+        finally:
+            sock.detach()  # hand the descriptor back; never close it
         if kind in INET:
             out.append(fd)
     return out
