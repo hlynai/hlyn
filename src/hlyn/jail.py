@@ -141,6 +141,14 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
 
     plan, box = _scratch(_plan(policy, edits))
 
+    # Find the backend's libraries before the environment is scrubbed. The
+    # Landlock shim can be pointed at by HLYN_SHIM, which is not in the safe
+    # list, so resolving it any later looks for a variable that is already
+    # gone -- `hlyn probe` would honour the override and `hlyn.on()` would not,
+    # on the same machine. `ready` reports rather than raises; the real refusal
+    # still comes from `load` below, with its own message.
+    back().ready()
+
     # Read the signing key before the environment is scrubbed, which is in a
     # moment. It is named by an environment variable and is not in the safe
     # list -- correctly, since it is a secret -- so reading it any later gets
@@ -204,8 +212,17 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     For work that needs a tighter boundary than the caller wants to live with
     for the rest of its life: a single tool call, a single untrusted document.
     The parent is untouched.
+
+    One hazard worth knowing about, because this is also the documented way to
+    seal from a process that has threads. `fork` copies the calling thread and
+    no others, but it copies every lock in whatever state it was in, so a child
+    that needs a lock another thread was holding waits forever. The libraries
+    are loaded in the parent below for exactly that reason -- `dlopen` in the
+    child would take the loader lock, which is the one most likely to be held.
     """
     plan = _plan(policy, edits)
+    # Before the fork, never after: see the note above.
+    back().ready()
     read, write = os.pipe()
 
     kid = os.fork()

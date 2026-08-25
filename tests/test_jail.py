@@ -313,3 +313,51 @@ def test_spawn_refuses_a_command_it_cannot_find():
     )
     assert done.returncode == 0, done.stderr
     assert "REFUSED" in done.stdout
+
+
+# ---------------------------------------------------------------------------
+# order of operations around the scrub
+# ---------------------------------------------------------------------------
+
+
+def test_the_backend_is_found_before_the_environment_is_scrubbed():
+    """HLYN_SHIM names where the Landlock shim lives, and is not a safe name.
+
+    So it is gone by the time anything reads it, unless the backend's libraries
+    are resolved first. The symptom was `hlyn probe` honouring the override and
+    `hlyn.on()` refusing to find a shim, on the same machine and in the same
+    shell -- a probe that disagrees with the seal is worse than no probe.
+
+    The backend is faked because the ordering is the whole assertion and it
+    holds on every platform, including ones with no Landlock to point at.
+    """
+    done = boot(
+        """
+        import os, hlyn
+        from hlyn import jail
+
+        os.environ["HLYN_SHIM"] = "/nowhere/libhlyn.so"
+        saw = {}
+
+        class Fake:
+            __name__ = "hlyn.core.fake"
+
+            @staticmethod
+            def ready():
+                saw["ready"] = os.environ.get("HLYN_SHIM")
+                return True
+
+            @staticmethod
+            def load(plan):
+                saw["load"] = os.environ.get("HLYN_SHIM")
+                return 6
+
+        jail.back = lambda: Fake
+        hlyn.on(log=False, tmp=False)
+        print("ready saw", saw["ready"])
+        print("load saw", saw["load"])
+        """
+    )
+    assert "ready saw /nowhere/libhlyn.so" in done.stdout, done.stdout + done.stderr
+    # And the scrub still happens: the override is read early, not kept around.
+    assert "load saw None" in done.stdout, done.stdout + done.stderr
