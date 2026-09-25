@@ -411,7 +411,6 @@ class Policy:
     env: tuple[str, ...] | bool = False
     tmp: bool | str = True
     log: bool | str = True
-    attest: bool | str = False
 
     def __post_init__(self) -> None:
         put = object.__setattr__  # frozen dataclass, so assign through the base
@@ -424,8 +423,6 @@ class Policy:
             raise Invalid(f"tmp: expected a bool or a directory, got {self.tmp!r}.")
         if not isinstance(self.log, (bool, str)):
             raise Invalid(f"log: expected a bool or a file path, got {self.log!r}.")
-        if not isinstance(self.attest, (bool, str)):
-            raise Invalid(f"attest: expected a file path or False, got {self.attest!r}.")
 
     # -- derived views ------------------------------------------------------
     #
@@ -456,10 +453,8 @@ class Policy:
 
         The log file is deliberately **not** here. It is opened before the seal
         and the descriptor survives it, so writing the record needs no grant --
-        and granting it would hand the agent write access to the record of what
-        it did, which is the one thing `hlyn audit`'s `evidence` rule exists to
-        warn about. A boundary that quietly grants what its own audit calls
-        dangerous is worse than one that does neither.
+        and granting it would hand the agent write access to the record of
+        what it did, which defeats the point of keeping the record at all.
         """
         if self.write is True:
             return True
