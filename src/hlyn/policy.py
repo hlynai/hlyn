@@ -125,7 +125,7 @@ def ports(value: object, field: str = "net") -> tuple[int, ...] | bool:
                     f"{field}: host names are not enforceable yet, so {item!r} is refused "
                     f"rather than silently ignored. The kernel filters ports, not hosts. "
                     f"Use net=False to block all network access, net=True to allow it, or "
-                    f"name the ports, e.g. net=[443]."
+                    f"name the ports, e.g. net=[443] (on the command line: --net 443)."
                 )
             port = int(item)
         elif isinstance(item, int):

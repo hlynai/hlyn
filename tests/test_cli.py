@@ -40,10 +40,22 @@ def hlyn(*args: str) -> subprocess.CompletedProcess:
     )
 
 
-def test_probe_prints_json():
-    done = hlyn("probe")
-    out = json.loads(done.stdout)
+def test_version_is_one_flag_away():
+    done = hlyn("--version")
+    assert done.returncode == 0
+    assert done.stdout.startswith("hlyn ")
+
+
+def test_probe_prints_json_when_asked():
+    out = json.loads(hlyn("probe", "--json").stdout)
     assert "enforce" in out and "platform" in out
+
+
+def test_probe_speaks_to_a_person_by_default():
+    out = hlyn("probe").stdout
+    assert "hlyn can" in out and "isolation between agents" in out
+    with pytest.raises(ValueError):
+        json.loads(out)
 
 
 @here
@@ -53,23 +65,66 @@ def test_probe_exits_zero_when_the_machine_can_enforce():
 
 
 def test_presets_lists_the_built_ins():
-    names = hlyn("presets").stdout.split()
-    assert {"strict", "coder", "web", "data", "debug"} <= set(names)
+    names = {line.split()[0] for line in hlyn("presets").stdout.splitlines()}
+    assert {"strict", "coder", "web", "data", "debug"} <= names
+
+
+def test_presets_say_what_each_one_grants():
+    lines = {line.split()[0]: line for line in hlyn("presets").stdout.splitlines()}
+    assert "any network" in lines["web"]
+    assert "run any program" in lines["coder"]
 
 
 def test_show_prints_the_resolved_policy():
-    out = json.loads(hlyn("show", "--read", "/srv", "--net", "443").stdout)
+    out = json.loads(hlyn("show", "--read", "/srv", "--net", "443", "--json").stdout)
     assert out["net"] == [443]
     assert any(item == "/srv" for item in out["read"])
 
 
+def test_show_prints_toml_by_default_like_watch():
+    out = hlyn("show", "--net", "443", "--intent").stdout
+    assert "net = [" in out and "443" in out
+
+
 def test_show_applies_a_preset():
-    assert json.loads(hlyn("show", "--preset", "web").stdout)["net"] is True
+    assert json.loads(hlyn("show", "--preset", "web", "--json").stdout)["net"] is True
 
 
 def test_show_never_leaks_secrets_in_the_env_summary():
-    out = json.loads(hlyn("show").stdout)
+    out = json.loads(hlyn("show", "--json").stdout)
     assert all("KEY" not in name and "SECRET" not in name for name in out["env"])
+
+
+def test_flags_add_to_a_policy_file_never_replace_it(tmp_path):
+    # `--net 8080` on top of a file granting 443 used to drop 443 -- read and
+    # write were merged but exec, net and env were overwritten.
+    policy = tmp_path / "policy.toml"
+    policy.write_text('net = [443]\nexec = ["/usr/bin/true"]\nenv = ["A"]\n')
+    out = json.loads(hlyn(
+        "show", "-f", str(policy), "--net", "8080", "--exec", "/bin/ls", "--env", "B",
+        "--intent", "--json",
+    ).stdout)
+    assert out["net"] == [443, 8080]
+    assert set(out["exec"]) == {"/usr/bin/true", "/bin/ls"}
+    assert set(out["env"]) == {"A", "B"}
+
+
+def test_a_flag_never_narrows_a_field_that_grants_everything(tmp_path):
+    policy = tmp_path / "policy.toml"
+    policy.write_text("read = true\nnet = true\n")
+    out = json.loads(hlyn(
+        "show", "-f", str(policy), "--read", "/srv", "--net", "443", "--intent", "--json",
+    ).stdout)
+    assert out["read"] is True
+    assert out["net"] is True
+
+
+def test_a_host_name_gets_the_reason_not_a_type_error():
+    done = hlyn("show", "--net", "api.openai.com")
+    assert done.returncode == 2
+    assert "host names are not enforceable" in done.stderr
+    assert "--net 443" in done.stderr
+    assert "invalid int" not in done.stderr
 
 
 def test_run_without_a_command_explains_itself():
@@ -127,3 +182,25 @@ def test_a_separator_inside_the_command_is_left_alone():
         "--", "kept",
     )
     assert "ARGV ['--', 'kept']" in done.stdout, f"the separator was eaten: {done.stdout}{done.stderr}"
+
+
+@here
+def test_run_passes_on_the_exit_code_and_says_what_to_try():
+    done = hlyn("run", "--no-log", "--", sys.executable, "-c", "import sys; sys.exit(3)")
+    assert done.returncode == 3
+    assert "Allow it with --read" in done.stderr
+    assert "hlyn watch --" in done.stderr, "a Python command should be pointed at watch"
+
+
+@here
+def test_run_is_silent_when_the_command_succeeds():
+    done = hlyn("run", "--no-log", "--", sys.executable, "-c", "print('UP')")
+    assert done.returncode == 0
+    assert done.stderr == ""
+
+
+def test_a_command_that_cannot_start_gets_one_message_not_a_hint():
+    done = hlyn("run", "--no-log", "--", "no-such-program-hlyn")
+    assert done.returncode == 1
+    assert "was not found" in done.stderr
+    assert "Allow it with" not in done.stderr
