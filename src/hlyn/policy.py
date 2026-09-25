@@ -378,6 +378,62 @@ def runtime() -> tuple[str, ...]:
     return prune(item for item in out if os.path.exists(item))
 
 
+# Name lookup: the resolver's configuration, the hosts file, and the tables
+# `getaddrinfo` consults to turn "https" into 443.
+LOOKUP: tuple[str, ...] = (
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/nsswitch.conf",
+    "/etc/host.conf",
+    "/etc/gai.conf",
+    "/etc/services",
+    "/etc/protocols",
+)
+
+# Certificate authorities, as each distribution lays them out. Named narrowly:
+# `/etc/ssl` and `/etc/pki/tls` also hold `private/`, where keys live.
+TRUST: tuple[str, ...] = (
+    "/etc/ssl/certs",                   # Debian, Ubuntu, Alpine, Arch
+    "/etc/ssl/cert.pem",                # Alpine, macOS, BSD-style layouts
+    "/etc/ssl/ca-bundle.pem",           # SUSE
+    "/etc/pki/tls/certs",               # Fedora, RHEL
+    "/etc/pki/tls/cert.pem",
+    "/etc/pki/ca-trust",                # Fedora, RHEL: where the above point
+    "/etc/ca-certificates",
+    "/usr/share/ca-certificates",       # Debian: where /etc/ssl/certs points
+    "/usr/local/share/ca-certificates",
+    "/var/lib/ca-certificates",         # SUSE
+)
+
+
+def network() -> tuple[str, ...]:
+    """Files a program reads to use the network at all: name lookup and TLS trust.
+
+    Granted whenever `net` is not False. Without them a policy that allows
+    port 443 still cannot make an HTTPS request: the resolver cannot read
+    `/etc/resolv.conf` and reports a *name resolution* failure, and no
+    certificate authority loads, so every handshake fails verification. Neither
+    error mentions a path, which is what makes this worth granting by default.
+
+    Everything here is public system configuration. The interpreter's own
+    OpenSSL is asked where it looks, so a Homebrew, conda or custom build is
+    covered as well as the distribution's.
+    """
+    import ssl
+
+    out: set[str] = {*LOOKUP, *TRUST}
+    with contextlib.suppress(Exception):
+        found = ssl.get_default_verify_paths()
+        out.update(
+            item
+            for item in (found.cafile, found.capath, found.openssl_cafile, found.openssl_capath)
+            if item
+        )
+    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+        out.update(item for item in os.environ.get(name, "").split(os.pathsep) if item)
+    return prune(os.path.abspath(item) for item in out if os.path.exists(item))
+
+
 # ---------------------------------------------------------------------------
 # the policy itself
 # ---------------------------------------------------------------------------
@@ -444,6 +500,8 @@ class Policy:
         # directories are added rather than `/`; see `programs`.
         if self.exec is True:
             out.extend(programs())
+        if self.net is not False:
+            out.extend(network())
         if isinstance(self.tmp, str):
             out.append(os.path.abspath(self.tmp))
         return prune(out)

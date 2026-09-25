@@ -50,6 +50,9 @@ BASE: tuple[str, ...] = (
     '(allow file-read* (literal "/"))',
 )
 
+# The system resolver's socket. Every name lookup on macOS goes through it.
+RESOLVER = "/private/var/run/mDNSResponder"
+
 
 _lib: ctypes.CDLL | None = None
 
@@ -197,6 +200,10 @@ def profile(policy: Policy) -> str:
         # inbound connections, which an agent should have to ask for.
         for port in policy.net:
             lines.append(f'(allow network-outbound (remote tcp "*:{port}"))')
+        # macOS resolves names through this daemon rather than by sending DNS
+        # itself. Without it, allowing port 443 still cannot reach a host by
+        # name. The daemon answers lookups; it is not a way out to anywhere.
+        lines.append(f'(allow network-outbound (remote unix-socket (path-literal "{RESOLVER}")))')
 
     return "\n".join(lines)
 

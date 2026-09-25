@@ -237,12 +237,15 @@ def test_a_blanket_write_grant_never_widens_read(write, net):
     # grant read everywhere". This applies to the *bool* form only -- named
     # write paths are documented to cross over deliberately, because someone
     # writing write=["/out"] expects to read back what they wrote.
-    from hlyn.policy import runtime
+    from hlyn.policy import network, runtime
 
     p = Policy(write=write, net=net)
     got = p.reads()
     assert got is not True, "write=True widened read to everything"
-    assert set(got) == set(runtime())
+    # The only other thing read may gain is what the network itself needs,
+    # and only when the network is allowed.
+    base = set(runtime()) | (set(network()) if p.net is not False else set())
+    assert set(got) == set(prune(base))
 
 
 @given(write=PATHLIST, net=NETFIELD)
@@ -251,12 +254,14 @@ def test_named_write_paths_cross_over_to_read_but_nothing_else_does(write, net):
     # The documented exception, pinned so it stays an exception: a named write
     # path becomes readable, and the read set never grows beyond that plus the
     # runtime.
-    from hlyn.policy import runtime
+    from hlyn.policy import network, runtime
 
     p = Policy(write=write, net=net)
     got = p.reads()
     assert got is not True
     allowed = set(runtime()) | set(paths(write, "write") or ())
+    if p.net is not False:
+        allowed |= set(network())
     for item in got:
         assert any(under(item, ok) or under(ok, item) for ok in allowed), (
             f"reads() invented {item!r}, which is neither runtime nor a named write path"
