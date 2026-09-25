@@ -12,10 +12,12 @@ archive/
 # committed source.
 native/target/
 native/fuzz/target/
+native/report/target/
 
 # The shim is copied here at build time so it ships inside the wheel. It is a
 # build artifact, not source.
 src/hlyn/core/libhlyn.so
+src/hlyn/core/libhlyn_report.so
 
 # Wheels and sdists.
 dist/

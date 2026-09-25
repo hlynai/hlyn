@@ -13,10 +13,12 @@ needs to know.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 from collections.abc import Sequence
+from typing import Any
 
 from . import __version__, jail, spec
 from .error import Error
@@ -58,6 +60,10 @@ def build() -> argparse.ArgumentParser:
 
     go = sub.add_parser("run", help="confine this shell's child, then run a command")
     grants(go)
+    go.add_argument("--no-report", action="store_true",
+                    help="do not list what was blocked when the command ends")
+    go.add_argument("--json", action="store_true",
+                    help="print the list of what was blocked as JSON (on stderr)")
     go.add_argument("cmd", nargs=argparse.REMAINDER, help="-- command to run")
 
     check = sub.add_parser("probe", help="report what this machine can enforce")
@@ -122,7 +128,7 @@ def _policy(args: argparse.Namespace) -> Policy:
     return base.with_(**edits) if edits else base
 
 
-def _add(base: object, extra: list[str]) -> object:
+def _add(base: tuple[object, ...] | bool, extra: list[str]) -> object:
     """A field widened by flags. A field already granting everything stays so."""
     if base is True:
         return True
@@ -216,9 +222,11 @@ def _toml(data: dict[str, object]) -> str:
             out.append(f"{field} = {json.dumps(value)}")
         elif not value:
             out.append(f"{field} = []")
-        else:
+        elif isinstance(value, (list, tuple)):
             items = ",\n".join(f"  {json.dumps(item)}" for item in value)
             out.append(f"{field} = [\n{items},\n]")
+        else:
+            out.append(f"{field} = {json.dumps(value)}")
     return "\n".join(out) + "\n"
 
 
@@ -228,11 +236,13 @@ def _machine(out: dict[str, object]) -> str:
     if out.get("enforce"):
         head = f"ok  hlyn can confine programs on this machine ({where} {out.get('kernel', '')})".rstrip()
     else:
-        head = f"NO  hlyn cannot confine programs on this machine ({where}): {out.get('why', 'unknown reason')}"
+        why = out.get("why", "unknown reason")
+        head = f"NO  hlyn cannot confine programs on this machine ({where}): {why}"
     rows = [
         ("files and programs", out.get("enforce")),
         ("network ports", out.get("ports")),
         ("isolation between agents on this machine", out.get("scope")),
+        ("listing what was blocked, after hlyn run", out.get("report")),
     ]
     return "\n".join([head, *(f"    {'yes' if yes else 'no':<4}{name}" for name, yes in rows)]) + "\n"
 
@@ -264,72 +274,176 @@ def _gist(plan: Policy) -> str:
     return "; ".join(said)
 
 
-def _launch(cmd: list[str], plan: Policy) -> int:
-    """Run `cmd` confined in a child, and explain a failure when it has one.
+def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = False) -> int:
+    """Run `cmd` confined in a child, and say what it was refused.
 
-    The child seals itself and becomes `cmd`; this process stays unconfined
-    only to wait, pass on the exit code, and say what to try next. Exec-ing
-    directly would leave nobody to say it -- and a bare "Operation not
-    permitted" is the first thing every new user meets.
+    The child seals itself and becomes `cmd`; this process stays unconfined to
+    wait, listen for refusals while the command runs, pass on the exit code,
+    and say what to try next. Exec-ing directly would leave nobody to say it
+    -- and a bare "Operation not permitted" is the first thing every new user
+    meets.
 
     A pipe that closes on exec tells a failure to start (already reported by
     the child) apart from the command itself failing.
     """
-    import signal
+    from . import report
 
-    r, w = os.pipe()  # not inherited, so a successful exec closes `w`
-    pid = os.fork()
-    if pid == 0:
-        os.close(r)
-        try:
-            jail.spawn(cmd, plan)
-        except Error as exc:
-            print(f"hlyn: {exc}", file=sys.stderr)
-        except BaseException:
-            import traceback
+    ear = _listener(quiet)
+    # Everything from here on is undone on the way out, however it goes: a
+    # Ctrl-C while the macOS listener is starting would otherwise leave its
+    # `log stream` running for good, since nothing it filters for will come.
+    try:
+        ear.start()
+        book = report.Report(plan)
+        failed, status = _wait(cmd, ear.grant(plan), ear, book, plan)
+    finally:
+        ear.close()
 
-            traceback.print_exc()
-        os.write(w, b"x")
-        os._exit(1)
-
-    os.close(w)
-    # Ctrl-C reaches the child through the terminal; this process only waits.
-    # A signal sent to this process by pid is passed on, so killing hlyn kills
-    # the command it launched.
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, lambda num, _: os.kill(pid, num))
-    failed = os.read(r, 1)
-    os.close(r)
-    _, status = os.waitpid(pid, 0)
-    code = os.waitstatus_to_exitcode(status)
     if failed:
         return 1
-    if code:
-        _hint(cmd, code)
+    code = os.waitstatus_to_exitcode(status)
+    book.why = ear.why or _deaf(ear, cmd)
+    if as_json:
+        sys.stderr.write(json.dumps(book.json(code)) + "\n")
+    else:
+        sys.stderr.write(book.text(code, cmd))
     return code if code >= 0 else 128 - code
 
 
-def _hint(cmd: list[str], code: int) -> None:
+def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> tuple[bool, int]:
+    """Fork, seal and start the command, then listen until it exits.
+
+    Returns whether it failed to start, and its wait status.
+    """
+    import select
     import signal
 
-    if code == -signal.SIGSYS:
-        print(
-            "hlyn: the kernel stopped the command: it made a system call hlyn never allows "
-            "(e.g. ptrace, io_uring, mount, loading kernel modules).",
-            file=sys.stderr,
-        )
-        return
-    said = f"signal {-code}" if code < 0 else f"code {code}"
-    print(
-        f"hlyn: the command exited with {said}. If it was blocked, the error above names the "
-        f"path, program or port.\n      Allow it with --read, --write, --exec or --net.",
-        file=sys.stderr,
-    )
-    if os.path.basename(cmd[0]).startswith("python"):
-        import shlex
+    # SIGCHLD wakes the wait below the moment the command exits, instead of
+    # on the next poll. Set up before the fork so an instant exit is not missed.
+    wake_r, wake_w = os.pipe()
+    for fd in (wake_r, wake_w):
+        os.set_blocking(fd, False)
+    old_wake = signal.set_wakeup_fd(wake_w)
+    old_chld = signal.signal(signal.SIGCHLD, lambda *_: None)
+    r = -1
+    try:
+        r, w = os.pipe()  # not inherited, so a successful exec closes `w`
+        pid = os.fork()
+        if pid == 0:
+            signal.set_wakeup_fd(-1)
+            signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+            for fd in (r, wake_r, wake_w):
+                os.close(fd)
+            try:
+                jail._spawn(cmd, grants, ear.env, ear.tag)
+            except Error as exc:
+                print(f"hlyn: {exc}", file=sys.stderr)
+            except BaseException:  # noqa: BLE001 - anything at all, reported, then the child exits
+                import traceback
 
-        print(f"      Or draft the policy it needs with: hlyn watch -- {shlex.join(cmd)}", file=sys.stderr)
+                traceback.print_exc()
+            os.write(w, b"x")
+            os._exit(1)
+
+        os.close(w)
+        # Ctrl-C reaches the child through the terminal; this process only
+        # waits. A signal sent to this process by pid is passed on, so killing
+        # hlyn kills the command it launched.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, lambda num, _: os.kill(pid, num))
+
+        _log(plan)
+        failed = False
+        status = None
+        while status is None:
+            watch = [wake_r] + ([r] if r >= 0 else [])
+            heard = ear.fileno()
+            if heard is not None:
+                watch.append(heard)
+            ready, _, _ = select.select(watch, [], [], 0.5)
+            if wake_r in ready:
+                with contextlib.suppress(OSError):
+                    os.read(wake_r, 512)
+            if r >= 0 and r in ready:
+                failed = bool(os.read(r, 1))
+                os.close(r)
+                r = -1
+            _hear(ear, book)
+            done, found = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = found
+        for denial in ear.finish():
+            _file(book, denial)
+        return failed, status
+    finally:
+        if r >= 0:
+            os.close(r)
+        signal.set_wakeup_fd(old_wake)
+        signal.signal(signal.SIGCHLD, old_chld)
+        for fd in (wake_r, wake_w):
+            os.close(fd)
+
+
+def _listener(quiet: bool) -> Any:
+    """What will hear the command's refusals. Never raises: a run is never
+    refused because its report could not be set up."""
+    from . import report
+
+    if quiet:
+        return report.Quiet("turned off with --no-report")
+    try:
+        return jail.back().listen()
+    except Exception as exc:  # noqa: BLE001 - the report is an aid, never a reason not to run
+        return report.Quiet(f"listening failed ({exc})")
+
+
+def _deaf(ear: Any, cmd: list[str]) -> str | None:
+    """Why a listener that worked could still have heard nothing from `cmd`."""
+    import shutil
+
+    if ear.source != "program":
+        return None
+    from .core import preload
+
+    where = shutil.which(cmd[0])
+    if where and preload.static(where):
+        return f"{os.path.basename(cmd[0])} is statically linked, so hlyn cannot see inside it"
+    return None
+
+
+def _hear(ear: Any, book: Any) -> None:
+    for denial in ear.read():
+        _file(book, denial)
+
+
+def _file(book: Any, denial: Any) -> None:
+    """Add a refusal to the report, and to the log as it happens.
+
+    The record is written by this process, which is unconfined: the agent can
+    neither erase it nor, on macOS, forge it.
+    """
+    from . import log
+
+    entry = book.add(denial)
+    if entry is not None:
+        log.emit(
+            "deny", what=entry.kind, target=entry.target, allow=entry.allow,
+            credential=entry.credential, by=denial.by, pid=denial.pid,
+            op=denial.op, count=denial.count, source=denial.source,
+        )
+
+
+def _log(plan: Policy) -> None:
+    """Point this process's log where the policy says, as the child does."""
+    from . import log
+
+    if plan.log is False:
+        log.off()
+    elif isinstance(plan.log, str):
+        log.sink(plan.log)
+    else:
+        log.sink(True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -410,7 +524,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
 
     # Built here, before the fork, so a malformed policy is reported once, as
     # a sentence, with exit code 2 -- like every other command.
-    return _launch(cmd, _policy(args))
+    return _launch(cmd, _policy(args), args.no_report, args.json)
 
 
 if __name__ == "__main__":

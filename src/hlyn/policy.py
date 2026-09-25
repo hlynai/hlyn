@@ -243,7 +243,14 @@ def _lib() -> tuple[str, ...]:
             "/usr/share/zoneinfo",
             "/System/Library",
             "/private/var/db/dyld",
-            "/System/Volumes/Preboot/Cryptexes/OS",
+            # The whole cryptex volume, not just OS/: dyld probes Rosetta's
+            # cryptex on every launch, arm64 or not. System binaries, sealed.
+            "/System/Volumes/Preboot/Cryptexes",
+            # Locale data every process's C library reads at startup, and the
+            # file telling the logging system which messages to keep. Both
+            # found by listing what a bare `python3 -c pass` was refused.
+            "/usr/share/locale",
+            "/Library/Preferences/Logging",
         )
     return (
         "/lib",
@@ -262,7 +269,12 @@ def _lib() -> tuple[str, ...]:
 
 def _dev() -> tuple[str, ...]:
     """Character devices the runtime reads."""
-    return ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random", "/dev/full")
+    out = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random", "/dev/full")
+    if sys.platform == "darwin":
+        # Opened by macOS path lookup to avoid triggering automounts. Reading
+        # it yields nothing; being refused it makes every launch log a denial.
+        out += ("/dev/autofs_nowait",)
+    return out
 
 
 def _sink() -> tuple[str, ...]:
@@ -374,6 +386,10 @@ def runtime() -> tuple[str, ...]:
         out.add(os.path.abspath(sys.executable))
     out.update(_lib())
     out.update(_dev())
+    if sys.platform == "darwin":
+        # CoreFoundation reads this one-line encoding preference in every
+        # process that uses it. The file itself only, not the home directory.
+        out.add(os.path.expanduser("~/.CFUserTextEncoding"))
 
     return prune(item for item in out if os.path.exists(item))
 
@@ -403,6 +419,10 @@ TRUST: tuple[str, ...] = (
     "/usr/share/ca-certificates",       # Debian: where /etc/ssl/certs points
     "/usr/local/share/ca-certificates",
     "/var/lib/ca-certificates",         # SUSE
+    # OpenSSL's configuration, which LibreSSL and OpenSSL both read before a
+    # handshake. The file only: its directory is the one holding `private/`.
+    "/etc/ssl/openssl.cnf",
+    "/etc/pki/tls/openssl.cnf",
 )
 
 

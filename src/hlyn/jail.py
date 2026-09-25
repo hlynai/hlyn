@@ -27,6 +27,9 @@ from .policy import Policy, preset, presets
 
 __all__ = ["back", "on", "probe", "run", "sealed", "spawn"]
 
+# Given the environment the scrub kept, the variables to add to it.
+Extra = Callable[[Mapping[str, str]], Mapping[str, str]]
+
 
 _sealed = False
 
@@ -131,6 +134,16 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
     not apply it, because a caller that believes it is confined and is not is
     the worst outcome this package has.
     """
+    return _seal(_plan(policy, edits))
+
+
+def _seal(plan: Policy, extra: Extra | None = None, tag: str | None = None) -> dict[str, object]:
+    """`on`, for callers that also shape the environment or tag the seal.
+
+    `extra` returns variables to add after the environment is scrubbed, given
+    what the scrub kept; `tag` marks the backend's refusal reports. Both exist
+    for `hlyn run`, which uses them to hear what the command is refused.
+    """
     global _sealed
     if _sealed:
         raise Sealed(
@@ -138,7 +151,7 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
             "changed once applied. Build the full policy before calling on()."
         )
 
-    plan, box = _scratch(_plan(policy, edits))
+    plan, box = _scratch(plan)
 
     # Find the backend's libraries before the environment is scrubbed. The
     # Landlock shim can be pointed at by HLYN_SHIM, which is not in the safe
@@ -153,6 +166,8 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
     keep = plan.keep()
     if box:
         keep["TMPDIR"] = box
+    if extra is not None:
+        keep.update(extra(keep))
     os.environ.clear()
     os.environ.update(keep)
     tempfile.tempdir = box
@@ -162,7 +177,7 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
     elif isinstance(plan.log, str):
         log.sink(plan.log)
 
-    level = back().load(plan)
+    level = back().load(plan, tag) if tag else back().load(plan)
 
     _sealed = True
     log.seal(plan, back().__name__, level, box)
@@ -240,12 +255,17 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
     execute on itself: asking to run something and forbidding it in the same
     breath is a contradiction, not a policy.
     """
+    _spawn(cmd, _plan(policy, edits))
+
+
+def _spawn(
+    cmd: Sequence[str] | str, plan: Policy, extra: Extra | None = None, tag: str | None = None
+) -> None:
+    """`spawn`, with the same additions as `_seal`."""
     if isinstance(cmd, str):
         cmd = [cmd]
     if not cmd:
         raise Invalid("spawn needs a command to run.")
-
-    plan = _plan(policy, edits)
 
     where = shutil.which(cmd[0])
     if not where:
@@ -258,7 +278,7 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
             grant.append(where)
         plan = plan.with_(exec=grant)
 
-    on(plan)
+    _seal(plan, extra, tag)
     # No shell, deliberately: the command is executed as given, so nothing in
     # it is ever interpreted as shell syntax.
     os.execv(where, list(cmd))  # noqa: S606

@@ -42,6 +42,26 @@ import hlyn; hlyn.on("coder")
 hlyn run --read /srv --net 443 -- python agent.py
 ```
 
+**See what was blocked, and how to allow it.** When the command ends, `hlyn
+run` lists what the boundary refused, with the flag that would allow each one:
+
+```
+hlyn: the command exited with code 1. hlyn blocked 3 things:
+  read   ~/.ssh/id_ed25519      a credential: not suggested. Grant it yourself only if the agent should have it
+  read   /etc/app/config.json   allow with --read /etc/app/config.json
+  net    TCP 5432 (127.0.0.1)   allow with --net 5432
+  to allow all of these: --read /etc/app/config.json --net 5432
+```
+
+A run that succeeds but was refused something says so too, since a program
+that quietly worked around a refusal is not the one that was tested.
+Credentials are named and never given a flag: an agent reaching for keys is
+what the boundary is for. `--json` prints the list for machines; `--no-report`
+turns it off. On Linux, refusals are heard through a library preloaded into
+the command, which cannot see inside statically linked programs (most Go
+binaries) and says so. On macOS they come from the sandbox's own reports in
+the system log, which loses a few percent of them under load.
+
 **Confine one tool rather than the whole agent.** It runs in its own child
 process; the parent's permissions are never widened to accommodate it.
 
@@ -296,10 +316,14 @@ running total as `seen`, and counted silently in between. Nothing waits for
 process exit to be flushed, because a process refused by seccomp is killed
 rather than exited.
 
-What the log does **not** see is worth stating: kernel refusals as they happen.
-When Landlock denies a read, the agent gets `EACCES` straight from the syscall
-and no userspace code is consulted — which is exactly why the boundary is cheap
-and cannot be talked out of.
+Under `hlyn run`, every refusal the command meets is added as a `deny` record
+as it happens, written by `hlyn run`'s own unconfined process. On macOS the
+refusal comes from the kernel's sandbox report, which the agent cannot forge.
+On Linux it comes from a library inside the confined program, so the agent can
+invent one; each is checked against the policy and the file's own permissions
+before it is written, and a record claiming something the policy allows is
+dropped. `hlyn.on()` has no process outside the boundary to listen, so
+refusals inside it are not recorded.
 
 ## Known limits
 

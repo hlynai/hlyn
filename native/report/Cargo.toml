@@ -1,0 +1,32 @@
+[package]
+name = "report"
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+description = "Tells `hlyn run` which calls the boundary refused. Loaded with LD_PRELOAD."
+publish = false
+
+[lib]
+# `libhlyn_report.so`: named for what it belongs to, since it ends up in the
+# environment of every program an agent starts.
+name = "hlyn_report"
+crate-type = ["cdylib"]
+
+[dependencies]
+# The only dependency, and without std: this library is loaded into programs
+# nobody here wrote, so it brings nothing into them but a few wrappers.
+libc = { version = "0.2", default-features = false }
+
+# Its own workspace. The Landlock shim next door is a separate library with a
+# separate job, and nothing about building one should change the other.
+[workspace]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1

@@ -28,8 +28,9 @@ from collections.abc import Iterable
 
 from ..error import Failed, Invalid, Unsupported
 from ..policy import Policy
+from ..report import Listener
 
-__all__ = ["load", "probe", "profile", "ready", "seal"]
+__all__ = ["listen", "load", "probe", "profile", "ready", "seal"]
 
 
 # The interpreter cannot start without these. They grant no access to user
@@ -48,6 +49,14 @@ BASE: tuple[str, ...] = (
     # directory names, which are identical on every Mac; reaching anything
     # underneath still needs its own rule.
     '(allow file-read* (literal "/"))',
+    # The notification centre's shared memory, read-only. Every process that
+    # links Foundation maps it at startup; without it each launch logs a
+    # denial and carries on.
+    '(allow ipc-posix-shm-read-data (ipc-posix-name "apple.shm.notification_center"))',
+    # The system log's socket. Logging is already reachable through Mach
+    # (allowed above), so this adds no new way out; refusing it only turns
+    # every program's log call into a denial.
+    '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/syslog")))',
 )
 
 # The system resolver's socket. Every name lookup on macOS goes through it.
@@ -104,6 +113,9 @@ def probe() -> dict[str, object]:
         # left for someone to discover.
         "scope": False,
         "ports": ready(),
+        # Whether `hlyn run` can list what was blocked. Read from the system
+        # log, so it needs nothing built or installed.
+        "report": os.access("/usr/bin/log", os.X_OK),
     }
     if not out["enforce"]:
         out["why"] = "sandbox_init is unavailable"
@@ -152,14 +164,19 @@ def where(paths: Iterable[str], refused: list[str] | None = None) -> list[str]:
     return out
 
 
-def profile(policy: Policy) -> str:
+def profile(policy: Policy, tag: str | None = None) -> str:
     """The SBPL text enforcing `policy`.
 
     Returned as a string so it can be inspected and tested without applying it.
     Confinement is one-way; being able to read the profile first is the only
     way to check it without spending the process.
+
+    `tag` is appended by the kernel to every refusal it reports for this
+    process and its children, which is how `hlyn run` picks this run's
+    refusals out of the system log. It changes nothing about what is allowed.
     """
-    lines = ["(version 1)", "(deny default)", *BASE]
+    deny = f"(deny default (with message {quote(tag)}))" if tag else "(deny default)"
+    lines = ["(version 1)", deny, *BASE]
     refused: list[str] = []
 
     reads = policy.reads()
@@ -211,13 +228,16 @@ def profile(policy: Policy) -> str:
 # -- applying it ------------------------------------------------------------
 
 
-def load(policy: Policy) -> int:
-    """Apply `policy` to the calling process. One-way, and irreversible."""
+def load(policy: Policy, tag: str | None = None) -> int:
+    """Apply `policy` to the calling process. One-way, and irreversible.
+
+    `tag` marks this process's refusals in the system log; see `profile`.
+    """
     if sys.platform != "darwin":
         raise Unsupported("Seatbelt is a macOS facility.")
 
     api = lib()
-    text = profile(policy).encode()
+    text = profile(policy, tag).encode()
     err = ctypes.c_char_p()
     rc = api.sandbox_init(text, 0, ctypes.byref(err))
     if rc != 0:
@@ -232,3 +252,10 @@ def load(policy: Policy) -> int:
 
 
 seal = load
+
+
+def listen() -> Listener:
+    """How `hlyn run` hears what this backend refused: the system log."""
+    from .oslog import Listener
+
+    return Listener()

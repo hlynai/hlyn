@@ -186,7 +186,9 @@ def test_a_separator_inside_the_command_is_left_alone():
 
 @here
 def test_run_passes_on_the_exit_code_and_says_what_to_try():
-    done = hlyn("run", "--no-log", "--", sys.executable, "-c", "import sys; sys.exit(3)")
+    # --no-report: this is the hint for when nothing was heard, which a
+    # Python that lists its start folder on launch (macOS) would replace.
+    done = hlyn("run", "--no-log", "--no-report", "--", sys.executable, "-c", "import sys; sys.exit(3)")
     assert done.returncode == 3
     assert "Allow it with --read" in done.stderr
     assert "hlyn watch --" in done.stderr, "a Python command should be pointed at watch"

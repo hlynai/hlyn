@@ -14,8 +14,9 @@ import sys
 
 from ..error import Unsupported
 from ..policy import Policy
+from ..report import Quiet
 
-__all__ = ["load", "probe", "ready", "seal"]
+__all__ = ["listen", "load", "probe", "ready", "seal"]
 
 
 def ready() -> bool:
@@ -32,7 +33,7 @@ def probe() -> dict[str, object]:
     }
 
 
-def load(policy: Policy) -> int:
+def load(policy: Policy, tag: str | None = None) -> int:
     raise Unsupported(
         f"there is no enforcement backend for {sys.platform!r}, so this process "
         "cannot be confined. Refusing to continue rather than reporting a "
@@ -42,3 +43,7 @@ def load(policy: Policy) -> int:
 
 
 seal = load
+
+
+def listen() -> Quiet:
+    return Quiet("there is no enforcement backend for this platform")

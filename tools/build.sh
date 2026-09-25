@@ -24,7 +24,7 @@ docker run --rm -v "$root":/work:ro -v "$root/dist":/out hlyn-rust sh -c '
     python3 -m venv /venv && /venv/bin/pip install -q build
 
     cp -a /work /build && cd /build
-    rm -rf dist src/hlyn/core/libhlyn.so
+    rm -rf dist src/hlyn/core/libhlyn.so src/hlyn/core/libhlyn_report.so
     /venv/bin/python -m build 2>&1 | tail -2
 
     /venv/bin/pip install -q dist/*.whl
@@ -40,6 +40,10 @@ except (PermissionError, FileNotFoundError):
 assert open(\"/etc/hostname\").read()
 " 2>/dev/null
     echo "the installed wheel confines"
+    # And explains: the reporter shipped too, and `hlyn run` hears through it.
+    /venv/bin/hlyn run --no-log --json -- /venv/bin/python -c "open(\"/etc/shadow\")" 2>&1 >/dev/null \
+        | grep -q "\"target\": \"/etc/shadow\"" || { echo "the installed wheel cannot report" >&2; exit 1; }
+    echo "the installed wheel reports what it blocked"
     cp /build/dist/* /out/
 '
 

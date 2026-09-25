@@ -17,9 +17,10 @@ import platform
 
 from ..error import Unsupported
 from ..policy import Policy
-from . import landlock, seccomp
+from ..report import Listener
+from . import landlock, preload, seccomp
 
-__all__ = ["load", "probe", "ready", "seal"]
+__all__ = ["listen", "load", "probe", "ready", "seal"]
 
 
 def ready() -> bool:
@@ -45,6 +46,10 @@ def probe() -> dict[str, object]:
         "enforce": bool(abi) and filter,
         "scope": abi >= 6,  # signals and abstract sockets between agents
         "ports": abi >= 4,  # network rules at all
+        # Whether `hlyn run` can list what was blocked: needs the preloaded
+        # reporting library. Not part of `enforce` -- the boundary holds
+        # either way; only the explanation is missing.
+        "report": preload.find() is not None,
     }
     missing = []
     if not abi:
@@ -109,8 +114,12 @@ def wired() -> list[int]:
     return out
 
 
-def load(policy: Policy) -> int:
-    """Apply `policy` to the calling process. One-way, and irreversible."""
+def load(policy: Policy, tag: str | None = None) -> int:
+    """Apply `policy` to the calling process. One-way, and irreversible.
+
+    `tag` is unused here. On Linux, refusals are reported from inside the
+    confined programs rather than by the kernel; see `listen`.
+    """
     if policy.net is False:
         open_sockets = wired()
         if open_sockets:
@@ -128,3 +137,8 @@ def load(policy: Policy) -> int:
 
 
 seal = load
+
+
+def listen() -> Listener:
+    """How `hlyn run` hears what this backend refused: a preloaded library."""
+    return preload.Listener()

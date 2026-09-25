@@ -34,6 +34,10 @@ run_rust() {
         cargo clippy --all-targets -- -D warnings
         cargo audit
         cargo deny check
+        cd report
+        cargo clippy --lib -- -D warnings
+        cargo audit
+        cargo deny check --config ../deny.toml
     '
 }
 

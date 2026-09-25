@@ -7,14 +7,14 @@ What this can and cannot see is worth being exact about, because an
 observability layer that implies more than it observes is its own kind of lie.
 
 It records what *we* did: the boundary applied, the grants in it, and every
-refusal that passes back through this library, including the tool calls that
-framework hooks route through it.
+refusal that passes back through this library.
 
-It does not see kernel refusals as they happen. When Landlock denies a read the
-agent gets `EACCES` directly from the syscall; no userspace code is consulted,
-which is exactly why the boundary is cheap and cannot be talked out of. Catching
-those as they occur needs `SECCOMP_RET_USER_NOTIF` and a supervisor, which this
-version deliberately does not have.
+The kernel's own refusals are not something a confined process can see: when
+Landlock denies a read, the agent gets `EACCES` straight from the syscall and
+no userspace code is consulted, which is why the boundary is cheap and cannot
+be talked out of. `hlyn run` hears them from outside instead, and writes a
+`deny` record for each as it happens -- see `report.py` and the listeners in
+`core/`. `hlyn.on()` has nobody outside to listen, so it records only the seal.
 """
 
 from __future__ import annotations
