@@ -251,6 +251,12 @@ def _lib() -> tuple[str, ...]:
             # found by listing what a bare `python3 -c pass` was refused.
             "/usr/share/locale",
             "/Library/Preferences/Logging",
+            # Homebrew's installed software, which Homebrew's Pythons link
+            # against (OpenSSL, SQLite, libffi...). Packages only: Cellar holds
+            # no configuration or data -- those live in etc/ and var/, which
+            # stay closed. Skipped where Homebrew is not installed.
+            "/opt/homebrew/Cellar",
+            "/usr/local/Cellar",
         )
     return (
         "/lib",
@@ -336,7 +342,10 @@ def companion(program: str) -> str | None:
         return None
     real = os.path.realpath(program)
     version, sep, _ = real.partition("/bin/")  # .../Python.framework/Versions/X.Y
-    if not sep or os.path.dirname(version).rsplit("/", 2)[-2:] != ["Python.framework", "Versions"]:
+    frame = os.path.dirname(version).rsplit("/", 2)[-2:]
+    # Python.framework from python.org and Homebrew; Python3.framework from
+    # Apple's Command Line Tools.
+    if not sep or frame not in (["Python.framework", "Versions"], ["Python3.framework", "Versions"]):
         return None
     inner = os.path.join(version, "Resources", "Python.app")
     return inner if os.path.isdir(inner) else None

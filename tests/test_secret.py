@@ -8,6 +8,7 @@ it is not.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -61,7 +62,7 @@ def test_templates_and_public_keys_are_not_secrets(tmp_path):
     [".env", ".env.production", "id_rsa", "server.key", "credentials.json", "service-account-prod.json"],
 )
 def test_real_secret_names_are_found(tmp_path, name):
-    (tmp_path / name).write_text("x")
+    (tmp_path / name).write_text("-----BEGIN PRIVATE KEY-----\n")
     assert names(exposed(Policy(read=[tmp_path], net=True))) == {name}
 
 
@@ -148,3 +149,90 @@ def test_the_cli_warns_and_says_what_to_do(project):
         capture_output=True, text=True, env=env, check=False,
     )
     assert "warning" not in quiet.stderr
+
+
+@pytest.mark.parametrize(
+    "name", [".envrc", ".npmrc", ".netrc", "secrets.toml", "secrets.yaml", "terraform.tfstate", "prod.tfvars"]
+)
+def test_project_level_secrets_are_found(tmp_path, name):
+    (tmp_path / name).write_text("x")
+    assert names(exposed(Policy(read=[tmp_path], net=True))) == {name}
+
+
+def test_a_link_to_a_secret_outside_every_grant_is_not_exposed(tmp_path):
+    # The kernel checks where a link leads, so this one cannot be read.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "real.env").write_text("x")
+    granted = tmp_path / "granted"
+    granted.mkdir()
+    (granted / ".env").symlink_to(outside / "real.env")
+    assert exposed(Policy(read=[granted], net=True)) == []
+
+
+def test_a_link_to_a_secret_inside_a_grant_is_exposed(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "prod.key").write_text("-----BEGIN PRIVATE KEY-----\n")
+    (tmp_path / ".env").symlink_to(tmp_path / "config" / "prod.key")
+    assert names(exposed(Policy(read=[tmp_path], net=True))) == {".env", "prod.key"}
+
+
+def test_a_credential_folder_is_named_once_not_file_by_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    for name in ("id_rsa", "id_ed25519", "config"):
+        (ssh / name).write_text("x")
+    assert exposed(Policy(read=[tmp_path], net=True)) == [str(ssh)]
+
+
+def test_the_search_stops_when_its_time_is_up(tmp_path, monkeypatch):
+    import hlyn.secret as secret
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / ".env").write_text("x")
+    monkeypatch.setattr(secret, "TIME", -1.0)
+    assert exposed(Policy(read=[tmp_path], net=True)) == []
+
+
+def _seal_and_capture(project, log, tmp_path):
+    code = f"""
+import sys, warnings
+sys.path.insert(0, {SRC!r})
+import hlyn
+warnings.simplefilter("ignore")
+hlyn.on(read=[{str(project)!r}], net=[443], log={log!r})
+"""
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="seals")
+def test_the_log_record_goes_where_the_policy_says(project, tmp_path):
+    quiet = _seal_and_capture(project, False, tmp_path)
+    assert '"exposed"' not in quiet.stderr, quiet.stderr
+    record = tmp_path / "log.jsonl"
+    to_file = _seal_and_capture(project, str(record), tmp_path)
+    assert '"exposed"' not in to_file.stderr
+    rows = [json.loads(line) for line in record.read_text().splitlines()]
+    assert [row["kind"] for row in rows][:2] == ["exposed", "seal"]
+
+
+def test_the_cli_refuses_when_warnings_are_errors(project):
+    env = {"PYTHONPATH": SRC, "PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"),
+           "PYTHONWARNINGS": "error::hlyn.Exposed"}
+    done = subprocess.run(
+        [sys.executable, "-m", "hlyn.cli", "run", "--read", str(project), "--net", "443", "--",
+         sys.executable, "-c", "print('RAN')"],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert done.returncode == 2
+    assert "RAN" not in done.stdout
+    assert "hlyn: refused:" in done.stderr
+    assert "Traceback" not in done.stderr
+
+
+def test_a_keynote_file_or_a_public_certificate_is_not_a_secret(tmp_path):
+    (tmp_path / "Slides.key").write_bytes(b"PK\x03\x04 zip of a presentation")
+    (tmp_path / "ca.pem").write_text("-----BEGIN CERTIFICATE-----\nMIIB\n")
+    (tmp_path / "tls.pem").write_text("-----BEGIN RSA PRIVATE KEY-----\nMIIE\n")
+    assert names(exposed(Policy(read=[tmp_path], net=True))) == {"tls.pem"}

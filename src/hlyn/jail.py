@@ -23,7 +23,7 @@ from typing import Any
 
 from . import log
 from .error import Failed, Invalid, Sealed
-from .policy import Policy, companion, preset, presets
+from .policy import Policy, preset, presets
 
 __all__ = ["back", "on", "probe", "run", "sealed", "spawn"]
 
@@ -134,17 +134,24 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
     not apply it, because a caller that believes it is confined and is not is
     the worst outcome this package has.
     """
+    if _sealed:
+        raise Sealed(
+            "this process is already confined, and confinement cannot be "
+            "changed once applied. Build the full policy before calling on()."
+        )
     plan = _plan(policy, edits)
-    _warn(plan)
-    return _seal(plan)
+    return _seal(plan, found=_warn(plan))
 
 
-def _warn(plan: Policy) -> None:
+def _warn(plan: Policy) -> list[str]:
     """Say, before sealing, if the policy lets secrets out. See `secret.py`.
 
-    A Python warning, so it can be filtered or made an error like any other
-    (`warnings.simplefilter("error", hlyn.Exposed)` in a test suite), and a
-    log record, so it is on file with the seal it preceded.
+    A Python warning, so it can be filtered like any other. Made an error
+    (`warnings.simplefilter("error", hlyn.Exposed)`, or `-W error`), it is
+    raised here -- before the seal, so the process is left untouched, and a
+    test suite can use it to keep leaky policies out. Returns what was found,
+    for the log record `_seal` writes once the log is pointed where the
+    policy says.
     """
     import warnings
 
@@ -153,10 +160,12 @@ def _warn(plan: Policy) -> None:
     found = exposed(plan)
     if found:
         warnings.warn(warning(found, cli=False), Exposed, stacklevel=3)
-        log.emit("exposed", paths=found[:20])
+    return found
 
 
-def _seal(plan: Policy, extra: Extra | None = None, tag: str | None = None) -> dict[str, object]:
+def _seal(
+    plan: Policy, extra: Extra | None = None, tag: str | None = None, found: list[str] | None = None
+) -> dict[str, object]:
     """`on`, for callers that also shape the environment or tag the seal.
 
     `extra` returns variables to add after the environment is scrubbed, given
@@ -195,6 +204,8 @@ def _seal(plan: Policy, extra: Extra | None = None, tag: str | None = None) -> d
         log.off()
     elif isinstance(plan.log, str):
         log.sink(plan.log)
+    if found:
+        log.emit("exposed", paths=found[:20])
 
     level = back().load(plan, tag) if tag else back().load(plan)
 
@@ -275,12 +286,15 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
     breath is a contradiction, not a policy.
     """
     plan = _plan(policy, edits)
-    _warn(plan)
-    _spawn(cmd, plan)
+    _spawn(cmd, plan, found=_warn(plan))
 
 
 def _spawn(
-    cmd: Sequence[str] | str, plan: Policy, extra: Extra | None = None, tag: str | None = None
+    cmd: Sequence[str] | str,
+    plan: Policy,
+    extra: Extra | None = None,
+    tag: str | None = None,
+    found: list[str] | None = None,
 ) -> None:
     """`spawn`, with the same additions as `_seal`."""
     if isinstance(cmd, str):
@@ -288,21 +302,29 @@ def _spawn(
     if not cmd:
         raise Invalid("spawn needs a command to run.")
 
-    where = shutil.which(cmd[0])
-    if not where:
+    named = shutil.which(cmd[0])
+    if not named:
         raise Invalid(f"{cmd[0]!r} was not found on PATH, so it cannot be run.")
-    where = os.path.realpath(where)
+    # Granted by its real path, which is what the kernel checks; run by the
+    # path it was found at. The difference matters for a virtualenv: its
+    # python is a link, and executing the link's target directly starts the
+    # base interpreter without the venv.
+    named = os.path.abspath(named)
+    where = os.path.realpath(named)
 
-    if plan.exec is not True:
-        grant = list(plan.exec) if isinstance(plan.exec, tuple) else []
-        needs = [where]
-        inner = companion(where)
-        if inner:
-            needs.append(inner)
-        grant.extend(item for item in needs if item not in grant)
-        plan = plan.with_(exec=grant)
+    # A Python other than hlyn's own needs its own files granted, and a
+    # launcher (Apple's /usr/bin/python3, pyenv's shims) needs the interpreter
+    # it would start. See interpreter.py. The command itself is always granted
+    # execute: asking to run it and forbidding it is a contradiction.
+    from . import interpreter
 
-    _seal(plan, extra, tag)
+    plan, run = interpreter.grants(interpreter.ask(cmd[0], where), plan, where)
+    if run == where:
+        run, argv = named, list(cmd)
+    else:
+        argv = [run, *cmd[1:]]  # a launcher, followed: see interpreter.py
+
+    _seal(plan, extra, tag, found)
     # No shell, deliberately: the command is executed as given, so nothing in
     # it is ever interpreted as shell syntax.
-    os.execv(where, list(cmd))  # noqa: S606
+    os.execv(run, argv)  # noqa: S606

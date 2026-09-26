@@ -385,14 +385,18 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
             os.close(fd)
 
 
-def _exposed(plan: Policy) -> None:
-    """Warn, on stderr, when the policy lets secrets out. Never stops the run:
-    the user may mean it, and the message says how to say so.
+def _exposed(plan: Policy) -> bool:
+    """Warn, on stderr, when the policy lets secrets out. By default the run
+    goes ahead: the user may mean it, and the message says how to say so.
 
     Raised through `warnings`, so the standard filters apply: a user who has
     accepted it silences it with PYTHONWARNINGS=ignore::hlyn.Exposed, the same
     way as for the library. Printed by us, so it reads as a sentence rather
     than a file-and-line warning.
+
+    Returns False when the filters make it an error
+    (PYTHONWARNINGS=error::hlyn.Exposed, or -W error): the run is refused,
+    which is how a CI job keeps a leaky policy from shipping.
     """
     import warnings
 
@@ -400,12 +404,19 @@ def _exposed(plan: Policy) -> None:
 
     found = exposed(plan)
     if not found:
-        return
+        return True
     text = warning(found, cli=True)
-    with warnings.catch_warnings(record=True) as heard:
-        warnings.warn(text, Exposed, stacklevel=1)
+    try:
+        with warnings.catch_warnings(record=True) as heard:
+            warnings.warn(text, Exposed, stacklevel=1)
+    except Exposed:
+        refused = text.replace("hlyn: warning:", "hlyn: refused:", 1).rsplit("\n  Meant it?", 1)[0]
+        print(refused, file=sys.stderr)
+        print("  Refused because warnings are errors here (PYTHONWARNINGS / -W error).", file=sys.stderr)
+        return False
     if heard:
         print(text, file=sys.stderr)
+    return True
 
 
 def _listener(quiet: bool) -> Any:
@@ -504,7 +515,8 @@ def _run(argv: Sequence[str] | None = None) -> int:
 
     if args.verb == "show":
         p = _policy(args)
-        _exposed(p)
+        if not _exposed(p):
+            return 2
         if args.intent:
             # What was asked for, not what it becomes: this is the form a file
             # holds, so `hlyn show --intent > policy.toml` is how a set of
@@ -549,7 +561,8 @@ def _run(argv: Sequence[str] | None = None) -> int:
     # Built here, before the fork, so a malformed policy is reported once, as
     # a sentence, with exit code 2 -- like every other command.
     plan = _policy(args)
-    _exposed(plan)
+    if not _exposed(plan):
+        return 2
     return _launch(cmd, plan, args.no_report, args.json)
 
 

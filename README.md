@@ -148,6 +148,8 @@ hlyn run -f policy.toml -- ./my-agent
 
 `hlyn run` confines the command and everything it starts, whatever language it is written in.
 
+**Any Python works**, not just the one hlyn is installed in: a project venv, Homebrew's, pyenv's, `uv`'s, or Apple's `/usr/bin/python3`. Before sealing, hlyn asks that interpreter (itself confined: no writing, no network) where its standard library and packages are, and grants reading them. Launchers such as pyenv shims are followed to the real interpreter.
+
 ### Confine one risky step, not the whole program
 
 ```python
@@ -207,11 +209,12 @@ hlyn: warning: the agent can read 1 secret file and reach the network, so it cou
 
 | Detail | Behaviour |
 |---|---|
-| What counts as a secret | `.env` and `.env.*` (except `.example`, `.sample`, `.template`), private SSH keys, `*.pem`, `*.key`, `*.p12`, `credentials.json`, service-account JSON, `~/.aws`, `~/.ssh`, `~/.kube`, … |
+| What counts as a secret | `.env`, `.env.*` (not `.example`/`.sample`/`.template`), `.envrc`, `.npmrc`, `.netrc`, private SSH keys, `secrets.toml`/`.yaml`, `credentials.json`, service-account JSON, Terraform state, `~/.aws`, `~/.ssh`, `~/.kube`, … A `.key` or `.pem` file counts only if it holds a private key, so Keynote files and public certificates don't. |
 | When it warns | Only when a secret is readable **through a folder** **and** the network is open |
 | Granting a secret file on its own | No warning. Naming it is a decision. |
-| Where it looks | Up to 4 folders deep, skipping `.git`, `node_modules`, `.venv` and build output |
-| In Python | Raised as a `hlyn.Exposed` warning, so the standard filters apply (e.g. make it an error in your tests) |
+| Where it looks | Up to 4 folders deep, for at most half a second, skipping `.git`, `node_modules`, `.venv` and build output. Links are followed only as far as the kernel would. Files that live only in iCloud/Dropbox are never downloaded to be checked. |
+| In Python | Raised as a `hlyn.Exposed` warning, so the standard filters apply |
+| Make it an error | `PYTHONWARNINGS=error::hlyn.Exposed` refuses the run (exit 2), which keeps leaky policies out of CI. In Python, `warnings.simplefilter("error", hlyn.Exposed)` raises before anything is sealed. |
 | Check a policy yourself | `hlyn.exposed(policy)` returns the list |
 
 ### Policy files

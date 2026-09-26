@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from collections.abc import Iterator
 
 from .policy import Policy, prune, under
@@ -45,8 +46,10 @@ SYSTEM: tuple[str, ...] = (
 KEYS = re.compile(
     r"^(id_(rsa|dsa|ecdsa|ed25519)(_sk)?"
     r"|\.env(\.(?!example$|sample$|template$|dist$|defaults$)[^/]+)?"
-    r"|credentials(\.json)?|service[-_]?account.*\.json"
-    r"|.*\.(pem|key|p12|pfx|kdbx|keystore|jks))$",
+    r"|\.envrc|\.netrc|\.npmrc|\.pypirc|\.pgpass|\.git-credentials|\.htpasswd"
+    r"|credentials(\.json)?|service[-_]?account.*\.json|secrets?\.(ya?ml|json|toml)"
+    r"|kubeconfig|terraform\.tfstate(\.backup)?"
+    r"|.*\.(pem|key|p12|pfx|ppk|kdbx|keystore|jks|tfvars))$",
     re.IGNORECASE,
 )
 
@@ -70,13 +73,24 @@ SKIP = frozenset({
 # minutes. A secret deeper than this is missed, never invented.
 DEPTH = 4
 LOOKS = 20_000
+TIME = 0.5  # seconds, for a slow or network filesystem
+
+
+_homes: dict[str, tuple[str, ...]] = {}
+
+
+def _places(home: str) -> tuple[str, ...]:
+    """HOMES under `home`, worked out once per home rather than per file."""
+    found = _homes.get(home)
+    if found is None:
+        found = _homes[home] = tuple(os.path.join(home, item) for item in HOMES)
+    return found
 
 
 def credential(path: str) -> bool:
     """True if `path` is somewhere keys, tokens or passwords live."""
-    home = os.path.expanduser("~")
-    for item in HOMES:
-        if under(path, os.path.join(home, item)):
+    for place in _places(os.path.expanduser("~")):
+        if under(path, place):
             return True
     if any(under(path, item) for item in SYSTEM):
         return True
@@ -88,27 +102,80 @@ def secret(name: str) -> bool:
     return bool(NAMES.search(name))
 
 
-def _walk(root: str, budget: list[int]) -> Iterator[str]:
-    """Every file and folder under `root`, shallow first, within the budget."""
+def _walk(root: str, budget: list[float]) -> Iterator[str]:
+    """Every file and folder under `root`, shallow first, within the budget.
+
+    `budget` is [entries left, deadline]. Symlinked folders are not followed:
+    the kernel resolves a link before checking it, so a link out of a granted
+    folder does not make its target readable. A credential folder is yielded
+    and not entered -- naming `~/.ssh` once says more than listing its keys.
+    """
     level = [root]
     for _ in range(DEPTH):
         below: list[str] = []
         for folder in level:
+            if time.monotonic() > budget[1]:
+                return
             try:
                 entries = list(os.scandir(folder))
             except OSError:
                 continue
             for entry in entries:
                 budget[0] -= 1
-                if budget[0] < 0:
+                if budget[0] < 0 or time.monotonic() > budget[1]:
                     return
                 yield entry.path
                 try:
-                    if entry.is_dir(follow_symlinks=False) and entry.name not in SKIP:
+                    if (
+                        entry.is_dir(follow_symlinks=False)
+                        and entry.name not in SKIP
+                        and not credential(entry.path)
+                    ):
                         below.append(entry.path)
                 except OSError:
                     continue
         level = below
+
+
+# Extensions shared with things that are not secrets: `.key` is also a Keynote
+# presentation and `.pem` is usually a public certificate. For these the file
+# itself is checked for a private key before it is called one.
+AMBIGUOUS = (".key", ".pem")
+
+
+# macOS marks a file whose contents live only in the cloud (iCloud Drive,
+# Dropbox, OneDrive) as dataless; opening one downloads it, which can take
+# seconds and is not something a safety check should do.
+DATALESS = 0x40000000
+
+
+def _holds_key(path: str) -> bool:
+    """Whether a `.key` or `.pem` file actually contains a private key."""
+    try:
+        info = os.stat(path)
+        if getattr(info, "st_flags", 0) & DATALESS or info.st_size > 1 << 20:
+            return False  # a cloud placeholder, or far too big to be a key
+        with open(path, "rb") as fh:
+            head = fh.read(8192)
+    except OSError:
+        return True  # cannot tell, so err towards saying so
+    return b"PRIVATE KEY" in head
+
+
+def _secret_file(path: str) -> bool:
+    """`credential`, sharpened for warnings: ambiguous extensions are opened."""
+    if not credential(path):
+        return False
+    if path.lower().endswith(AMBIGUOUS) and os.path.isfile(path):
+        return _holds_key(path)
+    return True
+
+
+def _within(path: str, roots: list[str]) -> bool:
+    """Whether `path`, links resolved, is inside one of `roots`: whether the
+    kernel would actually let the agent read it."""
+    real = os.path.realpath(path)
+    return any(under(real, root) for root in roots)
 
 
 def exposed(plan: Policy) -> list[str]:
@@ -118,31 +185,32 @@ def exposed(plan: Policy) -> list[str]:
     its own -- `read=[".env"]` -- is a decision, and repeating it back as a
     warning would teach people to ignore the warning. (Named *inside* a
     granted folder it cannot be told apart: the policy drops a path its folder
-    already covers.) Returns at most 20 paths, shallowest first.
+    already covers.) A link whose target is outside every grant is not
+    counted: the kernel checks the target. Returns at most 20 paths,
+    shallowest first.
     """
     if plan.net is False:
         return []
+    home = os.path.expanduser("~")
     if plan.read is True:
-        home = os.path.expanduser("~")
-        return [
-            os.path.join(home, item) for item in HOMES if os.path.exists(os.path.join(home, item))
-        ][:20]
+        return [os.path.join(home, item) for item in HOMES if os.path.exists(os.path.join(home, item))][:20]
 
     named: set[str] = set()
     for field in (plan.read, plan.write):
         if isinstance(field, tuple):
             named.update(os.path.realpath(item) for item in field)
+    roots = list(prune(named))
 
     found: list[str] = []
-    budget = [LOOKS]
-    for root in prune(named):
+    budget: list[float] = [LOOKS, time.monotonic() + TIME]
+    for root in roots:
         if not os.path.isdir(root):
             continue  # a file granted on its own: a decision, see above
         if credential(root):
             found.append(root)  # the grant is itself a credential folder
             continue
         for path in _walk(root, budget):
-            if credential(path):
+            if _secret_file(path) and _within(path, roots) and os.path.exists(path):
                 found.append(path)
                 if len(found) >= 20:
                     return found
