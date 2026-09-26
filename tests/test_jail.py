@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 
 import pytest
-from conftest import boot
+from conftest import boot, enforces
 
 import hlyn
 from hlyn.error import Invalid
@@ -52,6 +52,11 @@ def test_probe_reports_this_machine():
 
 @here
 def test_probe_says_this_machine_can_enforce():
+    # A real backend existing is not the same claim: Linux ABI 1-5 has real
+    # Landlock and still refuses every seal, so this only holds on a machine
+    # that actually clears hlyn's floor.
+    if not enforces():
+        pytest.skip("this machine cannot fully enforce (see `hlyn probe`)")
     out = hlyn.probe()
     assert out["enforce"] is True, f"this machine cannot enforce: {out.get('why')}"
 

@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 import pytest
-from conftest import SRC
+from conftest import SRC, enforces, skip_if_too_old
 
 REAL = sys.platform in ("linux", "darwin")
 here = pytest.mark.skipif(not REAL, reason="no enforcement backend on this platform")
@@ -30,7 +30,7 @@ def hlyn(*args: str) -> subprocess.CompletedProcess:
     shim = os.environ.get("HLYN_SHIM")
     if shim:
         env["HLYN_SHIM"] = shim
-    return subprocess.run(
+    done = subprocess.run(
         [sys.executable, "-m", "hlyn.cli", *args],
         capture_output=True,
         text=True,
@@ -38,6 +38,8 @@ def hlyn(*args: str) -> subprocess.CompletedProcess:
         env=env,
         check=False,
     )
+    skip_if_too_old(done)
+    return done
 
 
 def test_version_is_one_flag_away():
@@ -61,6 +63,12 @@ def test_probe_speaks_to_a_person_by_default():
 @here
 def test_probe_exits_zero_when_the_machine_can_enforce():
     # Usable as a preflight gate in a pipeline, not just something to read.
+    # Gated on `enforces()`, not merely on the platform: a real backend can
+    # exist and still refuse every seal (Linux ABI 1-5), and testing "probe
+    # exits 0" on such a machine would be testing this suite's own hardware,
+    # not hlyn.
+    if not enforces():
+        pytest.skip("this machine cannot fully enforce (see `hlyn probe`)")
     assert hlyn("probe").returncode == 0
 
 

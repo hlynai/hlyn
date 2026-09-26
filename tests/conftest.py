@@ -9,14 +9,66 @@ is judged by how that interpreter died.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import textwrap
+
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
 
 SYS = 31  # SIGSYS, raised when seccomp kills a process for a refused syscall
+
+# `landlock.load` raises exactly these two messages when the running kernel's
+# own ABI is below what it asked for -- never for a genuine escape, since an
+# escape means the seal *succeeded* and something got past it. Matched on the
+# message body alone, not a traceback prefix: a bare `python -c` body raises it
+# as `hlyn.error.Failed: <message>`, while `hlyn run`/`hlyn.on()` through the
+# CLI catch it and print a plain `hlyn: <message>` sentence instead. Both need
+# to be recognised, from every test file that spawns either shape of process.
+#
+# Found on real hardware below hlyn's floor (ABI 4): every confinement test
+# failed with a message like "the home directory was readable", which was a
+# lie -- the read was never attempted, because sealing itself was refused
+# first. A test that cannot tell "this kernel cannot be tested" from "the
+# boundary broke" is not trustworthy on exactly the machines most likely to
+# hit the first case.
+TOO_OLD = re.compile(
+    r"(?:the kernel enforced only part of this policy|"
+    r"this kernel applied no Landlock restrictions at all)[^\n]*"
+)
+
+
+def skip_if_too_old(done: subprocess.CompletedProcess) -> None:
+    """Skip, rather than fail, when `done` shows this kernel refused to seal
+    at all -- see `TOO_OLD`. Every helper that runs hlyn in a subprocess
+    calls this before handing `done` to the test's own assertions."""
+    found = TOO_OLD.search(done.stderr)
+    if found:
+        pytest.skip(f"this kernel cannot fully seal (see `hlyn probe`): {found.group()}")
+
+
+def enforces() -> bool:
+    """True if this exact machine can apply a full seal right now.
+
+    The same fact `hlyn probe` reports, read straight from the real backend
+    rather than reimplemented, so it can never quietly drift out of step with
+    the thing it is meant to describe. A real backend being *present* is not
+    the same question: on Linux, ABI 1-5 has genuine Landlock and still
+    refuses every seal, since `landlock.load` always asks for ABI 6's signal
+    and abstract-socket scoping. Tests that assert hlyn *succeeds* -- as
+    opposed to tests of the refusal path itself -- gate on this, not merely on
+    the platform, because every environment this suite had ever run on before
+    happened to clear the floor, which hid the difference until real hardware
+    below it did not.
+    """
+    if sys.platform not in ("linux", "darwin"):
+        return False
+    from hlyn.jail import back
+
+    return bool(back().probe().get("enforce"))
 
 
 def jail(
@@ -56,6 +108,7 @@ def jail(
     for fault in ("SyntaxError", "IndentationError", "ModuleNotFoundError", "NameError"):
         if fault in done.stderr:
             raise AssertionError(f"the test body is broken, not the sandbox:\n{done.stderr}")
+    skip_if_too_old(done)
     return done
 
 
@@ -77,6 +130,7 @@ def boot(code: str) -> subprocess.CompletedProcess:
     for fault in ("SyntaxError", "IndentationError", "ModuleNotFoundError", "NameError"):
         if fault in done.stderr:
             raise AssertionError(f"the test body is broken, not the sandbox:\n{done.stderr}")
+    skip_if_too_old(done)
     return done
 
 

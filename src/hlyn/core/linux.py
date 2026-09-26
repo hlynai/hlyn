@@ -34,18 +34,28 @@ def ready() -> bool:
 
 
 def probe() -> dict[str, object]:
-    """What this machine can actually enforce, without enforcing anything."""
+    """What this machine can actually enforce, without enforcing anything.
+
+    `ready` -- and every real seal -- needs ABI 6, unconditionally: `load`
+    always asks for signal and abstract-socket scoping, whatever the policy
+    says, so a kernel offering less refuses every single seal, not merely
+    ones that name cross-agent isolation. `scope` and `ports` therefore rise
+    and fall with `enforce` rather than with their own, lower thresholds --
+    the finer-grained thresholds describe what Landlock the *kernel* could in
+    principle do, not what this version of hlyn will actually attempt on it.
+    """
     abi = landlock.abi()
     filter = seccomp.ready()
+    ok = landlock.ready()  # == abi >= 6; see landlock.ready's docstring
     out = {
         "platform": "linux",
         "machine": platform.machine(),
         "kernel": platform.release(),
         "landlock": abi,
         "seccomp": filter,
-        "enforce": bool(abi) and filter,
-        "scope": abi >= 6,  # signals and abstract sockets between agents
-        "ports": abi >= 4,  # network rules at all
+        "enforce": ok and filter,
+        "scope": ok,  # signals and abstract sockets between agents
+        "ports": ok,  # network rules at all
         # Whether `hlyn run` can list what was blocked: needs the preloaded
         # reporting library. Not part of `enforce` -- the boundary holds
         # either way; only the explanation is missing.
@@ -56,8 +66,9 @@ def probe() -> dict[str, object]:
         missing.append("Landlock is unavailable; Linux 5.13 or newer is needed")
     elif abi < 6:
         missing.append(
-            f"Landlock ABI {abi} cannot confine signals or abstract sockets "
-            "between agents; Linux 6.12 or newer is needed"
+            f"Landlock ABI {abi} is too old: hlyn always confines signals and "
+            "abstract sockets between agents, which needs ABI 6, so no policy "
+            "can be sealed on this kernel (Linux 6.12 or newer is needed)"
         )
     if not filter:
         missing.append("libseccomp is not installed, so syscalls cannot be filtered")

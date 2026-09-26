@@ -119,8 +119,16 @@ def abi() -> int:
 
 
 def ready() -> bool:
-    """True if filesystem confinement can be applied here."""
-    return abi() > 0
+    """True if this kernel can actually take a seal, not merely if Landlock exists.
+
+    `load` below always asks for signal and abstract-socket scoping, whatever
+    the policy -- that is what keeps one agent off another -- and that needs
+    ABI 6. A kernel offering ABI 1-5 has Landlock, but every `load` on it
+    still raises, so reporting readiness there would be exactly the lie this
+    function exists to prevent. Found by testing on a real kernel below the
+    floor (ABI 4): nothing here was wrong until that machine existed to run on.
+    """
+    return abi() >= 6
 
 
 # -- turning a policy into a plan -------------------------------------------

@@ -15,7 +15,7 @@ import sys
 import warnings
 
 import pytest
-from conftest import SRC
+from conftest import SRC, skip_if_too_old
 
 from hlyn.policy import Policy
 from hlyn.secret import DEPTH, Exposed, credential, exposed
@@ -209,9 +209,11 @@ hlyn.on(read=[{str(project)!r}], net=[443], log={log!r})
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="seals")
 def test_the_log_record_goes_where_the_policy_says(project, tmp_path):
     quiet = _seal_and_capture(project, False, tmp_path)
+    skip_if_too_old(quiet)
     assert '"exposed"' not in quiet.stderr, quiet.stderr
     record = tmp_path / "log.jsonl"
     to_file = _seal_and_capture(project, str(record), tmp_path)
+    skip_if_too_old(to_file)
     assert '"exposed"' not in to_file.stderr
     rows = [json.loads(line) for line in record.read_text().splitlines()]
     assert [row["kind"] for row in rows][:2] == ["exposed", "seal"]

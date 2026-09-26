@@ -518,7 +518,12 @@ def test_abi_is_reported():
 def test_ready_agrees_with_abi():
     from hlyn.core import landlock
 
-    assert landlock.ready() == (landlock.abi() > 0)
+    # Not `abi() > 0`: `load` always asks for ABI 6's signal/socket scoping,
+    # whatever the policy, so anything less always refuses to seal. `ready`
+    # promising less than that would be the exact lie this test exists to
+    # catch -- found, on real ABI-4 hardware, as `probe` saying "yes" and
+    # every subsequent seal then refusing.
+    assert landlock.ready() == (landlock.abi() >= 6)
 
 
 def test_an_unopenable_path_is_named_in_the_error(tmp_path):
@@ -642,6 +647,50 @@ def test_full_enforcement_is_the_only_case_that_returns(shim):
     from hlyn.policy import Policy
 
     assert landlock.load(Policy()) == 6
+
+
+# Found by running on real ABI-4 hardware (a Linux 6.8 kernel, below hlyn's
+# floor): `ready()` and `probe()` used to say yes at ABI 1, while `load`
+# above always asks for ABI 6's scoping and so always refused there anyway.
+# `probe` telling the truth is the only thing standing between a user and
+# discovering that gap the hard way, mid-run.
+@pytest.mark.parametrize("abi", [0, 1, 4, 5])
+def test_ready_is_false_below_the_floor(shim, abi):
+    landlock = shim(2, abi)
+    assert landlock.ready() is False
+
+
+@pytest.mark.parametrize("abi", [6, 7])
+def test_ready_is_true_at_the_floor_and_above(shim, abi):
+    landlock = shim(2, abi)
+    assert landlock.ready() is True
+
+
+def test_probe_refuses_to_claim_enforcement_below_the_floor(monkeypatch):
+    from hlyn.core import landlock, linux
+
+    monkeypatch.setattr(landlock, "abi", lambda: 4)
+    out = linux.probe()
+    assert out["enforce"] is False
+    assert out["scope"] is False
+    assert out["ports"] is False
+    assert "ABI 4 is too old" in str(out["why"])
+    assert "no policy can be sealed" in str(out["why"])
+
+
+def test_probe_agrees_with_ready_at_the_floor(monkeypatch):
+    from hlyn.core import landlock, linux
+
+    monkeypatch.setattr(landlock, "abi", lambda: 6)
+    out = linux.probe()
+    # seccomp's own availability is a real fact about this machine, same as
+    # every other test in this file already assumes; only the Landlock half
+    # is faked here.
+    from hlyn.core import seccomp
+
+    assert out["enforce"] == seccomp.ready()
+    assert out["scope"] is True
+    assert out["ports"] is True
 
 
 @pytest.mark.parametrize(

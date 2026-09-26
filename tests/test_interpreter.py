@@ -15,7 +15,7 @@ import sys
 import textwrap
 
 import pytest
-from conftest import SRC
+from conftest import SRC, enforces, skip_if_too_old
 
 from hlyn import interpreter
 from hlyn.interpreter import Answer, python, read, sane
@@ -23,15 +23,27 @@ from hlyn.interpreter import Answer, python, read, sane
 REAL = sys.platform in ("linux", "darwin")
 here = pytest.mark.skipif(not REAL, reason="no enforcement backend on this platform")
 
+# `interpreter.ask` confines the interpreter it questions as its own safety
+# mechanism (see interpreter.py); on a kernel below hlyn's floor that inner
+# seal fails closed -- correctly, by returning an empty answer rather than
+# trusting an unconfined probe -- and a test expecting a *filtered* answer
+# instead sees an *absent* one. That is not the escape it looks like, so these
+# two tests need a machine where sealing genuinely works, not merely one where
+# a backend is present -- gated on `enforces()`, the same real fact `hlyn
+# probe` reports, not a local guess at it.
+functional = pytest.mark.skipif(not enforces(), reason="this kernel cannot fully seal (see hlyn probe)")
+
 
 def hlyn(*args, cwd=None):
     env = {"PYTHONPATH": SRC, "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": os.path.expanduser("~")}
     if os.environ.get("HLYN_SHIM"):
         env["HLYN_SHIM"] = os.environ["HLYN_SHIM"]
-    return subprocess.run(
+    done = subprocess.run(
         [sys.executable, "-m", "hlyn.cli", *args], capture_output=True, text=True, env=env,
         cwd=cwd, timeout=120, check=False,
     )
+    skip_if_too_old(done)
+    return done
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +127,7 @@ def fake(tmp_path, script: str) -> str:
 
 
 @here
+@functional
 def test_a_lying_interpreter_can_only_grant_interpreter_shaped_folders(tmp_path):
     good = tmp_path / "lib" / "python3.12"
     good.mkdir(parents=True)
@@ -126,7 +139,7 @@ def test_a_lying_interpreter_can_only_grant_interpreter_shaped_folders(tmp_path)
     assert answer.exe is None
 
 
-@here
+@functional
 def test_the_interpreter_cannot_write_or_reach_the_network_while_asked(tmp_path):
     trap = tmp_path / "escaped"
     liar = fake(tmp_path, f"""

@@ -21,7 +21,7 @@ import textwrap
 import time
 
 import pytest
-from conftest import SRC
+from conftest import SRC, TOO_OLD, skip_if_too_old
 
 LINUX = sys.platform == "linux"
 MAC = sys.platform == "darwin"
@@ -53,10 +53,12 @@ def hlyn(*args: str, env: dict[str, str] | None = None, cwd: str | None = None,
     if shim:
         base["HLYN_SHIM"] = shim
     base.update(env or {})
-    return subprocess.run(
+    done = subprocess.run(
         [sys.executable, "-m", "hlyn.cli", *args],
         capture_output=True, text=True, timeout=timeout, env=base, cwd=cwd, check=False,
     )
+    skip_if_too_old(done)
+    return done
 
 
 def agent(tmp_path, body: str) -> str:
@@ -272,6 +274,12 @@ def test_killing_hlyn_stops_the_command_and_still_reports(tmp_path):
     began = time.monotonic()
     proc.send_signal(signal.SIGTERM)
     _, err = proc.communicate(timeout=20)
+    # A Popen, not a `hlyn()` call, so it bypasses that helper's own check;
+    # the command may have already exited refusing to seal, before SIGTERM
+    # was ever sent, which is not what this test means to exercise.
+    found = TOO_OLD.search(err)
+    if found:
+        pytest.skip(f"this kernel cannot fully seal (see `hlyn probe`): {found.group()}")
     assert time.monotonic() - began < 10
     assert proc.returncode == 128 + signal.SIGTERM, err
 
