@@ -1,22 +1,73 @@
 # hlyn
 
-Runtime containment for AI agents. You declare what an agent may read, write,
-run, and reach; the kernel enforces it. Everything not granted is denied.
+**A kernel-enforced sandbox for AI agents.** You list what an agent may read, write, run and reach. The operating system enforces it, and everything else is denied.
 
-The bet is that detection eventually fails, so the useful question is not "can
-we spot the attack" but "what can the attacker do once they are inside". A
-compromised agent under hlyn inherits an agent that can only touch what you
-named.
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-lightgrey)
+![License](https://img.shields.io/badge/license-Apache--2.0-green)
+![Dependencies](https://img.shields.io/badge/runtime%20deps-0-brightgreen)
 
 ```python
 import hlyn
 
-hlyn.on(read=["/srv/data"], write=["/srv/out"], net=[443])
+hlyn.on(read=["./data"], write=["./out"], net=[443])
+
+# From here on, this process can read ./data, write ./out, and open TCP
+# connections on port 443. Nothing else. Not ~/.ssh, not your .env, not
+# port 22. This cannot be undone for the life of the process.
 ```
 
-That call is one-way. There is no `off()`, and nothing the agent can do will
-lift it — the boundary is not implemented in a language the agent has access
-to.
+Or leave your code alone and wrap the command:
+
+```bash
+hlyn run --read ./data --write ./out --net 443 -- python agent.py
+```
+
+---
+
+## Contents
+
+- [Why hlyn](#why-hlyn)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [The policy](#the-policy)
+- [Presets](#presets)
+- [When something is blocked](#when-something-is-blocked)
+- [Writing your first policy](#writing-your-first-policy)
+- [Command line](#command-line)
+- [Python API](#python-api)
+- [What is enforced, per platform](#what-is-enforced-per-platform)
+- [Performance](#performance)
+- [The log](#the-log)
+- [Known limits](#known-limits)
+- [FAQ](#faq)
+
+---
+
+## Why hlyn
+
+Prompt injection, poisoned tools and malicious documents will get through sooner or later, because detection eventually misses something. hlyn is built on a different question: **once an attacker controls your agent, what can they actually do?**
+
+With hlyn, the answer is "only what you wrote down."
+
+| | Without hlyn | With hlyn |
+|---|---|---|
+| Agent reads `~/.ssh/id_ed25519` | Works | `PermissionError` |
+| Agent uploads your `.env` to some server | Works | Network refused unless you allowed the port |
+| Agent runs `curl … \| sh` | Works | Refused unless you allowed that program |
+| Agent reads `OPENAI_API_KEY` from its environment | Works | Removed before it starts, unless you kept it |
+| Agent tries to turn the sandbox off | No sandbox to turn off | There is no off switch, not even for hlyn itself |
+
+**What makes it different:**
+
+- **Enforced by the kernel.** Linux uses Landlock and seccomp; macOS uses Seatbelt. The rules are not a Python wrapper the agent could monkey-patch or talk its way around.
+- **Deny by default.** An empty policy grants nothing except the files Python itself needs to run.
+- **One line to start.** `hlyn.on()` or `hlyn run -- cmd`. Every extra permission is one more obvious argument.
+- **No proxy, no daemon, no container.** Nothing sits between the agent and the kernel, so it adds almost no latency (see [Performance](#performance)). It works inside Docker too.
+- **Refuses rather than pretends.** If the machine cannot enforce your whole policy, hlyn raises an error instead of quietly enforcing part of it.
+- **Zero runtime dependencies.**
+
+---
 
 ## Install
 
@@ -24,394 +75,463 @@ to.
 pip install hlyn
 ```
 
-Linux wheels carry a prebuilt shim. Building from source needs a Rust
-toolchain; macOS needs nothing beyond Python.
-
-## Use
-
-**Confine the process you are in.** One line, anywhere before the untrusted
-work starts.
-
-```python
-import hlyn; hlyn.on("coder")
-```
-
-**Confine a program without touching its code.**
-
-```bash
-hlyn run --read /srv --net 443 -- python agent.py
-```
-
-**See what was blocked, and how to allow it.** When the command ends, `hlyn
-run` lists what the boundary refused, with the flag that would allow each one:
-
-```
-hlyn: the command exited with code 1. hlyn blocked 3 things:
-  read   ~/.ssh/id_ed25519      a credential: not suggested. Grant it yourself only if the agent should have it
-  read   /etc/app/config.json   allow with --read /etc/app/config.json
-  net    TCP 5432 (127.0.0.1)   allow with --net 5432
-  to allow all of these: --read /etc/app/config.json --net 5432
-```
-
-A run that succeeds but was refused something says so too, since a program
-that quietly worked around a refusal is not the one that was tested.
-Credentials are named and never given a flag: an agent reaching for keys is
-what the boundary is for. `--json` prints the list for machines; `--no-report`
-turns it off. On Linux, refusals are heard through a library preloaded into
-the command, which cannot see inside statically linked programs (most Go
-binaries) and says so. On macOS they come from the sandbox's own reports in
-the system log, which loses a few percent of them under load.
-
-**Confine one tool rather than the whole agent.** It runs in its own child
-process; the parent's permissions are never widened to accommodate it.
-
-```python
-@hlyn.hooks.tool(read=["/data"])
-def read_customer_file(path): ...
-```
-
-Adapters exist for LangChain, CrewAI, AutoGen, LlamaIndex and OpenAI Swarm,
-but they are conveniences. Every framework eventually calls a plain Python
-callable, and that is where the boundary goes.
-
-**Check what a machine can enforce, before trusting it to.**
+Then check that this machine can enforce:
 
 ```bash
 hlyn probe
 ```
 
-Exits non-zero when the machine cannot enforce, so it works as a preflight gate
-in a pipeline rather than something to read.
-
-## Writing the first policy
-
-The hard part of deny-by-default is not enforcing it, it is knowing what to
-allow. Run the agent once with nothing confined and let it say:
-
-```bash
-hlyn watch -- python agent.py > policy.toml
+```
+ok  hlyn can confine programs on this machine (Linux 6.12.76-linuxkit)
+    yes files and programs
+    yes network ports
+    yes isolation between agents on this machine
+    yes listing what was blocked, after hlyn run
 ```
 
-That records every path and port the run touched and prints a policy covering
-them. Read it, cut it down, and check it in. Then use it:
+### Requirements
+
+| Platform | Needs | Notes |
+|---|---|---|
+| **Linux** | Kernel **6.12+** with Landlock enabled, plus `libseccomp` | x86_64 and aarch64. Works inside Docker. |
+| **macOS** | Any current macOS | Nothing to build or install beyond Python. |
+| **Python** | 3.10 or newer | Reading TOML policies on 3.10 needs `tomli`; YAML needs `pyyaml`. JSON always works. |
+| Anything else | Not supported | hlyn refuses to run rather than pretend to protect you. |
+
+> **Why such a new kernel?** Linux 6.12 is the first with Landlock ABI 6, which is what stops one agent signalling or connecting to another. Rather than enforce a weaker boundary than you asked for, hlyn refuses to run on older kernels. `hlyn probe` tells you exactly where a given machine stands.
+
+---
+
+## Quick start
+
+There are three ways in, and each one builds on the last.
+
+### 1. One line: the strictest default
+
+```python
+import hlyn; hlyn.on()
+```
+
+The process can still run Python and import the standard library and your installed packages. It cannot read your files, write anywhere except a private scratch folder, start programs, use the network, or see secret environment variables.
+
+### 2. Two lines: a preset
+
+```python
+import hlyn
+hlyn.on("coder")   # read and write the current folder, run programs
+```
+
+### 3. Full control
+
+```python
+import hlyn
+
+hlyn.on(
+    read=["./src", "./docs"],
+    write=["./out"],
+    exec=["/usr/bin/git"],
+    net=[443],
+    env=["OPENAI_API_KEY"],
+)
+```
+
+### Or: don't touch the code at all
+
+```bash
+hlyn run -p coder -- python agent.py
+hlyn run --read ./src --net 443 --env OPENAI_API_KEY -- python agent.py
+hlyn run -f policy.toml -- ./my-agent
+```
+
+`hlyn run` confines the command and everything it starts, whatever language it is written in.
+
+### Confine one risky step, not the whole program
+
+```python
+import hlyn
+
+def summarise(path):
+    return open(path).read()[:200]
+
+# Runs in a confined child process. The parent keeps all its permissions.
+text = hlyn.run(lambda: summarise("/tmp/upload.txt"), read=["/tmp/upload.txt"])
+```
+
+---
+
+## The policy
+
+A policy has seven fields. Each one answers a single question.
+
+| Field | Question | Default |
+|---|---|---|
+| `read` | Which paths can it read? | Nothing but Python's own files |
+| `write` | Which paths can it write? | Nothing |
+| `exec` | Which programs can it start? | None |
+| `net` | Which TCP ports can it connect to? | None, and no network at all |
+| `env` | Which environment variables survive? | Only a safe list (`PATH`, `HOME`, `LANG`, `TZ`, …) |
+| `tmp` | Does it get a private scratch folder? | Yes, a fresh empty one |
+| `log` | Where does the record of what happened go? | stderr |
+
+Every field takes one of the same three shapes:
+
+| Value | Means | Example |
+|---|---|---|
+| `False` | Nothing | `net=False` |
+| `True` | Everything | `exec=True` |
+| a list | Exactly these | `read=["./src", "/etc/app.conf"]` |
+
+A few rules worth knowing:
+
+- **A folder grant covers everything inside it.** `read=["./src"]` includes `./src/app/main.py`.
+- **Writing implies reading what you wrote.** A path in `write` can also be read back.
+- **Paths must exist.** A typo such as `read=["./scr"]` is an error, not a grant that silently matches nothing.
+- **`net` takes ports, not host names.** `net=["api.openai.com"]` is refused with an explanation; the kernel filters ports, not hosts. Use `net=[443]`.
+- **Allowing any network also allows what the network needs.** DNS configuration and TLS certificate stores become readable automatically, so `net=[443]` really can make HTTPS requests. Private key folders such as `/etc/ssl/private` are never included.
+
+### Policy files
+
+Keep the policy next to your agent and review it like code. TOML, JSON and YAML all work:
+
+```toml
+# policy.toml
+read  = ["src", "prompts"]   # relative paths resolve next to this file
+write = ["out"]
+exec  = false
+net   = [443]
+env   = ["OPENAI_API_KEY"]
+```
 
 ```bash
 hlyn run -f policy.toml -- python agent.py
 ```
 
-A policy file is TOML, JSON, or YAML, and it is a document a security team can
-review and diff rather than a set of flags buried in a shell script:
-
-```toml
-read  = ["src", "/etc/ssl/certs"]   # relative paths resolve next to this file
-write = ["out"]
-net   = [443]
-exec  = false
-env   = ["OPENAI_API_KEY"]
+```python
+hlyn.on("policy.toml")
 ```
 
-`hlyn show --intent` turns a set of flags that already works into a starter
-file. Two things about this format are deliberate:
+- **An unknown field is an error.** `reed = [...]` is refused, never ignored.
+- **Flags add to a file; they never replace it.** `hlyn run -f policy.toml --net 5432` keeps the file's 443 and adds 5432.
 
-- **An unrecognised field is an error, not a warning.** `reed = [...]` is
-  refused outright. Silently ignoring it would leave a boundary that differs
-  from the document everyone believes describes it.
-- **Relative paths resolve against the file, not the working directory**, so a
-  policy checked in beside its agent means the same thing from anywhere.
+---
 
-Two honest caveats on `watch`. It confines nothing while running, so it is a
-drafting tool and never a boundary. And it observes what *Python* does, via
-audit hooks — it cannot see a C extension calling `open(2)` behind Python's
-back. A policy drafted this way can therefore come out too narrow, and the
-agent will hit a refusal the watch run never predicted. That is loud, safe, and
-the right direction to be wrong in.
+## Presets
 
-## Policy
-
-| Field | Grants | Default |
+| Preset | Grants | Good for |
 |---|---|---|
-| `read` | Readable paths | Nothing but the interpreter's own files |
-| `write` | Writable paths | Nothing |
-| `exec` | Programs that may be launched | None |
-| `net` | Reachable TCP ports | None |
-| `env` | Environment variables that survive | Only names known not to carry secrets |
-| `tmp` | A private scratch directory | Yes |
-| `log` | Where the record goes | stderr |
-| `attest` | Where to write a record of what was enforced | Off |
+| `strict` | Nothing beyond the Python runtime, and no scratch folder | Pure computation on inputs you pass in |
+| `data` | Read and write the current folder | Data processing, notebooks |
+| `coder` | Read and write the current folder, run any program | Coding agents |
+| `web` | Any network | Agents that only browse or call APIs |
+| `debug` | Everything | Finding out what your agent touches. **This is not protection.** |
 
-Each takes `False` for nothing, `True` for everything, or an explicit list.
-Presets cover the common shapes: `strict`, `coder`, `web`, `data`, and `debug`
-— the last of which confines almost nothing and exists to answer "what does my
-agent actually touch?" before a real policy is written.
+```bash
+hlyn presets     # list them, with what each grants
+```
 
-## What it enforces
+You can add your own:
 
-**Linux** — Landlock for filesystem paths, TCP ports, and isolation between
-agents on one machine, plus a seccomp filter for the syscalls that would
-otherwise undo it: `io_uring` (which bypasses syscall filtering entirely),
-`ptrace` and `pidfd_getfd` (which reach into another process), kernel module
-loading, mount, namespace creation, and fileless execution.
+```python
+hlyn.register("reviewer", lambda: hlyn.Policy(read=["./src"], net=[443]))
+hlyn.on("reviewer")
+```
 
-**macOS** — Seatbelt. Filesystem, execution and network work. It has no
-equivalent of Landlock's scoping, so isolation *between* agents on one machine
-is weaker than on Linux, and `probe` says so rather than implying otherwise.
+---
 
-**Anywhere else** — it refuses to run. A containment layer that quietly does
-nothing on an unsupported platform is worse than none, because the team ships
-believing the boundary is there.
+## When something is blocked
 
-## Requirements
+When the kernel refuses a call, the program only sees `Operation not permitted`. If it swallows the error or quietly falls back, you are left with an agent that behaves oddly for no visible reason.
 
-| | Needs |
+So `hlyn run` listens while the command runs, and when it ends it tells you **what was blocked and exactly which flag would allow it**:
+
+```
+$ hlyn run --read ./agent.py -- python agent.py
+hlyn: the command exited with code 1. hlyn blocked 4 things:
+  read   ~/.ssh/id_ed25519      a credential: not suggested. Grant it yourself only if the agent should have it
+  read   /data/customers.csv    allow with --read /data/customers.csv
+  write  /data/report.txt       allow with --write /data
+  net    TCP 5432 (10.0.0.7)    allow with --net 5432
+  to allow all of these: --read /data/customers.csv --write /data --net 5432
+hlyn: removed 12 environment variables (including OPENAI_API_KEY, GITHUB_TOKEN).
+      Keep one with --env NAME, e.g. --env OPENAI_API_KEY
+```
+
+| Refused | Suggested flag |
 |---|---|
-| Linux | Kernel **6.12 or newer** with Landlock enabled, and libseccomp |
-| macOS | Anything current |
-| Python | 3.10+ |
+| Reading a file or folder | `--read PATH` |
+| Writing an existing file | `--write FILE` |
+| Creating, deleting or renaming a file | `--write FOLDER` (the folder that holds it) |
+| Running a program, even from a child process | `--exec /full/path/to/program` |
+| Connecting to a TCP port | `--net PORT` |
+| Any network while the network is off | `--net-any`, or `--net PORT` for just the port it needs |
+| Listening on a port | `--net-any` |
+| A credential (`~/.ssh`, `~/.aws`, `.env`, `*.pem`, …) | **None.** It is named, never suggested. |
 
-The kernel floor is real and it is recent. hlyn asks for Landlock ABI 6 —
-which is what confines signals and abstract sockets between agents — and
-refuses to seal if the kernel applies less than the whole policy, rather than
-reporting success for a boundary that is narrower than requested. Several
-current LTS distributions ship older kernels, and some ship Landlock disabled
-at boot; `hlyn probe` answers the question for a specific machine, and is the
-only answer worth trusting.
+Some details:
 
-## What it costs
+- **Successful runs are reported too**, if something was refused along the way. A program that worked around a refusal is not behaving the way it did when you tested it.
+- **Retries are counted, not repeated.** A loop that fails 5,000 times is one line: `[5000+ times]`.
+- **Refusals from child processes are included**, labelled with the process name: `[by git]`.
+- **Environment variables are named, never their values.**
+- `--json` prints the same report as JSON on stderr for CI; `--no-report` turns it off.
+- `hlyn probe` tells you whether reporting is available on the machine.
 
-Nothing sits between the agent and the kernel, so there is nothing in the path
-to add delay. The measured numbers, from `tools/bench.sh` on Linux 6.12
-(aarch64, Landlock ABI 6):
+How it hears the refusals, and what it can miss:
 
-**Once, at startup.** `hlyn.on()` takes about **2 ms** for a small policy and
-about **3 ms** for one naming 64 paths. Landlock opens a descriptor per granted
-path, so that half grows with the policy; the syscall filter compiles a fixed
-BPF program and stays flat at roughly 1 ms.
+| | Linux | macOS |
+|---|---|---|
+| Source | A tiny library preloaded into the command and its children | The sandbox's own reports, from the system log |
+| Cost | Nothing measurable on calls that succeed | About 50 ms per run |
+| Misses | Statically linked programs (most Go binaries; hlyn says so), and programs started through `system()` / `popen()` | A few percent of reports under heavy system load |
 
-**Afterwards, per call.** Only the calls that ask permission pay, and they ask
-once:
+---
+
+## Writing your first policy
+
+Deny-by-default is easy to enforce; the hard part is knowing what to allow. The workflow is **watch → trim → run**:
+
+**1. Watch one unconfined run** and let hlyn draft the policy (Python programs only):
+
+```bash
+hlyn watch -- python agent.py > policy.toml
+```
+
+```toml
+# a draft to cut down, not a policy to trust
+read = [
+  "/home/me/project/agent.py",
+  "/home/me/project/prompts",
+]
+write = [
+  "/home/me/project/out",
+]
+exec = false
+net = [
+  443,
+]
+env = false
+tmp = true
+log = true
+```
+
+**2. Read it and cut it down.** Anything your agent doesn't strictly need should go.
+
+**3. Run confined.** If something was missed, the [report](#when-something-is-blocked) tells you which flag to add.
+
+```bash
+hlyn run -f policy.toml -- python agent.py
+```
+
+Already have a set of flags that works? Turn them into a file:
+
+```bash
+hlyn show --intent --read ./src --net 443 > policy.toml
+```
+
+---
+
+## Command line
+
+| Command | What it does |
+|---|---|
+| `hlyn run [flags] -- CMD` | Runs `CMD` confined, passes on its exit code, and lists what was blocked |
+| `hlyn watch -- CMD` | Runs a Python program **unconfined** and prints the policy it would need |
+| `hlyn show [flags]` | Prints the full list of paths and ports a set of flags would grant |
+| `hlyn show --intent [flags]` | Prints the flags as a policy file you can check in |
+| `hlyn presets` | Lists the presets and what each grants |
+| `hlyn probe` | Says what this machine can enforce; exits non-zero if it can't |
+| `hlyn --version` | Prints the version |
+
+Flags for `run` and `show`:
+
+| Flag | Grants |
+|---|---|
+| `-p, --preset NAME` | Start from a preset |
+| `-f, --policy FILE` | Start from a `.toml`, `.json` or `.yaml` file |
+| `--read PATH` | Read a path (repeatable) |
+| `--write PATH` | Write a path (repeatable) |
+| `--exec PATH` | Run a program (repeatable) |
+| `--exec-any` | Run any program |
+| `--net PORT` | Connect to a TCP port (repeatable) |
+| `--net-any` | Use any network |
+| `--env NAME` | Keep an environment variable (repeatable) |
+| `--env-any` | Keep the whole environment, secrets included |
+| `--no-tmp` | No private scratch folder |
+| `--log PATH` / `--no-log` | Write the log to a file, or nowhere |
+
+Only on `run`:
+
+| Flag | Does |
+|---|---|
+| `--no-report` | Don't list what was blocked |
+| `--json` | Print the report as JSON (on stderr) |
+
+Every command that prints data prints plain text by default, and JSON with `--json`.
+
+---
+
+## Python API
+
+| Call | What it does |
+|---|---|
+| `hlyn.on(policy=None, **fields)` | Confines **this process**, permanently. Returns what was applied. |
+| `hlyn.run(fn, policy=None, **fields)` | Runs `fn()` in a confined child process and returns its result (or re-raises its exception). The caller stays unconfined. |
+| `hlyn.spawn(cmd, policy=None, **fields)` | Confines this process, then replaces it with `cmd`. Does not return. |
+| `hlyn.probe()` | Reports what this machine can enforce, as a dict. Changes nothing. |
+| `hlyn.sealed()` | `True` once this process is confined. |
+| `hlyn.load(path)` | Reads a policy file into a `Policy`. |
+| `hlyn.Policy(...)` | An immutable policy object with the seven fields above. |
+| `hlyn.preset(name)` / `hlyn.presets` / `hlyn.register(name, make)` | Look up, list and add presets. |
+
+Anywhere a policy is expected, you can pass any of these:
+
+```python
+hlyn.on()                                      # nothing: the strictest default
+hlyn.on("coder")                               # a preset name
+hlyn.on("policy.toml")                         # a policy file
+hlyn.on(hlyn.Policy(read=["./src"]))           # a Policy object
+hlyn.on(read=["./src"], net=[443])             # keyword arguments
+hlyn.on("coder", net=[443])                    # a preset, plus changes
+```
+
+`hlyn.Policy` is frozen. Use `.with_(...)` to derive a new one:
+
+```python
+base = hlyn.Policy(read=["./src"])
+wider = base.with_(net=[443])
+```
+
+### Errors
+
+Every error inherits from `hlyn.Error`, so one `except` catches them all:
+
+| Error | Raised when | The process is |
+|---|---|---|
+| `hlyn.Invalid` | The policy is malformed: a typo, a missing path, a host name in `net` | Untouched |
+| `hlyn.Unsupported` | This machine can't enforce the policy (old kernel, unsupported OS) | Untouched |
+| `hlyn.Failed` | The kernel refused to apply the boundary | **Not** confined, so don't continue |
+| `hlyn.Sealed` | You called `on()` twice. The boundary can't be changed once applied. | Already confined |
+
+Messages say what to do next, naming the field or flag that would change the outcome.
+
+### Things to know
+
+- **`on()` is one-way.** There is no `off()` and no context manager that pretends to restore anything, because the kernel can't undo it.
+- **Call `on()` before starting threads.** On Linux, a thread that is already running would keep its old access, so hlyn refuses to seal a process with more than one thread. Put `on()` at the top of your program, or use `hlyn.run(fn)`, which forks a clean child.
+
+---
+
+## What is enforced, per platform
+
+| | Linux | macOS |
+|---|---|---|
+| Engine | Landlock + seccomp (via libseccomp) | Seatbelt |
+| Files: read, write, create, delete | ✅ | ✅ |
+| Starting programs | ✅ | ✅ |
+| TCP ports | ✅ | ✅ |
+| All network off (TCP and UDP) | ✅ | ✅ |
+| Isolation between agents (signals, abstract sockets) | ✅ | ❌ No equivalent exists |
+| Dangerous syscalls blocked (`io_uring`, `ptrace`, `mount`, namespaces, kernel modules, `bpf`, …) | ✅ | n/a |
+| Secret environment variables removed | ✅ | ✅ |
+| Report of what was blocked | ✅ | ✅ Best-effort |
+
+`io_uring` is worth calling out: it can perform file operations without making the system calls a filter watches, so on Linux it is always blocked, whatever the policy says.
+
+---
+
+## Performance
+
+Nothing sits between the agent and the kernel, so there's nothing in the path to slow it down. Measured on Linux 6.12 (aarch64):
+
+**Once, at startup:**
+
+| Step | Time |
+|---|---|
+| `hlyn.on()` with a small policy | ~2 ms |
+| `hlyn.on()` naming 64 paths | ~3 ms |
+
+**Per call, afterwards:**
 
 | Call | Added |
 |---|---|
 | `open` | ~90 ns |
 | `bind` | ~0.5 µs |
-| `connect` | under its own variance; bounded at a few hundred ns |
-| `read`, `write`, `stat`, `getpid` | at or below the noise floor |
+| `connect` | Lost in its own variance (a few hundred ns at most) |
+| `read`, `write`, `stat` on files already open | Nothing measurable |
 
-A descriptor or connection that is already open is never re-checked, so
-throughput through it is untouched. For comparison, enforcing a network policy
-with a proxy in the connection path costs an extra TCP handshake and usually a
-TLS terminate and re-originate **per connection** — three to four orders of
-magnitude more, paid repeatedly rather than once.
+Files and connections that are already open are never re-checked, so throughput is unaffected. A proxy-based sandbox, by contrast, adds a TCP handshake and often a TLS round-trip **per connection**.
 
-`tools/bench.py` documents the method, and each measuring process proves the
-boundary was actually applied before its numbers are believed — a filter that
-silently failed to load would benchmark beautifully.
+**Reporting under `hlyn run`:** nothing measurable on successful calls and under 0.1 µs per refused call on Linux; about 50 ms per run on macOS.
 
-## Auditing a policy
+---
 
-A policy can be valid, enforced exactly as written, and still hand the agent
-everything. The dangerous grants are rarely one field — they are two
-reasonable-looking fields that combine, and each half passes review on its own.
+## The log
 
-```bash
-hlyn audit -f policy.toml
+hlyn writes one JSON object per line, to stderr by default (or `--log FILE` / `log="file.jsonl"`).
+
+```json
+{"t": 1790338793.51, "kind": "seal", "pid": 4120, "backend": "linux", "level": 6, "read": ["/srv/data"], "write": [], "exec": false, "net": [443], "env": false, "tmp": "/tmp/hlyn-k2j3"}
+{"t": 1790338793.52, "kind": "deny", "pid": 4121, "what": "read", "target": "/etc/shadow", "allow": null, "credential": true, "by": "cat", "op": "open", "count": 1, "source": "program"}
 ```
 
-```
-!! critical the agent can read credentials (/root) and reach TCP 443
-              these are the two halves of exfiltration; either alone is a risk,
-              and together they are a route
-    fix:      remove one half. Closing the network is usually easier than
-              narrowing the read, and `net=False` closes UDP too
-    waive as: exfiltration:TCP 443
-```
-
-It exits non-zero when something outstanding reaches `--severity` (`low` by
-default), so it belongs in CI rather than in a report someone means to read.
-The threshold decides what fails a build, never what gets reported — a finding
-below it is still printed, because a way to stop seeing a risk is not the same
-thing as a way to decide it does not block a release. Among what it looks for:
-
-| Finding | Why it matters |
+| Record | Written when |
 |---|---|
-| `write-exec` | Write a program and then run it — every other grant becomes a starting point |
-| `exfiltration` | Credentials readable *and* a network to send them over |
-| `credential-reach` | A grant covering `~/.ssh`, `~/.aws`, `/etc/shadow` — often without naming any of them, as `read=["/root"]` does |
-| `interpreter-exec` | `exec=["/usr/bin/python3"]` — the allowlist governs which *file* runs, and an interpreter runs whatever it is handed |
-| `hijack` | Write access somewhere programs get found and loaded |
-| `evidence` | The log written somewhere the agent can also write, so it can edit the record of what it did |
-| `widened` | A path named in the file that a broader one already covers, so the kernel never sees it |
+| `seal` | The boundary was applied, with exactly what it grants |
+| `deny` | Under `hlyn run`: something was refused, written as it happens |
 
-This is analysis, not proof — direct checks against the policy's own resolved
-grants, with no solver, because the policy model is small enough that a solver
-would be answering a question you can look up. It can tell you a grant is there
-and what it makes possible. It cannot tell you whether it is justified.
+Repeats are collapsed. The same refusal is written on its 1st, 2nd, 4th, 8th… occurrence with a running count, so a retry loop can't bury the lines that matter. `deny` records are written by `hlyn run`'s own unconfined process, never by the agent.
 
-## Accepting a risk
-
-A finding that cannot be waived gets the whole check switched off, so waiving
-is what keeps it on. What matters is that the decision is recorded:
-
-```toml
-[[accepted]]
-finding = "interpreter-exec:/usr/bin/python3"
-reason  = "the agent is a Python coding assistant; running Python is the job"
-by      = "karan@hlyn.dev"
-until   = "2026-12-31"
-```
-
-```bash
-hlyn audit -f policy.toml -a risks.toml
-```
-
-That file is a risk register, and it is the artifact SOC 2 and ISO 27001 ask
-for — produced as a side effect of a check that runs on every build rather than
-a spreadsheet someone remembers to update. Three rules, each because the
-alternative rots quietly:
-
-- **`until` is required.** A waiver with no end date is how a temporary
-  exception becomes permanent without anyone deciding it should. An expired one
-  stops waiving and becomes a finding.
-- **A waiver matching nothing is reported as stale.** The policy moved on; left
-  in place, it would silently waive the next real occurrence.
-- **Every field is required.** An acceptance with an empty reason records that
-  someone wanted the build to pass, not that anyone decided anything.
-
-Add `--ocsf` to emit findings as OCSF v1.7.0 Compliance Findings, so a SIEM
-ingests them with no parser written for us.
-
-## Attesting a run
-
-```bash
-hlyn run --attest run.json -f policy.toml -- python agent.py
-hlyn verify run.json
-```
-
-hlyn refuses to seal when the kernel would apply less than the whole policy —
-which is what makes a record worth keeping. A seal that happened is one that
-happened *in full*, so the record says which policy was **enforced**, not which
-was requested. It carries the policy as written, the grants as resolved, the
-kernel, the backend, and the ABI level.
-
-Worth being exact about what that buys, since attestation is a word that gets
-oversold. The record is tamper-**evident**: it carries a digest over its own
-contents, and an HMAC too when `HLYN_ATTEST_KEY` names a key file. It is **not**
-proof against the confined process itself — a process holding the signing key
-can sign what it likes, and no cryptography inside a machine settles a question
-about that machine. Real non-repudiation needs a signer the agent cannot reach.
-That is a deliberate hole: this package has no network component and does not
-pretend to be its own trust root.
-
-## The record
-
-One JSON object per line, to stderr by default or to a file when the policy
-names one. The `seal` record states the boundary that was applied, and is the
-one record that always matters.
-
-Repeats are collapsed. A tight policy refuses the same thing over and over —
-the same missing config file, on every retry, in every worker — and written out
-in full that is hundreds of identical lines burying the three that differ. A
-record is written on the 1st, 2nd, 4th, 8th, 16th … occurrence, carrying its
-running total as `seen`, and counted silently in between. Nothing waits for
-process exit to be flushed, because a process refused by seccomp is killed
-rather than exited.
-
-Under `hlyn run`, every refusal the command meets is added as a `deny` record
-as it happens, written by `hlyn run`'s own unconfined process. On macOS the
-refusal comes from the kernel's sandbox report, which the agent cannot forge.
-On Linux it comes from a library inside the confined program, so the agent can
-invent one; each is checked against the policy and the file's own permissions
-before it is written, and a record claiming something the policy allows is
-dropped. `hlyn.on()` has no process outside the boundary to listen, so
-refusals inside it are not recorded.
+---
 
 ## Known limits
 
-Stated here because a containment layer that overstates itself is worse than
-one that does less.
+A sandbox that oversells itself is worse than one that doesn't, so here is exactly what hlyn does **not** do:
 
-**Host names are not enforceable.** `net=["api.openai.com"]` is refused with an
-error rather than accepted and ignored. Landlock filters ports; a classic
-seccomp filter cannot dereference the `sockaddr` passed to `connect`, so
-nothing in this design can see a host name.
+| Limit | What it means | What to do |
+|---|---|---|
+| **No host names** | `net` filters ports, not domains. The kernel can't see host names. | Allow the port (`443`). Host allowlists are planned. |
+| **Named ports are TCP only** | `net=[443]` leaves UDP open, so DNS and QUIC can still leave. | Use `net=False` when nothing may leave. |
+| **Seal before threads** | A thread started before `on()` would keep its access, so hlyn refuses to seal. | Call `on()` first, or use `hlyn.run(fn)`. |
+| **A granted socket grants its service** | The service behind a socket you allow (e.g. `docker.sock`) can hand the agent anything it can open. | Treat a socket grant like `exec` on that service. |
+| **Writable folders others execute** | Writing into a folder that cron, git hooks or CI later runs is running code outside the sandbox. | Don't grant write to folders something else executes from. |
+| **Hardlinks** | A hardlink planted inside a granted folder beforehand reaches the file it points at. | Don't share granted folders with untrusted writers, and don't run as root. |
+| **GPU workloads** | CUDA writes under `/proc`, which is closed by default because it exposes the environment. | Grant `write=["/proc"]` and remove secrets at the source. |
+| **macOS isolation between agents** | Seatbelt has no way to stop one agent signalling another. | Use Linux where cross-agent isolation matters. |
+| **Reports are not complete** | Linux can't see inside static binaries; macOS drops a few percent of reports. | Neither affects enforcement, only the explanation. |
 
-**Named ports restrict TCP only.** `net=[443]` leaves UDP open, so traffic can
-still leave over DNS or QUIC. Closing it would take all of UDP with it —
-the same wall that stops host filtering stops us reading a UDP port — and that
-breaks every hostname lookup. `net=False` closes both by refusing the socket
-outright.
+---
 
-**Seal before starting threads.** Landlock confines the thread that calls it,
-and Linux credentials are per-thread — a thread already running keeps the
-access it had, and there is no way to make it adopt the boundary. (seccomp has
-no such gap: `TSYNC` covers every thread, so the syscall filter and `net=False`
-always apply.) Rather than report a boundary with a hole in it, `hlyn.on()`
-**refuses to seal when the process has more than one thread**. Put it at the
-top of the program, or use `hlyn.run(fn)`, which forks a single-threaded child
-and confines that.
+## FAQ
 
-**A granted socket is a grant of whatever is on the other end.** Reaching a
-Unix socket needs a filesystem grant for the socket file, so a socket outside
-the policy — `/var/run/docker.sock`, say — is refused like any other path. But
-once a socket *is* granted, the process behind it can hand the agent an open
-descriptor (`SCM_RIGHTS`) for any file it likes, and a descriptor that arrives
-this way was never opened by the agent, so no path rule applies to it. Granting
-a socket path therefore grants everything the service behind it can do. Treat
-it as you would `exec` on that service.
+**Why not just use Docker?**
+Docker packages and deploys software; it wasn't built to contain a compromised process, and a container often still sees secrets, mounted volumes and the network. hlyn enforces a layer below that, and it works *inside* your container too.
 
-**Anything the agent can make something else run, it can run.** An agent that
-writes into a directory a cron job, git hook, CI runner or watcher picks up
-from has executed code outside the boundary without ever crossing it — the
-sandbox did exactly what the policy said. `hlyn audit` flags the well-known
-locations (`/etc/cron.d`, `/etc/profile.d`, anything on `PATH`), but it cannot
-know about a watcher you wrote. What is writable is the whole question.
+**Can the agent turn it off?**
+No. The boundary lives in the kernel, not in Python. Once applied, it lasts for the life of the process and is inherited by everything it starts. hlyn has no off switch either.
 
-**A hardlink inside a granted directory reaches the file it points at.** Grants
-are paths, and a hardlink is a genuine second path to the same file — so a link
-planted in a granted directory before sealing is readable through it, whatever
-the policy says about where it really lives. Nothing in a path-based design can
-tell the two names apart. It matters when something other than the agent can
-write to a granted directory beforehand; the answer is not to share those
-directories, and not to run as root.
+**Does it slow the agent down?**
+Not measurably. See [Performance](#performance).
 
-**GPU workloads need `/proc` writable.** CUDA writes thread names under
-`/proc/<pid>/task/<tid>/comm`, and `/proc` is excluded by default because
-`/proc/self/environ` still holds the environment captured at exec time and
-would hand back every secret the `env` control removed. Grant it explicitly if
-you need it, and scrub secrets at the source if you do.
+**Does it work with LangChain / CrewAI / AutoGen / my own framework?**
+Yes. hlyn confines a process, not a framework. Call `hlyn.on()` at startup, wrap the command with `hlyn run`, or put a single risky tool call inside `hlyn.run(fn)`.
 
-## Development
+**My agent broke under hlyn. How do I find out why?**
+Run it with `hlyn run`, and the [report](#when-something-is-blocked) lists what was blocked and the flag to allow it. For Python agents, `hlyn watch` drafts a whole policy from one run.
+
+**What happens on Windows?**
+hlyn raises `hlyn.Unsupported` rather than running unprotected.
+
+---
+
+## Developing hlyn
 
 ```bash
-tools/check.sh
-```
-
-Runs ruff, mypy `--strict`, clippy, cargo-audit and cargo-deny. The test suite
-runs against a real kernel:
-
-```bash
+tools/check.sh      # ruff, mypy --strict, clippy, cargo-audit, cargo-deny
 docker build -t hlyn-test tools/ && docker run --rm -v "$PWD":/work -w /work hlyn-test python -m pytest tests -q
 ```
 
-Most of the suite is escape attempts, each of which fails the build if the
-escape succeeds. Neither platform can run the other's kernel tests, so a pass
-on one machine is not a pass — Landlock and seccomp tests skip on macOS,
-Seatbelt tests skip on Linux.
+The Linux tests need a real Linux kernel, which is why they run in Docker. Most of the suite consists of escape attempts, each of which fails the build if the escape succeeds.
 
-`tests/test_escape.py` holds the escapes that once worked. Each was found by
-attacking the package rather than testing it, each was confirmed by putting the
-bug back and watching the test go red, and each is a shape of mistake the rest
-of the suite did not catch.
+## License
 
-`tools/mutate.sh` and `tools/fuzz.sh` run mutation testing and fuzzing;
-`tools/confirm.py` re-checks that the suite catches a specific list of mistakes
-it has caught before. `tools/bench.sh` measures what confinement costs, and
-produces the numbers above. `tools/sbom.sh` writes a CycloneDX SBOM of what
-ships: twelve components, all of them the Rust shim's, since the Python package
-has no runtime dependencies at all. The fuzzing harness is excluded on purpose
-— its lockfile is about twice the size of the shipped one and appears in no
-build that leaves this repository.
-
-## Licence
-
-Apache-2.0.
+Apache-2.0
