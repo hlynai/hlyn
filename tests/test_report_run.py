@@ -74,6 +74,19 @@ def report(done: subprocess.CompletedProcess) -> dict:
     raise AssertionError(f"no report was printed:\n{done.stderr}")
 
 
+def programs(*names: str) -> list[str]:
+    """`--exec` flags for these programs, by their real paths.
+
+    Only paths that exist: hlyn refuses to grant one that does not, and which
+    shell /bin/sh is (dash, bash) differs between distributions.
+    """
+    out: list[str] = []
+    for name in names:
+        if os.path.exists(name):
+            out += ["--exec", os.path.realpath(name)]
+    return out
+
+
 def real(text: str) -> str:
     """A path as the report shows it, resolved: `~` expanded, symlinks followed.
 
@@ -301,8 +314,7 @@ def test_every_process_in_the_tree_is_heard_and_named(tmp_path, outside):
     done = run(tmp_path, f"""
         import subprocess
         subprocess.run(["/bin/sh", "-c", "cat {target} 2>/dev/null; echo x > {outside}/sh.txt"])
-    """, "--exec", "/bin/sh", "--exec", "/usr/bin/sh", "--exec", "/usr/bin/dash", "--exec", "/usr/bin/cat",
-         "--exec", "/bin/cat")
+    """, *programs("/bin/sh", "/bin/cat"))
     found = blocked(done)
     assert "cat" in found[real(str(target))]["by"]
     assert "sh" in found[real(str(outside / "sh.txt"))]["by"]
@@ -389,7 +401,7 @@ def test_repointing_the_pipe_at_a_file_writes_nothing_there(tmp_path, outside):
         import os, subprocess
         env = dict(os.environ, HLYN_REPORT={str(victim)!r})
         subprocess.run(["/bin/cat", {str(outside / 'secret.txt')!r}], env=env, capture_output=True)
-    """, "--write", str(victim), "--exec", "/bin/cat", "--exec", "/usr/bin/cat")
+    """, "--write", str(victim), *programs("/bin/cat"))
     assert done.returncode == 0, done.stderr
     assert victim.read_text() == "ORIGINAL"
 
