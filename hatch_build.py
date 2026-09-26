@@ -36,6 +36,15 @@ LIBS = (
 
 class CustomBuildHook(BuildHookInterface):  # type: ignore[type-arg]
     def initialize(self, version: str, build_data: dict[str, Any]) -> None:
+        if sys.platform == "darwin":
+            # Pure Python, but only for macOS. Left as `py3-none-any`, pip
+            # would also pick this wheel on a Linux machine with no matching
+            # manylinux wheel, which would then install without the Landlock
+            # shim and refuse to confine anything. Tagged for macOS, such a
+            # machine falls back to the sdist and builds the shim instead.
+            build_data["pure_python"] = False
+            build_data["tag"] = "py3-none-macosx_11_0_universal2"
+            return
         if sys.platform != "linux":
             return
 

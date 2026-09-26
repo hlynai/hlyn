@@ -23,7 +23,7 @@ from typing import Any
 
 from . import log
 from .error import Failed, Invalid, Sealed
-from .policy import Policy, preset, presets
+from .policy import Policy, companion, preset, presets
 
 __all__ = ["back", "on", "probe", "run", "sealed", "spawn"]
 
@@ -134,7 +134,26 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
     not apply it, because a caller that believes it is confined and is not is
     the worst outcome this package has.
     """
-    return _seal(_plan(policy, edits))
+    plan = _plan(policy, edits)
+    _warn(plan)
+    return _seal(plan)
+
+
+def _warn(plan: Policy) -> None:
+    """Say, before sealing, if the policy lets secrets out. See `secret.py`.
+
+    A Python warning, so it can be filtered or made an error like any other
+    (`warnings.simplefilter("error", hlyn.Exposed)` in a test suite), and a
+    log record, so it is on file with the seal it preceded.
+    """
+    import warnings
+
+    from .secret import Exposed, exposed, warning
+
+    found = exposed(plan)
+    if found:
+        warnings.warn(warning(found, cli=False), Exposed, stacklevel=3)
+        log.emit("exposed", paths=found[:20])
 
 
 def _seal(plan: Policy, extra: Extra | None = None, tag: str | None = None) -> dict[str, object]:
@@ -255,7 +274,9 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
     execute on itself: asking to run something and forbidding it in the same
     breath is a contradiction, not a policy.
     """
-    _spawn(cmd, _plan(policy, edits))
+    plan = _plan(policy, edits)
+    _warn(plan)
+    _spawn(cmd, plan)
 
 
 def _spawn(
@@ -274,8 +295,11 @@ def _spawn(
 
     if plan.exec is not True:
         grant = list(plan.exec) if isinstance(plan.exec, tuple) else []
-        if where not in grant:
-            grant.append(where)
+        needs = [where]
+        inner = companion(where)
+        if inner:
+            needs.append(inner)
+        grant.extend(item for item in needs if item not in grant)
         plan = plan.with_(exec=grant)
 
     _seal(plan, extra, tag)

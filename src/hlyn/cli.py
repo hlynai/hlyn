@@ -385,6 +385,29 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
             os.close(fd)
 
 
+def _exposed(plan: Policy) -> None:
+    """Warn, on stderr, when the policy lets secrets out. Never stops the run:
+    the user may mean it, and the message says how to say so.
+
+    Raised through `warnings`, so the standard filters apply: a user who has
+    accepted it silences it with PYTHONWARNINGS=ignore::hlyn.Exposed, the same
+    way as for the library. Printed by us, so it reads as a sentence rather
+    than a file-and-line warning.
+    """
+    import warnings
+
+    from .secret import Exposed, exposed, warning
+
+    found = exposed(plan)
+    if not found:
+        return
+    text = warning(found, cli=True)
+    with warnings.catch_warnings(record=True) as heard:
+        warnings.warn(text, Exposed, stacklevel=1)
+    if heard:
+        print(text, file=sys.stderr)
+
+
 def _listener(quiet: bool) -> Any:
     """What will hear the command's refusals. Never raises: a run is never
     refused because its report could not be set up."""
@@ -481,6 +504,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
 
     if args.verb == "show":
         p = _policy(args)
+        _exposed(p)
         if args.intent:
             # What was asked for, not what it becomes: this is the form a file
             # holds, so `hlyn show --intent > policy.toml` is how a set of
@@ -524,7 +548,9 @@ def _run(argv: Sequence[str] | None = None) -> int:
 
     # Built here, before the fork, so a malformed policy is reported once, as
     # a sentence, with exit code 2 -- like every other command.
-    return _launch(cmd, _policy(args), args.no_report, args.json)
+    plan = _policy(args)
+    _exposed(plan)
+    return _launch(cmd, plan, args.no_report, args.json)
 
 
 if __name__ == "__main__":

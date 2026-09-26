@@ -314,10 +314,32 @@ def loader() -> tuple[str, ...]:
         # execute on the name in bin/ is therefore not enough, and the failure
         # is a bare `posix_spawn: ... Undefined error: 0`. Resources is named
         # specifically so that bin/ stays non-executable.
-        inner = os.path.join(sys.prefix, "Resources")
-        if os.path.exists(inner):
-            out.add(inner)
+        #
+        # Both prefixes: inside a virtualenv, `sys.prefix` is the venv and
+        # only `sys.base_prefix` is the framework that holds Resources/.
+        for prefix in {sys.prefix, sys.base_prefix}:
+            inner = os.path.join(prefix, "Resources")
+            if os.path.exists(inner):
+                out.add(inner)
     return prune(out)
+
+
+def companion(program: str) -> str | None:
+    """A second program that `program` needs to run, or None.
+
+    macOS framework Python again (see `loader`): `.../Versions/X.Y/bin/pythonX.Y`
+    re-execs `.../Versions/X.Y/Resources/Python.app`. `loader` covers the
+    interpreter hlyn itself runs on; this covers the one a command names,
+    which can be a different installation entirely.
+    """
+    if sys.platform != "darwin":
+        return None
+    real = os.path.realpath(program)
+    version, sep, _ = real.partition("/bin/")  # .../Python.framework/Versions/X.Y
+    if not sep or os.path.dirname(version).rsplit("/", 2)[-2:] != ["Python.framework", "Versions"]:
+        return None
+    inner = os.path.join(version, "Resources", "Python.app")
+    return inner if os.path.isdir(inner) else None
 
 
 def programs() -> tuple[str, ...]:

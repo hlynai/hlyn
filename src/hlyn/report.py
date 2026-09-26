@@ -38,7 +38,6 @@ repaint the user's screen.
 from __future__ import annotations
 
 import os
-import re
 import shlex
 import shutil
 from collections.abc import Callable, Iterable, Mapping
@@ -46,6 +45,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .policy import Policy, under
+from .secret import credential, secret
 
 __all__ = ["Denial", "Entry", "Listener", "Quiet", "Report", "credential", "removed", "safe", "secret"]
 
@@ -138,46 +138,6 @@ NOISE: frozenset[tuple[str, str]] = frozenset({
     ("read", "/dev/dtracehelper"),
     ("read", "/dev/fd"),
 })
-
-# Where credentials live. A refusal here is most likely the boundary doing its
-# job, so it is named as a credential and never handed a ready-made flag.
-HOMES: tuple[str, ...] = (
-    ".ssh", ".aws", ".gnupg", ".azure", ".kube", ".docker", ".password-store",
-    ".config/gcloud", ".config/gh", ".config/op", "Library/Keychains",
-    ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".pgpass",
-)
-SYSTEM: tuple[str, ...] = (
-    "/etc/shadow", "/etc/gshadow", "/etc/sudoers", "/etc/ssl/private",
-    "/etc/pki/tls/private", "/etc/ssh",
-)
-KEYS = re.compile(
-    r"^(id_(rsa|dsa|ecdsa|ed25519)(_sk)?(\.pub)?|\.env(\..*)?|credentials(\.json)?"
-    r"|.*\.(pem|key|p12|pfx|kdbx|keystore|jks))$",
-    re.IGNORECASE,
-)
-
-# Environment variable names that usually hold a secret.
-SECRET = re.compile(
-    r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|PRIVATE|SESSION|COOKIE|DSN|DATABASE_URL",
-    re.IGNORECASE,
-)
-
-
-def credential(path: str) -> bool:
-    """True if `path` is somewhere keys, tokens or passwords live."""
-    home = os.path.expanduser("~")
-    for item in HOMES:
-        if under(path, os.path.join(home, item)):
-            return True
-    if any(under(path, item) for item in SYSTEM):
-        return True
-    return bool(KEYS.match(os.path.basename(path)))
-
-
-def secret(name: str) -> bool:
-    """True if an environment variable's name suggests it holds a secret."""
-    return bool(SECRET.search(name))
-
 
 def removed(plan: Policy, env: Mapping[str, str]) -> list[str]:
     """Environment variables `plan` strips, secret-looking names first.

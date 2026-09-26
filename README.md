@@ -52,11 +52,14 @@ With hlyn, the answer is "only what you wrote down."
 
 | | Without hlyn | With hlyn |
 |---|---|---|
-| Agent reads `~/.ssh/id_ed25519` | Works | `PermissionError` |
-| Agent uploads your `.env` to some server | Works | Network refused unless you allowed the port |
+| Agent reads `~/.ssh/id_ed25519` | Works | `PermissionError`, unless you granted it |
+| Agent sends data to a server | Works | Refused while the network is off (the default). Once you open a port, see the note below. |
 | Agent runs `curl … \| sh` | Works | Refused unless you allowed that program |
 | Agent reads `OPENAI_API_KEY` from its environment | Works | Removed before it starts, unless you kept it |
+| You grant a folder that holds a `.env`, with the network open | Nothing tells you | hlyn warns before it starts, and says how to fix it |
 | Agent tries to turn the sandbox off | No sandbox to turn off | There is no off switch, not even for hlyn itself |
+
+> **The honest caveat.** `net` filters **ports, not hosts**. If you open port 443 so the agent can call an API, a compromised agent can use port 443 to reach *any* host. So the rule that matters most is: **don't let the agent read what it shouldn't send.** Grant narrow folders, pass API keys with `--env` rather than a readable `.env`, and let hlyn's [secret warning](#secrets-in-granted-folders) catch the rest. Host allowlists are on the roadmap.
 
 **What makes it different:**
 
@@ -93,7 +96,7 @@ ok  hlyn can confine programs on this machine (Linux 6.12.76-linuxkit)
 
 | Platform | Needs | Notes |
 |---|---|---|
-| **Linux** | Kernel **6.12+** with Landlock enabled, plus `libseccomp` | x86_64 and aarch64. Works inside Docker. |
+| **Linux** | Kernel **6.12+** with Landlock enabled, plus `libseccomp` | x86_64 and aarch64, any glibc 2.28+ distribution (Debian 10+, Ubuntu 20.04+, RHEL 8+). Works inside Docker. Alpine (musl) is not supported. |
 | **macOS** | Any current macOS | Nothing to build or install beyond Python. |
 | **Python** | 3.10 or newer | Reading TOML policies on 3.10 needs `tomli`; YAML needs `pyyaml`. JSON always works. |
 | Anything else | Not supported | hlyn refuses to run rather than pretend to protect you. |
@@ -188,6 +191,28 @@ A few rules worth knowing:
 - **Paths must exist.** A typo such as `read=["./scr"]` is an error, not a grant that silently matches nothing.
 - **`net` takes ports, not host names.** `net=["api.openai.com"]` is refused with an explanation; the kernel filters ports, not hosts. Use `net=[443]`.
 - **Allowing any network also allows what the network needs.** DNS configuration and TLS certificate stores become readable automatically, so `net=[443]` really can make HTTPS requests. Private key folders such as `/etc/ssl/private` are never included.
+
+### Secrets in granted folders
+
+A folder grant includes everything inside it, and the kernel can't exclude one file from a granted folder. So `read=["."]` in a project also grants its `.env`. With the network closed that's harmless, because the secret has nowhere to go. With the network open, hlyn warns **before** the agent starts:
+
+```
+$ hlyn run -p coder --net 443 -- python agent.py
+hlyn: warning: the agent can read 1 secret file and reach the network, so it could send it out:
+  ./.env
+  Grant only the folders it needs (e.g. --read ./src instead of the whole project),
+  pass a key it needs as a variable instead (--env NAME), or move the secrets out.
+  Meant it? Run with PYTHONWARNINGS=ignore::hlyn.Exposed to stop this warning.
+```
+
+| Detail | Behaviour |
+|---|---|
+| What counts as a secret | `.env` and `.env.*` (except `.example`, `.sample`, `.template`), private SSH keys, `*.pem`, `*.key`, `*.p12`, `credentials.json`, service-account JSON, `~/.aws`, `~/.ssh`, `~/.kube`, … |
+| When it warns | Only when a secret is readable **through a folder** **and** the network is open |
+| Granting a secret file on its own | No warning. Naming it is a decision. |
+| Where it looks | Up to 4 folders deep, skipping `.git`, `node_modules`, `.venv` and build output |
+| In Python | Raised as a `hlyn.Exposed` warning, so the standard filters apply (e.g. make it an error in your tests) |
+| Check a policy yourself | `hlyn.exposed(policy)` returns the list |
 
 ### Policy files
 
@@ -378,6 +403,7 @@ Every command that prints data prints plain text by default, and JSON with `--js
 | `hlyn.run(fn, policy=None, **fields)` | Runs `fn()` in a confined child process and returns its result (or re-raises its exception). The caller stays unconfined. |
 | `hlyn.spawn(cmd, policy=None, **fields)` | Confines this process, then replaces it with `cmd`. Does not return. |
 | `hlyn.probe()` | Reports what this machine can enforce, as a dict. Changes nothing. |
+| `hlyn.exposed(policy)` | Lists secret files the policy lets the agent read while the network is open. |
 | `hlyn.sealed()` | `True` once this process is confined. |
 | `hlyn.load(path)` | Reads a policy file into a `Policy`. |
 | `hlyn.Policy(...)` | An immutable policy object with the seven fields above. |
@@ -403,7 +429,7 @@ wider = base.with_(net=[443])
 
 ### Errors
 
-Every error inherits from `hlyn.Error`, so one `except` catches them all:
+Every error inherits from `hlyn.Error`, so one `except` catches them all. `hlyn.Exposed` is a warning, not an error: it never stops the run.
 
 | Error | Raised when | The process is |
 |---|---|---|
@@ -441,7 +467,7 @@ Messages say what to do next, naming the field or flag that would change the out
 
 ## Performance
 
-Nothing sits between the agent and the kernel, so there's nothing in the path to slow it down. Measured on Linux 6.12 (aarch64):
+Nothing sits between the agent and the kernel, so there's nothing in the path to slow it down. Measured on Linux 6.12 (aarch64) inside Docker on an Apple Silicon laptop. That's one virtualised machine, so treat the numbers as indicative rather than a benchmark:
 
 **Once, at startup:**
 
@@ -489,7 +515,7 @@ A sandbox that oversells itself is worse than one that doesn't, so here is exact
 
 | Limit | What it means | What to do |
 |---|---|---|
-| **No host names** | `net` filters ports, not domains. The kernel can't see host names. | Allow the port (`443`). Host allowlists are planned. |
+| **No host names** | `net` filters ports, not domains, so an open port reaches any host. | Keep secrets unreadable (see [Secrets in granted folders](#secrets-in-granted-folders)). Host allowlists are planned. |
 | **Named ports are TCP only** | `net=[443]` leaves UDP open, so DNS and QUIC can still leave. | Use `net=False` when nothing may leave. |
 | **Seal before threads** | A thread started before `on()` would keep its access, so hlyn refuses to seal. | Call `on()` first, or use `hlyn.run(fn)`. |
 | **A granted socket grants its service** | The service behind a socket you allow (e.g. `docker.sock`) can hand the agent anything it can open. | Treat a socket grant like `exec` on that service. |

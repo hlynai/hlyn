@@ -5,11 +5,34 @@ build-backend = "hatchling.build"
 [project]
 name = "hlyn"
 version = "0.0.1"
-description = "Runtime containment layer for AI agents."
+description = "Kernel-enforced sandbox for AI agents: declare what an agent may read, write, run and reach; everything else is denied."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = []
+keywords = [
+    "sandbox", "ai-agents", "llm", "security", "containment",
+    "landlock", "seccomp", "seatbelt", "prompt-injection",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Security",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 
 [project.scripts]
 hlyn = "hlyn.cli:main"
@@ -19,6 +42,25 @@ dev = ["pytest>=8", "hypothesis>=6", "mutmut>=3"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hlyn"]
+
+# The source distribution carries exactly what a build from source needs: the
+# package, both Rust crates (without their build output), the build hook and
+# the tests. Research notes, tooling and fuzzing corpora stay in the repo.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/hlyn",
+    "/native/Cargo.toml",
+    "/native/Cargo.lock",
+    "/native/src",
+    "/native/report/Cargo.toml",
+    "/native/report/Cargo.lock",
+    "/native/report/src",
+    "/hatch_build.py",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+]
+exclude = ["*.so", "__pycache__", ".DS_Store"]
 
 # Compiles the Landlock shim and puts it beside the package, so an installed
 # wheel can confine without a build tree next to it. See hatch_build.py.

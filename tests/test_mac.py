@@ -274,3 +274,32 @@ def test_framework_python_can_reach_its_inner_interpreter():
     if not _os.path.exists(inner):
         pytest.skip("not a framework build")
     assert inner in loader()
+
+
+def test_a_virtualenv_python_runs_under_hlyn_run(tmp_path):
+    # A venv's python is a link to a framework stub that re-execs the real
+    # interpreter in Resources/Python.app. Only the stub used to be granted,
+    # so `hlyn run -- .venv/bin/python` failed every time on python.org builds.
+    import subprocess as _sp
+
+    from conftest import SRC
+
+    venv = tmp_path / "venv"
+    _sp.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
+    done = _sp.run(
+        [sys.executable, "-m", "hlyn.cli", "run", "--no-log", "--no-report", "--",
+         str(venv / "bin" / "python"), "-c", "print('UP')"],
+        capture_output=True, text=True, env={"PYTHONPATH": SRC, "PATH": "/usr/bin:/bin"}, check=False,
+    )
+    assert "UP" in done.stdout, done.stderr
+
+
+def test_companion_finds_the_framework_interpreter():
+    from hlyn.policy import companion
+
+    inner = companion(sys.executable)
+    if "/Python.framework/" not in os.path.realpath(sys.executable):
+        assert inner is None
+    else:
+        assert inner and inner.endswith("/Resources/Python.app")
+    assert companion("/bin/ls") is None
