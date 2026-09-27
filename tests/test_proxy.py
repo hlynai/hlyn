@@ -1386,7 +1386,8 @@ def test_record_mode_lets_every_host_through_and_reports_each_once():
     async def scenario():
         far = await Far(reply=b"pong").start()
         events: list = []
-        net = Net({"api.example.com": [PUBLIC], "db.corp": ["10.0.0.5"]}, {PUBLIC: far.port, "10.0.0.5": far.port})
+        net = Net({"api.example.com": [PUBLIC], "db.corp": ["10.0.0.5"]},
+                  {PUBLIC: far.port, "10.0.0.5": far.port})
         served = await start((), net, events, record=True)
         answers = []
         for target in ("api.example.com:443", "api.example.com:443", "db.corp:5432", "203.0.113.9:8443"):

@@ -73,6 +73,17 @@ unsafe fn refused_with(err: c_int, kind: &[u8], op: &[u8], target: Target) {
     }
 }
 
+/// Under `hlyn watch` (`send::all`), reports a call that was allowed, so the
+/// draft policy can name what the program actually used. Otherwise nothing:
+/// one load and one comparison.
+unsafe fn used(kind: &[u8], op: &[u8], target: Target) {
+    if send::all() {
+        let saved = errno();
+        tell(0, kind, op, target);
+        set_errno(saved);
+    }
+}
+
 unsafe fn tell(err: c_int, kind: &[u8], op: &[u8], target: Target) {
     if !send::ready() {
         return;
@@ -92,7 +103,9 @@ unsafe fn tell(err: c_int, kind: &[u8], op: &[u8], target: Target) {
     // Decided before asking who we are, so a retry loop that is not due to
     // be sent costs no further syscalls.
     let count = seen::bump(line.key(kind));
-    if !seen::due(count) {
+    // A use (`err` 0) is worth telling once: the draft needs to know it
+    // happened, not how often. A refusal is told at 1, 2, 4, 8 ...
+    if (err == 0 && count > 1) || (err != 0 && !seen::due(count)) {
         return;
     }
     line.tab();
@@ -339,6 +352,8 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -
     let rc = real(path, flags, mode);
     if rc < 0 {
         refused(opened(flags), b"open", Target::Path(AT_FDCWD, path));
+    } else {
+        used(opened(flags), b"open", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -349,6 +364,8 @@ pub unsafe extern "C" fn open64(path: *const c_char, flags: c_int, mode: mode_t)
     let rc = real(path, flags, mode);
     if rc < 0 {
         refused(opened(flags), b"open", Target::Path(AT_FDCWD, path));
+    } else {
+        used(opened(flags), b"open", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -359,6 +376,8 @@ pub unsafe extern "C" fn openat(dirfd: c_int, path: *const c_char, flags: c_int,
     let rc = real(dirfd, path, flags, mode);
     if rc < 0 {
         refused(opened(flags), b"openat", Target::Path(dirfd, path));
+    } else {
+        used(opened(flags), b"openat", Target::Path(dirfd, path));
     }
     rc
 }
@@ -369,6 +388,8 @@ pub unsafe extern "C" fn openat64(dirfd: c_int, path: *const c_char, flags: c_in
     let rc = real(dirfd, path, flags, mode);
     if rc < 0 {
         refused(opened(flags), b"openat", Target::Path(dirfd, path));
+    } else {
+        used(opened(flags), b"openat", Target::Path(dirfd, path));
     }
     rc
 }
@@ -381,6 +402,8 @@ pub unsafe extern "C" fn __open_2(path: *const c_char, flags: c_int) -> c_int {
     let rc = real(path, flags);
     if rc < 0 {
         refused(opened(flags), b"open", Target::Path(AT_FDCWD, path));
+    } else {
+        used(opened(flags), b"open", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -391,6 +414,8 @@ pub unsafe extern "C" fn __open64_2(path: *const c_char, flags: c_int) -> c_int 
     let rc = real(path, flags);
     if rc < 0 {
         refused(opened(flags), b"open", Target::Path(AT_FDCWD, path));
+    } else {
+        used(opened(flags), b"open", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -401,6 +426,8 @@ pub unsafe extern "C" fn __openat_2(dirfd: c_int, path: *const c_char, flags: c_
     let rc = real(dirfd, path, flags);
     if rc < 0 {
         refused(opened(flags), b"openat", Target::Path(dirfd, path));
+    } else {
+        used(opened(flags), b"openat", Target::Path(dirfd, path));
     }
     rc
 }
@@ -411,6 +438,8 @@ pub unsafe extern "C" fn __openat64_2(dirfd: c_int, path: *const c_char, flags: 
     let rc = real(dirfd, path, flags);
     if rc < 0 {
         refused(opened(flags), b"openat", Target::Path(dirfd, path));
+    } else {
+        used(opened(flags), b"openat", Target::Path(dirfd, path));
     }
     rc
 }
@@ -421,6 +450,8 @@ pub unsafe extern "C" fn creat(path: *const c_char, mode: mode_t) -> c_int {
     let rc = real(path, mode);
     if rc < 0 {
         refused(WRITE, b"creat", Target::Path(AT_FDCWD, path));
+    } else {
+        used(WRITE, b"creat", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -431,6 +462,8 @@ pub unsafe extern "C" fn creat64(path: *const c_char, mode: mode_t) -> c_int {
     let rc = real(path, mode);
     if rc < 0 {
         refused(WRITE, b"creat", Target::Path(AT_FDCWD, path));
+    } else {
+        used(WRITE, b"creat", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -441,6 +474,8 @@ pub unsafe extern "C" fn fopen(path: *const c_char, mode: *const c_char) -> *mut
     let out = real(path, mode);
     if out.is_null() {
         refused(moded(mode), b"fopen", Target::Path(AT_FDCWD, path));
+    } else {
+        used(moded(mode), b"fopen", Target::Path(AT_FDCWD, path));
     }
     out
 }
@@ -451,6 +486,8 @@ pub unsafe extern "C" fn fopen64(path: *const c_char, mode: *const c_char) -> *m
     let out = real(path, mode);
     if out.is_null() {
         refused(moded(mode), b"fopen", Target::Path(AT_FDCWD, path));
+    } else {
+        used(moded(mode), b"fopen", Target::Path(AT_FDCWD, path));
     }
     out
 }
@@ -481,6 +518,8 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut DIR {
     let out = real(path);
     if out.is_null() {
         refused(READ, b"opendir", Target::Path(AT_FDCWD, path));
+    } else {
+        used(READ, b"opendir", Target::Path(AT_FDCWD, path));
     }
     out
 }
@@ -493,6 +532,8 @@ pub unsafe extern "C" fn mkdir(path: *const c_char, mode: mode_t) -> c_int {
     let rc = real(path, mode);
     if rc < 0 {
         refused(WRITE, b"mkdir", Target::Path(AT_FDCWD, path));
+    } else {
+        used(WRITE, b"mkdir", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -503,6 +544,8 @@ pub unsafe extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: mode_t
     let rc = real(dirfd, path, mode);
     if rc < 0 {
         refused(WRITE, b"mkdir", Target::Path(dirfd, path));
+    } else {
+        used(WRITE, b"mkdir", Target::Path(dirfd, path));
     }
     rc
 }
@@ -513,6 +556,8 @@ pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
     let rc = real(path);
     if rc < 0 {
         refused(WRITE, b"rmdir", Target::Path(AT_FDCWD, path));
+    } else {
+        used(WRITE, b"rmdir", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -523,6 +568,8 @@ pub unsafe extern "C" fn unlink(path: *const c_char) -> c_int {
     let rc = real(path);
     if rc < 0 {
         refused(WRITE, b"unlink", Target::Path(AT_FDCWD, path));
+    } else {
+        used(WRITE, b"unlink", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -533,6 +580,8 @@ pub unsafe extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_in
     let rc = real(dirfd, path, flags);
     if rc < 0 {
         refused(WRITE, b"unlink", Target::Path(dirfd, path));
+    } else {
+        used(WRITE, b"unlink", Target::Path(dirfd, path));
     }
     rc
 }
@@ -547,6 +596,9 @@ pub unsafe extern "C" fn rename(old: *const c_char, new: *const c_char) -> c_int
     if rc < 0 {
         refused(WRITE, b"rename", Target::Path(AT_FDCWD, old));
         refused(WRITE, b"rename", Target::Path(AT_FDCWD, new));
+    } else {
+        used(WRITE, b"rename", Target::Path(AT_FDCWD, old));
+        used(WRITE, b"rename", Target::Path(AT_FDCWD, new));
     }
     rc
 }
@@ -558,6 +610,9 @@ pub unsafe extern "C" fn renameat(olddir: c_int, old: *const c_char, newdir: c_i
     if rc < 0 {
         refused(WRITE, b"rename", Target::Path(olddir, old));
         refused(WRITE, b"rename", Target::Path(newdir, new));
+    } else {
+        used(WRITE, b"rename", Target::Path(olddir, old));
+        used(WRITE, b"rename", Target::Path(newdir, new));
     }
     rc
 }
@@ -575,6 +630,9 @@ pub unsafe extern "C" fn renameat2(
     if rc < 0 {
         refused(WRITE, b"rename", Target::Path(olddir, old));
         refused(WRITE, b"rename", Target::Path(newdir, new));
+    } else {
+        used(WRITE, b"rename", Target::Path(olddir, old));
+        used(WRITE, b"rename", Target::Path(newdir, new));
     }
     rc
 }
@@ -585,6 +643,8 @@ pub unsafe extern "C" fn link(old: *const c_char, new: *const c_char) -> c_int {
     let rc = real(old, new);
     if rc < 0 {
         refused(WRITE, b"link", Target::Path(AT_FDCWD, new));
+    } else {
+        used(WRITE, b"link", Target::Path(AT_FDCWD, new));
     }
     rc
 }
@@ -601,6 +661,8 @@ pub unsafe extern "C" fn linkat(
     let rc = real(olddir, old, newdir, new, flags);
     if rc < 0 {
         refused(WRITE, b"link", Target::Path(newdir, new));
+    } else {
+        used(WRITE, b"link", Target::Path(newdir, new));
     }
     rc
 }
@@ -611,6 +673,8 @@ pub unsafe extern "C" fn symlink(target: *const c_char, path: *const c_char) -> 
     let rc = real(target, path);
     if rc < 0 {
         refused(WRITE, b"symlink", Target::Path(AT_FDCWD, path));
+    } else {
+        used(WRITE, b"symlink", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -621,6 +685,8 @@ pub unsafe extern "C" fn symlinkat(target: *const c_char, dirfd: c_int, path: *c
     let rc = real(target, dirfd, path);
     if rc < 0 {
         refused(WRITE, b"symlink", Target::Path(dirfd, path));
+    } else {
+        used(WRITE, b"symlink", Target::Path(dirfd, path));
     }
     rc
 }
@@ -631,6 +697,8 @@ pub unsafe extern "C" fn truncate(path: *const c_char, size: off_t) -> c_int {
     let rc = real(path, size);
     if rc < 0 {
         refused(WRITE, b"truncate", Target::Path(AT_FDCWD, path));
+    } else {
+        used(WRITE, b"truncate", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -641,6 +709,8 @@ pub unsafe extern "C" fn truncate64(path: *const c_char, size: off64_t) -> c_int
     let rc = real(path, size);
     if rc < 0 {
         refused(WRITE, b"truncate", Target::Path(AT_FDCWD, path));
+    } else {
+        used(WRITE, b"truncate", Target::Path(AT_FDCWD, path));
     }
     rc
 }
@@ -658,6 +728,7 @@ pub unsafe extern "C" fn execve(
     envp: *const *const c_char,
 ) -> c_int {
     let real = next!(EXECVE, fn(*const c_char, *const *const c_char, *const *const c_char) -> c_int, -1);
+    used(EXEC, b"execve", Target::Path(AT_FDCWD, path)); // told first: a successful exec never returns
     let rc = real(path, argv, envp);
     refused(EXEC, b"execve", Target::Path(AT_FDCWD, path));
     rc
@@ -666,6 +737,7 @@ pub unsafe extern "C" fn execve(
 #[no_mangle]
 pub unsafe extern "C" fn execv(path: *const c_char, argv: *const *const c_char) -> c_int {
     let real = next!(EXECV, fn(*const c_char, *const *const c_char) -> c_int, -1);
+    used(EXEC, b"execv", Target::Path(AT_FDCWD, path)); // told first: a successful exec never returns
     let rc = real(path, argv);
     refused(EXEC, b"execv", Target::Path(AT_FDCWD, path));
     rc
@@ -674,6 +746,7 @@ pub unsafe extern "C" fn execv(path: *const c_char, argv: *const *const c_char) 
 #[no_mangle]
 pub unsafe extern "C" fn execvp(file: *const c_char, argv: *const *const c_char) -> c_int {
     let real = next!(EXECVP, fn(*const c_char, *const *const c_char) -> c_int, -1);
+    used(EXEC, b"execvp", Target::Program(file)); // told first: a successful exec never returns
     let rc = real(file, argv);
     refused(EXEC, b"execvp", Target::Program(file));
     rc
@@ -686,6 +759,7 @@ pub unsafe extern "C" fn execvpe(
     envp: *const *const c_char,
 ) -> c_int {
     let real = next!(EXECVPE, fn(*const c_char, *const *const c_char, *const *const c_char) -> c_int, -1);
+    used(EXEC, b"execvpe", Target::Program(file)); // told first: a successful exec never returns
     let rc = real(file, argv, envp);
     refused(EXEC, b"execvpe", Target::Program(file));
     rc
@@ -714,6 +788,9 @@ pub unsafe extern "C" fn posix_spawn(
     );
     let rc = real(pid, path, actions, attrs, argv, envp);
     refused_with(rc, EXEC, b"posix_spawn", Target::Path(AT_FDCWD, path));
+    if rc == 0 {
+        used(EXEC, b"posix_spawn", Target::Path(AT_FDCWD, path));
+    }
     rc
 }
 
@@ -740,6 +817,9 @@ pub unsafe extern "C" fn posix_spawnp(
     );
     let rc = real(pid, file, actions, attrs, argv, envp);
     refused_with(rc, EXEC, b"posix_spawnp", Target::Program(file));
+    if rc == 0 {
+        used(EXEC, b"posix_spawnp", Target::Program(file));
+    }
     rc
 }
 
@@ -751,6 +831,11 @@ pub unsafe extern "C" fn connect(fd: c_int, addr: *const sockaddr, len: socklen_
     let rc = real(fd, addr, len);
     if rc < 0 {
         refused(NET, b"connect", Target::Addr(addr, len));
+        if errno() == libc::EINPROGRESS {
+            used(NET, b"connect", Target::Addr(addr, len)); // non-blocking, under way
+        }
+    } else {
+        used(NET, b"connect", Target::Addr(addr, len));
     }
     rc
 }
@@ -790,6 +875,8 @@ pub unsafe extern "C" fn bind(fd: c_int, addr: *const sockaddr, len: socklen_t) 
     let rc = real(fd, addr, len);
     if rc < 0 {
         refused(LISTEN, b"bind", Target::Addr(addr, len));
+    } else {
+        used(LISTEN, b"bind", Target::Addr(addr, len));
     }
     rc
 }

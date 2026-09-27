@@ -783,3 +783,14 @@ def test_many_similar_refusals_read_well(tmp_path):
         one(few, kind="net", target=f"10.0.0.{last}:443", op="direct", source="gate",
             allow=f"--net 10.0.0.{last}")
     assert "  to allow all of these: --net 10.0.0.1 --net 10.0.0.2" in few.text(1, ["agent"])
+
+
+def test_a_use_record_is_read_only_by_a_listener_that_asked_for_uses():
+    # hlyn watch hears allowed calls (errno 0); hlyn run hears refusals. A
+    # program can write either kind of line to the pipe, so each listener
+    # takes only its own: a "use" never becomes a refusal in a run's report.
+    use = GOOD.replace(b"\t13\t", b"\t0\t")
+    print(preload.parse(use), preload.parse(use, uses=True), preload.parse(GOOD, uses=True), sep="\n")
+    assert preload.parse(use) is None
+    assert preload.parse(use, uses=True) is not None
+    assert preload.parse(GOOD, uses=True) is None

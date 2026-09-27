@@ -8,6 +8,7 @@ the interpreter's own files, a file descriptor mistaken for a path -- stay out.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -259,6 +260,12 @@ def test_watch_once_then_enforce_the_draft(tmp_path):
     assert "allow with --net evil.example.net" in enforced.stderr
 
 
+def drafted(program: str, draft: str) -> bool:
+    """Whether `draft` grants running `program`, where PATH finds it."""
+    found = shutil.which(program) or program
+    return f'"{found}"' in draft or f'"{os.path.realpath(found)}"' in draft
+
+
 @pytest.mark.skipif(not shutil.which("curl"), reason="needs curl")
 def test_watch_sees_where_a_non_python_client_went_through_its_proxy(tmp_path):
     """curl in a child process is invisible to Python's audit hooks; it
@@ -285,7 +292,7 @@ def test_watch_sees_where_a_non_python_client_went_through_its_proxy(tmp_path):
     assert f'"localhost:{port}"' in done.stdout
     assert done.stdout.count("localhost:") == 1  # the recording proxy isn't drafted
     # A program started by bare name is granted where PATH found it.
-    assert f'"{os.path.realpath(shutil.which("curl"))}"' in done.stdout or f'"{shutil.which("curl")}"' in done.stdout
+    assert drafted("curl", done.stdout)
 
 
 def test_a_program_started_by_name_is_found_on_path_not_in_the_working_folder(clean, tmp_path):
@@ -301,3 +308,26 @@ def test_a_program_started_by_name_is_found_on_path_not_in_the_working_folder(cl
     assert ("exec", str(tool)) in watch.seen()
     assert not [value for kind, value in watch.seen() if "no-such-tool" in value]
     assert ("exec", os.path.abspath("./relative/tool")) in watch.seen()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the preloaded library is Linux-only")
+def test_watch_sees_what_a_program_that_isnt_python_uses(tmp_path):
+    """No Python in the workload at all: a shell pipeline. The library
+    `hlyn run` preloads to hear refusals reports what was allowed instead,
+    so the draft names the programs it ran and the file it wrote."""
+    from hlyn.core import preload
+
+    if preload.find() is None:
+        pytest.skip("the reporting library isn't built (cargo build --release in native/report)")
+    out = os.path.join(os.environ.get("HOME", "/root"), f".hlyn-watch-test-{os.getpid()}.txt")
+    try:
+        done = subprocess.run(
+            [sys.executable, "-m", "hlyn.cli", "watch", "--", "sh", "-c", f"echo hi | tr a-z A-Z > {out}"],
+            capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=SRC), check=False, timeout=60)
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(out)
+    print(done.stdout, done.stderr[-400:])
+    assert done.returncode == 0
+    assert drafted("tr", done.stdout)
+    assert f'"{out}"' in done.stdout

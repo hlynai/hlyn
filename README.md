@@ -374,7 +374,7 @@ How it hears the refusals, and what it can miss:
 
 Deny-by-default is easy to enforce; the hard part is knowing what to allow. The workflow is **watch → trim → run**:
 
-**1. Watch one unconfined run** and let hlyn draft the policy (Python programs only):
+**1. Watch one unconfined run** and let hlyn draft the policy. On Linux it sees any program, and everything it starts; on macOS, Python programs:
 
 ```bash
 hlyn watch -- python agent.py > policy.toml
@@ -422,7 +422,7 @@ hlyn show --intent --read ./src --net 443 > policy.toml
 | Command | What it does |
 |---|---|
 | `hlyn run [flags] -- CMD` | Runs `CMD` confined, passes on its exit code, and lists what was blocked |
-| `hlyn watch -- CMD` | Runs a Python program **unconfined** and prints the policy it would need |
+| `hlyn watch -- CMD` | Runs a program **unconfined** and prints the policy it would need (on macOS, Python programs) |
 | `hlyn show [flags]` | Prints the full list of paths, hosts and ports a set of flags would grant |
 | `hlyn show --intent [flags]` | Prints the flags as a policy file you can check in |
 | `hlyn presets` | Lists the presets and what each grants |

@@ -34,6 +34,7 @@ __all__ = ["Listener", "find", "parse", "static"]
 
 NAME = "libhlyn_report.so"
 VAR = "HLYN_REPORT"  # must match native/report/src/send.rs
+ALL = "HLYN_REPORT_ALL"  # likewise: tell allowed calls too (hlyn watch)
 
 # Bounds on what one run will take from the pipe. A record is at most
 # PIPE_BUF bytes by construction; anything longer without a newline is not a
@@ -105,10 +106,13 @@ def _unescape(field: bytes) -> bytes | None:
     return ESCAPE.sub(lambda m: bytes([int(m.group(1), 16)]), field)
 
 
-def parse(line: bytes) -> Denial | None:
+def parse(line: bytes, uses: bool = False) -> Denial | None:
     """One record, or None for anything that is not exactly one.
 
-    `hlyn1 kind op errno target pid comm cut count`, tab-separated.
+    `hlyn1 kind op errno target pid comm cut count`, tab-separated. A refusal
+    carries errno 1 or 13; with `uses` (`hlyn watch`), only a call that was
+    allowed (errno 0) is accepted instead, so neither kind can pass for the
+    other.
     """
     fields = line.split(b"\t")
     if len(fields) != 9 or fields[0] != b"hlyn1":
@@ -120,7 +124,7 @@ def parse(line: bytes) -> Denial | None:
         return None
     if name not in KINDS or not OP.match(op):
         return None
-    if err not in (b"1", b"13") or cut not in (b"0", b"1"):
+    if err not in ((b"0",) if uses else (b"1", b"13")) or cut not in (b"0", b"1"):
         return None
     if not (pid.isdigit() and len(pid) <= 10 and count.isdigit() and len(count) <= 10):
         return None
@@ -145,7 +149,8 @@ class Listener:
     source = "program"
     tag: str | None = None
 
-    def __init__(self) -> None:
+    def __init__(self, uses: bool = False) -> None:
+        self.uses = uses  # hlyn watch: hear what was allowed, not what was refused
         self.why: str | None = None
         self.lib = find()
         self.box: str | None = None
@@ -195,10 +200,13 @@ class Listener:
         if self.lib is None or self.pipe is None:
             return {}
         theirs = keep.get("LD_PRELOAD")
-        return {
+        out = {
             "LD_PRELOAD": f"{self.lib}:{theirs}" if theirs else self.lib,
             VAR: self.pipe,
         }
+        if self.uses:
+            out[ALL] = "1"
+        return out
 
     def start(self) -> None:
         pass
@@ -227,7 +235,7 @@ class Listener:
                 if self._lines >= LINES:
                     continue  # keep draining so writers never stall
                 self._lines += 1
-                found = parse(line)
+                found = parse(line, self.uses)
                 if found is not None:
                     out.append(found)
         return out

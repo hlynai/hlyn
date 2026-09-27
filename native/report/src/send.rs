@@ -10,10 +10,14 @@
 //! for one of the program's own files, which would then receive our records.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Where the pipe is, named by `hlyn run` in the child's environment.
 pub const VAR: &[u8] = b"HLYN_REPORT\0";
+
+/// Set (to anything) by `hlyn watch`: tell calls that were allowed too, so
+/// the draft policy can name what the program used (see `hooks::used`).
+pub const ALL: &[u8] = b"HLYN_REPORT_ALL\0";
 
 const MAX: usize = 4096;
 
@@ -24,10 +28,14 @@ unsafe impl Sync for Path {}
 
 static PATH: Path = Path(UnsafeCell::new([0; MAX]));
 static LEN: AtomicUsize = AtomicUsize::new(0);
+static EVERY: AtomicBool = AtomicBool::new(false);
 
 /// Reads the pipe's path from the environment. Called once, at load.
 pub fn load() {
     unsafe {
+        if !libc::getenv(ALL.as_ptr().cast()).is_null() {
+            EVERY.store(true, Ordering::Release);
+        }
         let value = libc::getenv(VAR.as_ptr().cast());
         if value.is_null() {
             return;
@@ -53,6 +61,11 @@ pub fn load() {
 /// outside `hlyn run` pays nothing to build a record nobody will read.
 pub fn ready() -> bool {
     LEN.load(Ordering::Acquire) != 0
+}
+
+/// Whether allowed calls are told too (`hlyn watch`). Read once, at load.
+pub fn all() -> bool {
+    EVERY.load(Ordering::Acquire) && ready()
 }
 
 /// Writes one record. Loses it silently if the pipe is gone or full.

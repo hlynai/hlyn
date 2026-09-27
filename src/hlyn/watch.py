@@ -31,10 +31,13 @@ What it sees, and what it does not, stated plainly because the gap matters:
     Every client that honours `HTTPS_PROXY`, Python or not (requests, httpx,
     curl, git, npm), goes through hlyn's own proxy in record mode, which lets
     everything through and reports where each connection went (`cli._watch`).
-  * It does not see a C extension that calls `open(2)` directly without going
-    through Python, and it does not see inside a child process unless that
-    child is also watched. `hlyn watch` arranges the latter for child Pythons;
-    nothing can arrange the former.
+  * Audit hooks don't see a C extension that calls `open(2)` directly, or a
+    child process that isn't Python. On Linux `hlyn watch` covers both: the
+    library `hlyn run` preloads to hear refusals is told to report what was
+    allowed instead (`HLYN_REPORT_ALL`), in every dynamically linked program
+    the command starts. A statically linked one (most Go binaries) and a
+    program that clears its own environment stay unseen. On macOS only the
+    Python programs are seen.
   * So a policy built from this can be too *narrow*, and the agent will hit a
     refusal the watch run never predicted. That failure is loud, safe, and
     fixable. It is the right direction to be wrong in.

@@ -478,12 +478,12 @@ def test_on_refuses_with_a_connection_the_policy_would_not_allow(net):
 def test_spawn_closes_an_inherited_connection_under_ports(tmp_path):
     # The command inherits the socket (made inheritable, as a parent passing
     # it on would) and writes to it by number.
-    done = boot(INHERITED + f"""
+    done = boot(INHERITED + """
     import os, sys
     os.set_inheritable(conn.fileno(), True)
     kid = os.fork()
     if kid == 0:
-        script = "import os; os.write({{fd}}, b'SECRET'); print('command: sent')".format(fd=conn.fileno())
+        script = "import os; os.write({fd}, b'SECRET'); print('command: sent')".format(fd=conn.fileno())
         hlyn.spawn([sys.executable, "-c", script], net=[9])
     os.waitpid(kid, 0)
     print("server heard:", heard())

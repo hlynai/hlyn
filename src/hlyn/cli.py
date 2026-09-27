@@ -233,6 +233,10 @@ def _watch(cmd: list[str], as_json: bool) -> int:
     # everything through and says where each connection went. Chains
     # through the user's own proxy, as a run would (5.5).
     heard, recorder = _recorder(where)
+    # And every program's own file, program and network calls, Python or not,
+    # C extensions included, from the library `hlyn run` preloads to hear
+    # refusals, told here to report what was allowed instead (Linux).
+    ear = _uses(where)
 
     print("hlyn watch: running unconfined, recording what it touches", file=sys.stderr)
     # The command's own output goes to stderr, not stdout. Our stdout carries
@@ -240,9 +244,28 @@ def _watch(cmd: list[str], as_json: bool) -> int:
     # produces a file that parses. Mixing the agent's prints into it produces
     # one that does not, and the error arrives a step later where it makes no
     # sense. The user still sees everything; only the stream differs.
-    done = subprocess.run(cmd, env=where, stdout=2, check=False)  # noqa: S603
+    try:
+        process = subprocess.Popen(cmd, env=where, stdout=2)  # noqa: S603
+    except OSError as exc:
+        print(f"hlyn watch: couldn't start {cmd[0]}: {exc.strerror or exc}", file=sys.stderr)
+        return 127
+    uses: list[Any] = []
+    while process.poll() is None:
+        if ear is not None and ear.fileno() is not None:
+            import select
+
+            select.select([ear.fileno()], [], [], 0.2)
+            uses.extend(ear.read())
+        else:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(0.2)
+    code = process.returncode
+    if ear is not None:
+        uses.extend(ear.finish())
+        ear.close()
 
     watch._load(seen)
+    _heard(uses)
     if recorder is not None:
         _recorded(heard, recorder)
     if not watch.seen():
@@ -251,13 +274,47 @@ def _watch(cmd: list[str], as_json: bool) -> int:
             "have exited before importing anything.",
             file=sys.stderr,
         )
-        return done.returncode or 1
+        return code or 1
 
     plan = watch.suggest()
     print(f"\n# observed over one run of: {' '.join(cmd)}", file=sys.stderr)
     print("# a draft to cut down, not a policy to trust\n", file=sys.stderr)
     sys.stdout.write(spec.dumps(plan) if as_json else _toml(spec.shape(plan)))
-    return done.returncode
+    return code
+
+
+def _uses(where: dict[str, str]) -> Any:
+    """`hlyn watch`'s preloaded listener, pointed at the allowed calls, and
+    `where` set up to load it; or None where there is none (macOS, or a
+    library that wasn't built)."""
+    if sys.platform != "linux":
+        return None
+    from .core import preload
+
+    ear = preload.Listener(uses=True)
+    if ear.lib is None:
+        ear.close()
+        return None
+    where.update(ear.env(where))
+    return ear
+
+
+def _heard(uses: list[Any]) -> None:
+    """Add what the preloaded library saw the program use to watch's record,
+    in the same form Python's own audit hooks give it."""
+    from . import watch
+
+    for use in uses:
+        target = use.target
+        if use.kind in ("read", "write") and target.startswith("/"):
+            watch._seen.add((use.kind, os.path.normpath(target)))
+        elif use.kind == "exec":
+            watch._program(target, dict(os.environ))
+        elif use.kind == "net":
+            port, _, address = target.partition(" ")
+            if port.isdigit() and address and not address.startswith("unix:"):
+                watch._seen.add(("net", port))
+                watch._seen.add(("addr", f"{address} {port}"))
 
 
 def _recorder(where: dict[str, str]) -> tuple[int, Any]:
@@ -309,6 +366,7 @@ def _recorded(heard: int, way: Any) -> None:
     for local in ("127.0.0.1", "::1"):
         watch._seen.discard(("addr", f"{local} {way.port}"))
     watch._seen.discard(("host", f"localhost {way.port}"))
+    watch._seen.discard(("net", str(way.port)))
 
 
 def _toml(data: dict[str, object]) -> str:

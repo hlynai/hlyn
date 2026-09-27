@@ -164,8 +164,10 @@ def test_the_gate_helper_loads_nothing_slow():
         "import hlyn.gate, hlyn.core.guard, hlyn.core.notify; "
         "print(' '.join(sorted(sys.modules)))"
     )
-    done = subprocess.run([sys.executable, "-I", "-S", "-c", probe], capture_output=True, text=True, check=True)
+    done = subprocess.run([sys.executable, "-I", "-S", "-c", probe],
+                          capture_output=True, text=True, check=True)
     loaded = set(done.stdout.split())
-    slow = {"asyncio", "typing", "ctypes.util", "hlyn.policy", "hlyn.proxy", "subprocess", "platform", "argparse"}
+    slow = {"asyncio", "typing", "ctypes.util", "hlyn.policy", "hlyn.proxy", "subprocess", "platform",
+            "argparse"}
     print(f"{len(loaded)} modules loaded; slow ones among them: {sorted(loaded & slow)}")
     assert not loaded & slow
