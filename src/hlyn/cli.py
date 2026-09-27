@@ -534,12 +534,10 @@ def _reach(plan: Policy) -> bool:
     onward reach (design 6.7). Same filters and exit rule as `_exposed`."""
     import warnings
 
-    from .hosts import Reach, warn
+    from .hosts import Reach
+    from .jail import reaches
 
-    for rule in plan.hosts():
-        text = warn(rule)
-        if not text:
-            continue
+    for text in reaches(plan):
         try:
             with warnings.catch_warnings(record=True) as heard:
                 warnings.warn(text, Reach, stacklevel=1)

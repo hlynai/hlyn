@@ -433,3 +433,56 @@ def test_row_3_unix_race(proxy, where):
     assert int(counts[1]) > 0 and int(counts[3]) > 0
     if closed:
         assert won == 0
+
+
+# ---------------------------------------------------------------------------
+# a write grant that holds a refused socket (5.3's residual inside a grant)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def docker_home(tmp_path, monkeypatch):
+    """A home folder holding a real ~/.docker/run/docker.sock."""
+    run = tmp_path / ".docker" / "run"
+    run.mkdir(parents=True)
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(run / "docker.sock"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    yield tmp_path
+    server.close()
+
+
+def test_granted_names_refused_sockets_only_under_a_write_grant(docker_home, tmp_path):
+    from hlyn.core.guard import granted
+
+    sock = os.path.realpath(docker_home / ".docker" / "run" / "docker.sock")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    cases = {
+        "the folder holding it": ((str(docker_home / ".docker"),), [sock]),
+        "a folder beside it": ((str(elsewhere),), []),
+        "write=True": (True, "contains"),
+        "no writes": ((), []),
+    }
+    for name, (writes, want) in cases.items():
+        got = granted(writes)
+        print(f"{name:24} -> {got}")
+        if want == "contains":
+            assert sock in got
+        else:
+            assert got == want, name
+
+
+def test_hlyn_show_warns_when_a_write_grant_holds_a_refused_socket(docker_home):
+    env = dict(os.environ, PYTHONPATH=SRC, HOME=str(docker_home))
+    folder = str(docker_home / ".docker")
+    done = subprocess.run([sys.executable, "-m", "hlyn.cli", "show", "--net", "pypi.org", "--write", folder],
+                          capture_output=True, text=True, env=env, check=False)
+    print(done.stderr)
+    assert done.returncode == 0
+    assert f"hlyn: --write {folder} covers {os.path.realpath(folder)}/run/docker.sock" in done.stderr
+    assert "Grant a narrower folder unless you mean it." in done.stderr
+    ports = subprocess.run([sys.executable, "-m", "hlyn.cli", "show", "--net", "443", "--write", folder],
+                           capture_output=True, text=True, env=env, check=False)
+    print("with ports:", repr(ports.stderr))
+    assert "docker.sock" not in ports.stderr  # the gate's list is host mode's

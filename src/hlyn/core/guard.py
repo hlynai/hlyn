@@ -44,6 +44,7 @@ import re
 import select
 import shlex
 import socket
+import stat
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -51,6 +52,7 @@ from typing import Literal
 
 from .. import hosts
 from ..hosts import Rule
+from ..policy import under
 from ..wire import header
 from . import notify, seccomp
 
@@ -75,6 +77,53 @@ REFUSED: tuple[str, ...] = (
     r"/(docker|containerd|podman|crio)[^/]*\.sock$",
 )
 _REFUSED = tuple(re.compile(pattern) for pattern in REFUSED)
+
+# Where the refused sockets live on common Linux systems, for `granted`.
+PLACES: tuple[str, ...] = (
+    "/run/systemd/resolve/*",
+    "/run/nscd/socket",
+    "/var/run/nscd/socket",
+    "/run/dbus/system_bus_socket",
+    "/run/user/*/bus",
+    "/run/docker.sock",
+    "/var/run/docker.sock",
+    "/run/user/*/docker.sock",
+    "/run/containerd/containerd.sock",
+    "/run/podman/podman.sock",
+    "/run/user/*/podman/podman.sock",
+    "/run/crio/crio.sock",
+    "~/.docker/run/docker.sock",
+)
+
+
+def granted(writes: tuple[str, ...] | bool) -> list[str]:
+    """Refused sockets that exist here and sit under a write grant.
+
+    The gate checks a unix connect's path and lets it run (5.3), so a program
+    racing threads can swap in another path after the check. Outside the
+    write grants, Landlock refuses that on Linux 7.1+; inside one, nothing
+    does, on any kernel. A grant such as `--write /run` therefore leaves the
+    resolver, D-Bus or a container runtime one lost race away.
+    """
+    import glob
+
+    if not writes:
+        return []
+    roots = None if isinstance(writes, bool) else [os.path.realpath(item) for item in writes]
+    out = []
+    for place in PLACES:
+        for found in glob.glob(os.path.expanduser(place)):
+            real = os.path.realpath(found)
+            try:
+                if not stat.S_ISSOCK(os.stat(real).st_mode):
+                    continue
+            except OSError:
+                continue  # gone since the glob
+            if not any(pattern.search(item) for pattern in _REFUSED for item in (found, real)):
+                continue
+            if roots is None or any(under(real, root) for root in roots):
+                out.append(real)
+    return sorted(set(out))
 
 # MSG_FASTOPEN. The filter refuses it; the gate checks the register again.
 FASTOPEN = 0x20000000

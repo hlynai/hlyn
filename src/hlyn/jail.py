@@ -24,7 +24,7 @@ from typing import Any, NoReturn
 
 from . import log
 from .error import Failed, Invalid, Sealed, Unsupported
-from .policy import Policy, preset, presets
+from .policy import Policy, preset, presets, under
 
 __all__ = ["back", "on", "probe", "run", "sealed", "spawn"]
 
@@ -335,6 +335,33 @@ def _both(one: Extra | None, two: Extra) -> Extra:
     return lambda keep: {**one(keep), **two(keep)}
 
 
+def reaches(plan: Policy) -> list[str]:
+    """Warnings for a host policy that reaches further than it reads (6.7):
+    an entry naming a local service with onward reach, and, on Linux, a
+    write grant holding a socket the gate refuses but can't protect from a
+    racing program (5.3). Empty for any other policy."""
+    from .hosts import warn
+
+    named = plan.hosts()
+    out = [said for said in (warn(rule) for rule in named) if said]
+    if named and sys.platform == "linux":
+        from .core.guard import granted
+
+        writes = plan.writes()
+        for path in granted(writes):
+            if writes is True:
+                where = "The policy grants writing everywhere, which covers"
+            else:
+                folder = max((item for item in writes if under(path, os.path.realpath(item))), key=len)
+                where = f"--write {folder} covers"
+            out.append(
+                f"hlyn: {where} {path}, a socket hlyn refuses with --net hosts. A program that "
+                f"races threads can reach it anyway while its folder is granted, on any Linux "
+                f"kernel. Grant a narrower folder unless you mean it."
+            )
+    return out
+
+
 def _warn(plan: Policy) -> list[str]:
     """Say, before sealing, if the policy lets secrets out. See `secret.py`.
 
@@ -347,13 +374,11 @@ def _warn(plan: Policy) -> list[str]:
     """
     import warnings
 
-    from .hosts import Reach, warn
+    from .hosts import Reach
     from .secret import Exposed, exposed, warning
 
-    for rule in plan.hosts():
-        said = warn(rule)
-        if said:
-            warnings.warn(said, Reach, stacklevel=3)
+    for said in reaches(plan):
+        warnings.warn(said, Reach, stacklevel=3)
     found = exposed(plan)
     if found:
         warnings.warn(warning(found, cli=False), Exposed, stacklevel=3)
