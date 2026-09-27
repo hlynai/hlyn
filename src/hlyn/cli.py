@@ -390,7 +390,8 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
         heard, said = os.pipe()
         try:
             with jail._denials(plan) as fd:
-                way = route.start(plan.hosts(), log=fd, events=said, inherit=True, gate=jail.gated())
+                way = route.start(plan.hosts(), log=fd, events=said, inherit=True, gate=jail.gated(),
+                                  wait=False)
                 if jail.gated():
                     told = (os.dup(fd) if fd is not None else None, os.dup(said))
         except BaseException:
@@ -407,6 +408,16 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
     old_wake = signal.set_wakeup_fd(wake_w)
     old_chld = signal.signal(signal.SIGCHLD, lambda *_: None)
     r = -1
+    # With one thread, the gate can serve in the forked process rather than
+    # start a fresh interpreter (gate.become's `fresh`, as `hlyn.run(fn)`
+    # does): no other thread can have held a lock across the fork.
+    alone = False
+    if way is not None and sys.platform == "linux":
+        from .core.landlock import crowd
+
+        alone = len(crowd()) <= 1
+        if alone:
+            gate.prepare()
     try:
         r, w = os.pipe()  # not inherited, so a successful exec closes `w`
         pid = os.fork()
@@ -436,7 +447,8 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
             if way is None:
                 start()
             # This child becomes the gate for the command: CLI -> gate -> agent.
-            gate.become(start, forward=True, isolate=True, close=[way.life], log=told[0], events=told[1])
+            gate.become(start, forward=True, isolate=True, close=[way.life, w], fresh=not alone,
+                        log=told[0], events=told[1])
 
         os.close(w)
         for fd in told:
@@ -470,6 +482,7 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
                 os.close(r)
                 r = -1
             _hear(ear, book)
+            _starting(way)
             done, found = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
             if done and os.WIFSTOPPED(found):
                 # The command was stopped (Ctrl-Z) and its gate with it: stop
@@ -483,6 +496,7 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
             _file(book, denial)
         if heard >= 0:
             _proxied(heard, proxied, book)
+        _starting(way, final=True)
         return failed, status
     finally:
         if r >= 0:
@@ -493,6 +507,16 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
         signal.signal(signal.SIGCHLD, old_chld)
         for fd in (wake_r, wake_w):
             os.close(fd)
+
+
+def _starting(way: Any, final: bool = False) -> None:
+    """Say, once, if the proxy `hlyn run` started without waiting for
+    (`route.start(wait=False)`) stopped before it was ready."""
+    if way is None:
+        return
+    trouble = way.problem(final=final)
+    if trouble:
+        print(f"hlyn: {trouble}", file=sys.stderr)
 
 
 def _exposed(plan: Policy) -> bool:

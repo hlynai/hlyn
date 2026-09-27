@@ -281,3 +281,66 @@ def test_neutralise_leaves_the_numbers_taken_and_every_use_failing():
     os.close(opened)
     tcp.close()  # closes the /dev/null copy, harmlessly
     server.close()
+
+
+# ---------------------------------------------------------------------------
+# started without waiting: socket activation (hlyn run)
+# ---------------------------------------------------------------------------
+
+
+def settled(way: route.Route, timeout: float = 10) -> str | None:
+    """Poll `problem()` until the proxy has said it's ready or failed."""
+    end = time.monotonic() + timeout
+    while way.pending is not None and time.monotonic() < end:
+        said = way.problem()
+        if said:
+            return said
+        time.sleep(0.02)
+    assert way.pending is None, "the proxy neither became ready nor failed"
+    return None
+
+
+@needs
+def test_an_early_proxy_has_its_port_and_pid_at_once_and_serves_a_connection_made_before_it_was_ready():
+    rules = (hosts.parse("localhost:1"),)
+    began = time.perf_counter()
+    way = route.start(rules, wait=False)
+    took = (time.perf_counter() - began) * 1000
+    try:
+        # Connected at once, before the proxy can have finished starting:
+        # the kernel holds it in the backlog until the sealed proxy accepts.
+        early = socket.create_connection(("127.0.0.1", way.port), timeout=10)
+        early.sendall(b"CONNECT evil.example.net:443 HTTP/1.1\r\nHost: evil.example.net:443\r\n\r\n")
+        answer = early.recv(200)
+        early.close()
+        said = settled(way)
+        print(f"start returned in {took:.1f} ms; port {way.port}, pid {way.pid}; answer {answer[:60]!r}; "
+              f"problem: {said!r}")
+        assert said is None
+        assert answer.startswith(b"HTTP/1.1 403")
+    finally:
+        way.close()
+    assert gone(way)
+
+
+@needs
+def test_an_early_proxy_that_dies_before_it_is_ready_refuses_connections_and_says_why():
+    rules = (hosts.parse("localhost:1"),)
+    way = route.start(rules, wait=False)
+    try:
+        os.kill(way.pid, 9)  # before it could have sealed: a few ms in
+        deadline = time.monotonic() + 10
+        refused = None
+        while time.monotonic() < deadline:
+            try:
+                socket.create_connection(("127.0.0.1", way.port), timeout=2).close()
+            except ConnectionRefusedError:
+                refused = True
+                break
+            time.sleep(0.05)
+        said = settled(way)
+        print(f"after SIGKILL: connection refused: {refused}; problem: {said!r}")
+        assert refused, "nobody else may hold the listening socket: a dead proxy must refuse, not hang"
+        assert said and said.startswith("the proxy stopped before it was ready")
+    finally:
+        way.close()

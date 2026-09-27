@@ -40,6 +40,7 @@ import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import IO
 
 from . import helpers
 from .error import Unsupported
@@ -69,6 +70,58 @@ class Route:
     pid: int
     life: int
     control: socket.socket | None = field(default=None, repr=False)
+    # Started without waiting (`start(wait=False)`): the helper's stdout,
+    # which will carry its ready line, and its captured stderr.
+    pending: IO[bytes] | None = field(default=None, repr=False)
+    err: IO[bytes] | None = field(default=None, repr=False)
+
+    def problem(self, final: bool = False) -> str | None:
+        """Why a proxy started without waiting never became ready, or None.
+
+        None while it is still starting, and once it has said it is ready and
+        sealed. Reads without blocking. `final` also lets go of the pipes:
+        the caller has no further use for the answer (a proxy still starting
+        then carries on; its ready line goes nowhere, harmlessly).
+        """
+        said = None
+        if self.pending is not None:
+            out = self.pending.fileno()
+            data = b""
+            while select.select([out], [], [], 0)[0]:
+                more = os.read(out, 4096)
+                if not more:
+                    said = self._failed(data)
+                    break
+                data += more
+                if b"\n" in data:
+                    line = data.split(b"\n", 1)[0]
+                    try:
+                        ready = json.loads(line)
+                    except ValueError:
+                        ready = None
+                    if not (isinstance(ready, dict) and ready.get("sealed")):
+                        said = f"the proxy said something unexpected: {line[:200]!r}"
+                    self._settle()
+                    break
+        if final:
+            self._settle()
+        return said
+
+    def _failed(self, data: bytes) -> str:
+        detail = ""
+        if self.err is not None:
+            self.err.seek(0)
+            detail = self.err.read().decode(errors="replace").strip()
+        self._settle()
+        return ("the proxy stopped before it was ready, so nothing in --net was reachable"
+                + (f": {detail[-600:]}" if detail else "") + (f" ({data[:200]!r})" if data else ""))
+
+    def _settle(self) -> None:
+        for item in (self.pending, self.err):
+            if item is not None:
+                with contextlib.suppress(OSError):
+                    item.close()
+        self.pending = self.err = None
 
     def alive(self) -> bool:
         """Whether the proxy is still running (its pid, not a reused one, as
@@ -104,7 +157,7 @@ def _upstream(source: Mapping[str, str]) -> list[str]:
     here, so a proxy hlyn can't chain through is refused with the variable
     to change rather than silently bypassed.
     """
-    from .proxy import upstream
+    from .chain import upstream
 
     if upstream(source) is None:
         return []
@@ -131,6 +184,7 @@ def start(
     control: bool = False,
     source: Mapping[str, str] | None = None,
     inherit: bool = False,
+    wait: bool = True,
 ) -> Route:
     """Start a proxy for `rules` and return once it is listening and sealed.
 
@@ -143,8 +197,17 @@ def start(
     for a process that will become the agent.
 
     Raises `Unsupported`, naming the fix, if the helper can't be started, and
-    never returns a proxy that hasn't sealed itself (5.1).
+    never returns a proxy that hasn't sealed itself (5.1) -- unless `wait` is
+    False. Then this process binds the proxy's sockets itself and hands them
+    over (socket activation), and returns as soon as the helper has said its
+    pid, a few milliseconds in: its imports and seal overlap the agent's own
+    start. Nothing is lost by it. A connection made early waits in the
+    kernel's backlog, and the proxy reads nothing until it has sealed; if it
+    never gets there, it exits, and with no other process holding the
+    sockets every connection is refused. `Route.problem()` then says why.
+    Not for a shared proxy (`control`), which starts once and waits.
     """
+    early = not wait and not control
     args = ["--json", "--quiet", "--detach", *(x for rule in rules for x in ("--net", str(rule)))]
     args += _upstream(os.environ if source is None else source)
     keep: list[int] = []
@@ -165,8 +228,25 @@ def start(
         ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
         keep.append(theirs.fileno())
         args += ["--control", str(theirs.fileno())]
+    bound: list[socket.socket] = []
+    port = 0
+    if early:
+        from .listen import bind
+
+        try:
+            bound = bind()
+        except OSError as exc:
+            for fd in mine:
+                os.close(fd)
+            raise Unsupported(_cannot(f"no port to listen on ({exc})")) from None
+        port = int(bound[0].getsockname()[1])
+        for sock in bound:
+            keep.append(sock.fileno())
+            args += ["--listen-fd", str(sock.fileno())]
+        args.append("--early")
     read, life = os.pipe()
     err = tempfile.TemporaryFile()  # noqa: SIM115 - read on failure, then closed below
+    kept = False  # handed to the Route (early start), so not closed here
     argv = helpers.command("proxy", *args)
     try:
         try:
@@ -183,6 +263,23 @@ def start(
                 os.close(fd)
             if theirs is not None:
                 theirs.close()
+            for sock in bound:
+                sock.close()  # the proxy's alone now: if it dies, connections are refused
+        if early:
+            try:
+                said = _said(process)
+            except Unsupported as exc:
+                os.close(life)
+                process.kill()
+                process.wait()
+                err.seek(0)
+                detail = err.read().decode(errors="replace").strip()
+                raise Unsupported(_cannot(f"{exc}" + (f": {detail[-600:]}" if detail else ""))) from None
+            process.wait()  # the first process, which forked the proxy away and exited
+            if inherit:
+                os.set_inheritable(life, True)
+            kept = True
+            return Route(port, said, life, pending=process.stdout, err=err)
         try:
             ready = _ready(process)
         except Unsupported as exc:
@@ -193,7 +290,8 @@ def start(
             detail = err.read().decode(errors="replace").strip()
             raise Unsupported(_cannot(f"{exc}" + (f": {detail[-600:]}" if detail else ""))) from None
     finally:
-        err.close()
+        if not kept:
+            err.close()
     # The first process exits as soon as the proxy has detached (see
     # proxy._detach); reap it. The proxy itself is init's child now.
     process.wait()
@@ -204,6 +302,34 @@ def start(
     if inherit:
         os.set_inheritable(life, True)
     return Route(ready.get("port"), pid, life, ours)  # type: ignore[arg-type]
+
+
+def _said(process: subprocess.Popen[bytes]) -> int:
+    """The pid an early-started proxy says first (`helpers.main`), within
+    `READY` seconds. Reads exactly that line, so the ready line stays in the
+    pipe for `Route.problem`."""
+    if process.stdout is None:
+        raise Unsupported("the proxy was started without a pipe to answer on")
+    out = process.stdout.fileno()
+    data = b""
+    end = time.monotonic() + READY
+    while not data.endswith(b"\n"):
+        left = end - time.monotonic()
+        if left <= 0:
+            raise Unsupported(f"the proxy didn't say its pid within {READY:g} s")
+        if not select.select([out], [], [], left)[0]:
+            continue
+        more = os.read(out, 1)  # one byte at a time: never read past this line
+        if not more:
+            raise Unsupported(f"the proxy exited before it started (exit {process.wait()})")
+        data += more
+    try:
+        said = json.loads(data)
+    except ValueError:
+        said = None
+    if not (isinstance(said, dict) and isinstance(said.get("pid"), int)):
+        raise Unsupported(f"the proxy said something unexpected: {data[:200]!r}")
+    return int(said["pid"])
 
 
 def _ready(process: subprocess.Popen[bytes]) -> dict[str, object]:

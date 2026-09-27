@@ -39,12 +39,14 @@ import socket
 import struct
 import sys
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TypeVar
 
 from . import hosts
+from .chain import Upstream, upstream
 from .error import Invalid
+from .listen import bind, interfaces, taken
 from .wire import SIGNATURE, header
 
 __all__ = [
@@ -502,134 +504,11 @@ def _server_name(block: _Reader) -> str:
 # ---------------------------------------------------------------------------
 
 
-def interfaces() -> tuple[hosts.IPAddress, ...]:
-    """Every address on this machine's network interfaces.
-
-    Read with libc's `getifaddrs(3)`, the standard call `ifconfig` and `ip`
-    use; the standard library has no wrapper, and psutil would be hlyn's
-    first dependency. libc is taken from this process itself (`dlopen(NULL)`)
-    rather than looked up with `ctypes.util.find_library`, which on Linux
-    runs a compiler through a temporary file and so fails once the proxy is
-    sealed (measured). Raises `OSError` if the call fails; `Proxy` then keeps
-    the last set it read rather than forgetting this machine's addresses.
-    """
-    import ctypes
-
-    class _Ifaddrs(ctypes.Structure):
-        pass
-
-    _Ifaddrs._fields_ = [
-        ("next", ctypes.POINTER(_Ifaddrs)),
-        ("name", ctypes.c_char_p),
-        ("flags", ctypes.c_uint),
-        ("addr", ctypes.c_void_p),
-        ("netmask", ctypes.c_void_p),
-        ("dstaddr", ctypes.c_void_p),
-        ("data", ctypes.c_void_p),
-    ]
-    libc = ctypes.CDLL(None, use_errno=True)
-    first = ctypes.POINTER(_Ifaddrs)()
-    if libc.getifaddrs(ctypes.byref(first)) != 0:
-        code = ctypes.get_errno()
-        raise OSError(code, f"getifaddrs failed: {os.strerror(code)}")
-    found: list[hosts.IPAddress] = []
-    try:
-        node = first
-        while node:
-            item = node.contents
-            if item.addr:
-                raw = ctypes.string_at(item.addr, 24)
-                family = raw[1] if sys.platform == "darwin" else int.from_bytes(raw[0:2], sys.byteorder)
-                if family == socket.AF_INET:
-                    found.append(ipaddress.IPv4Address(raw[4:8]))
-                elif family == socket.AF_INET6:
-                    found.append(ipaddress.IPv6Address(raw[8:24]))
-            node = item.next
-    finally:
-        libc.freeifaddrs(first)
-    return tuple(dict.fromkeys(found))
-
-
 # ---------------------------------------------------------------------------
 # chaining through the user's own proxy (5.5, "a corporate proxy")
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class Upstream:
-    """A proxy to chain through: `host:port`, optional Basic credentials,
-    and the `NO_PROXY` entries that bypass it."""
-
-    host: str
-    port: int
-    auth: str | None = None
-    skip: tuple[str, ...] = ()
-
-    def bypass(self, host: str) -> bool:
-        """True if `NO_PROXY` says `host` goes direct (curl's rules: a name
-        matches itself and its subdomains, compared label by label)."""
-        name = host.lower().rstrip(".")
-        for entry in self.skip:
-            if entry == "*":
-                return True
-            want = entry.lower().lstrip(".").rstrip(".")
-            if not want:
-                continue
-            if "/" in want:
-                with contextlib.suppress(ValueError):
-                    if ipaddress.ip_address(name) in ipaddress.ip_network(want, strict=False):
-                        return True
-                continue
-            labels, wanted = name.split("."), want.split(".")
-            if len(labels) >= len(wanted) and labels[len(labels) - len(wanted) :] == wanted:
-                return True
-        return False
-
-
-def upstream(env: Mapping[str, str]) -> Upstream | None:
-    """The proxy the user's own environment names, before hlyn cleans it.
-
-    `HTTPS_PROXY`, then `HTTP_PROXY`, then `ALL_PROXY` (either case), and
-    `NO_PROXY`. Only `http://` proxies are chained; anything else raises
-    `Invalid` naming the variable, rather than being silently ignored and
-    connecting direct where the user's network expects a proxy.
-    """
-    url = next(
-        (env[key] for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY",
-                              "all_proxy") if env.get(key)),
-        None,
-    )
-    if not url:
-        return None
-    from urllib.parse import unquote, urlsplit
-
-    if "://" not in url:
-        url = "http://" + url
-    parts = urlsplit(url)
-    if parts.scheme.lower() != "http":
-        raise Invalid(
-            f"the proxy in your environment ({parts.scheme}://...) can't be chained: hlyn chains "
-            f"only http:// proxies. Unset HTTPS_PROXY/HTTP_PROXY/ALL_PROXY, or point them at an "
-            f"http:// proxy."
-        )
-    if not parts.hostname:
-        raise Invalid(f"the proxy in your environment has no host ({url!r}). Fix HTTPS_PROXY.")
-    try:
-        port = parts.port or 8080
-    except ValueError:
-        raise Invalid(f"the proxy in your environment has a bad port ({url!r}). Fix HTTPS_PROXY.") from None
-    auth = None
-    if parts.username is not None:
-        import base64
-
-        pair = f"{unquote(parts.username)}:{unquote(parts.password or '')}"
-        auth = base64.b64encode(pair.encode()).decode("ascii")
-    skip = tuple(
-        item.strip()
-        for item in (env.get("NO_PROXY") or env.get("no_proxy") or "").split(",")
-        if item.strip()
-    )
-    return Upstream(parts.hostname, port, auth, skip)
 
 
 # ---------------------------------------------------------------------------
@@ -722,61 +601,23 @@ class Proxy:
         `localhost:P` in the profile also matches those addresses), and so is
         one whose `[::1]` side is taken. IPv6 being off is not an error.
         """
-        for _ in range(20):
-            first = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                first.bind(("127.0.0.1", port))
-            except OSError:
-                first.close()
-                if port:
-                    raise
-                continue
-            chosen = first.getsockname()[1]
-            bound = [first]
-            try:
-                second = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-            except OSError:
-                second = None
-            if second is not None:
-                second.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-                try:
-                    second.bind(("::1", chosen))
-                    bound.append(second)
-                except OSError as exc:
-                    second.close()
-                    if exc.errno not in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):
-                        first.close()
-                        if port:
-                            raise
-                        continue
-            if self._taken(chosen):
-                for sock in bound:
-                    sock.close()
-                if port:
-                    raise OSError(errno.EADDRINUSE, f"port {port} is in use on another local address")
-                continue
-            servers = []
-            for sock in bound:
-                sock.listen(128)
-                sock.setblocking(False)
-                servers.append(await asyncio.start_server(self._handle, sock=sock))
-            self._servers[chosen] = servers
-            self.ports = (*self.ports, chosen)
-            return int(chosen)
-        raise OSError(errno.EADDRINUSE, "no free port for the proxy after 20 tries")
+        return await self.adopt(bind(port, self._taken))
+
+    async def adopt(self, bound: Sequence[socket.socket]) -> int:
+        """Serve on sockets already bound and listening, all on one port: the
+        caller's own (`bind`), handed over at start (socket activation)."""
+        chosen = int(bound[0].getsockname()[1])
+        servers = []
+        for sock in bound:
+            sock.setblocking(False)
+            servers.append(await asyncio.start_server(self._handle, sock=sock))
+        self._servers[chosen] = servers
+        self.ports = (*self.ports, chosen)
+        return chosen
 
     def _taken(self, port: int) -> bool:
-        """True if anything accepts a connection on `port` at one of this
-        machine's non-loopback addresses."""
-        for address in self._addresses():
-            if address.is_loopback or address.is_link_local:
-                continue
-            family = socket.AF_INET if address.version == 4 else socket.AF_INET6
-            with socket.socket(family, socket.SOCK_STREAM) as probe:
-                probe.settimeout(0.5)
-                if probe.connect_ex((str(address), port)) == 0:
-                    return True
-        return False
+        """`listen.taken`, against this proxy's cached view of its addresses."""
+        return taken(port, self._addresses())
 
     def _addresses(self) -> tuple[hosts.IPAddress, ...]:
         """This machine's own addresses, re-read at most every 5 s. If a
@@ -1423,6 +1264,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--skip", metavar="LIST", default="",
                         help="with --upstream: hosts that go direct (the user's NO_PROXY)")
     parser.add_argument("--port", type=int, default=0, help="port to listen on (default: any free one)")
+    parser.add_argument("--listen-fd", type=int, action="append", default=[], metavar="FD",
+                        help="serve on this listening socket, bound by the caller (socket activation); "
+                             "repeat for its [::1] twin")
     parser.add_argument("--log", type=int, metavar="FD",
                         help="write a deny record for each block to this descriptor (hlyn's log)")
     parser.add_argument("--events", type=int, metavar="FD",
@@ -1458,6 +1302,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise Invalid("--connect, --idle and --clients must be above 0")
         if args.control is not None and args.port:
             raise Invalid("--port and --control don't mix: with --control, each run gets its own port")
+        if args.listen_fd and (args.port or args.control is not None):
+            raise Invalid("--listen-fd is where the proxy listens: leave out --port and --control")
+        for fd in args.listen_fd:
+            try:
+                kind = socket.socket(fileno=fd)
+            except OSError:
+                raise Invalid(f"--listen-fd {fd}: no such open socket") from None
+            try:
+                if kind.type != socket.SOCK_STREAM or kind.family not in (socket.AF_INET, socket.AF_INET6):
+                    raise Invalid(f"--listen-fd {fd}: not a TCP socket")
+            finally:
+                kind.detach()
         for name in ("log", "events", "control"):
             fd = getattr(args, name)
             if fd is not None:
@@ -1491,7 +1347,9 @@ async def _main(
 ) -> int:
     proxy = Proxy(rules, gate=args.gate, upstream=chain, limits=limits, report=sinks)
     port: int | None = None
-    if args.control is None:
+    if args.listen_fd:
+        port = await proxy.adopt([socket.socket(fileno=fd) for fd in args.listen_fd])
+    elif args.control is None:
         try:
             port = await proxy.listen(args.port)
         except OSError as exc:
@@ -1517,13 +1375,16 @@ async def _main(
         own = None
         print(f"hlyn: warning: the proxy can't re-read this machine's addresses once sealed ({exc}); "
               f"it keeps the ones read before sealing.", file=sys.stderr, flush=True)
-    if args.json:
-        print(dumps({"port": port, "listen": where, "pid": os.getpid(), "sealed": level, "own": own,
-                     "net": [str(rule) for rule in rules]}), flush=True)
-    else:
-        at = " and ".join(where) if where else "ports given out per run"
-        print(f"hlyn: proxy for {', '.join(str(rule) for rule in rules)} on {at} "
-              f"(pid {os.getpid()}, sealed: {level})", flush=True)
+    # The caller may have stopped listening for this line (a run that was
+    # over before the proxy was ready); that must not end the proxy.
+    with contextlib.suppress(OSError):
+        if args.json:
+            print(dumps({"port": port, "listen": where, "pid": os.getpid(), "sealed": level, "own": own,
+                         "net": [str(rule) for rule in rules]}), flush=True)
+        else:
+            at = " and ".join(where) if where else "ports given out per run"
+            print(f"hlyn: proxy for {', '.join(str(rule) for rule in rules)} on {at} "
+                  f"(pid {os.getpid()}, sealed: {level})", flush=True)
 
     ended = asyncio.Event()
     watching = None if args.stay else await _watch(ended)

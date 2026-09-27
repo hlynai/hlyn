@@ -67,8 +67,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     if not args or args[0] not in NAMES:
         print(f"hlyn: helper: expected one of {', '.join(NAMES)}, got {args[:1]}", file=sys.stderr)
         sys.exit(2)
+    rest = args[1:]
+    if args[0] == "proxy" and "--early" in rest:
+        # Socket activation (`route.start(wait=False)`): leave the caller's
+        # process tree and say this process's pid before importing anything,
+        # so the caller has what it needs in a few milliseconds and the
+        # proxy's imports and seal overlap the agent's own start. The caller
+        # bound the listening sockets, so nothing waits on the rest.
+        if os.fork():
+            os._exit(0)
+        print(f'{{"pid": {os.getpid()}}}', flush=True)
+        rest = [item for item in rest if item not in ("--early", "--detach")]
     module = importlib.import_module(NAMES[args[0]])
-    sys.exit(module.main(args[1:]))
+    sys.exit(module.main(rest))
 
 
 def helper() -> None:
