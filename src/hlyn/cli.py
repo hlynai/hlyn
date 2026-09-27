@@ -376,7 +376,8 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
     # here, before the fork, and lives as long as the command and what it
     # starts; its denials go to this run's log.
     way = None
-    heard = -1  # the proxy's denials, one JSON line each, for the report
+    heard = -1  # the helpers' denials, one JSON line each, for the report
+    told: tuple[int | None, int | None] = (None, None)  # the gate's log and report pipe
     if plan.hosts():
         from . import gate, route
 
@@ -384,6 +385,8 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
         try:
             with jail._denials(plan) as fd:
                 way = route.start(plan.hosts(), log=fd, events=said, inherit=True, gate=jail.gated())
+                if jail.gated():
+                    told = (os.dup(fd) if fd is not None else None, os.dup(said))
         except BaseException:
             os.close(heard)
             raise
@@ -427,9 +430,12 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
             if way is None:
                 start()
             # This child becomes the gate for the command: CLI -> gate -> agent.
-            gate.become(start, forward=True, isolate=True, close=[way.life])
+            gate.become(start, forward=True, isolate=True, close=[way.life], log=told[0], events=told[1])
 
         os.close(w)
+        for fd in told:
+            if fd is not None:
+                os.close(fd)
         if way is not None:
             way.close()  # the command holds the proxy now
         # Ctrl-C reaches the child through the terminal; this process only
@@ -568,9 +574,14 @@ def _deaf(ear: Any, cmd: list[str]) -> str | None:
 
 
 def _proxied(fd: int, rest: bytes, book: Any) -> bytes:
-    """Add the proxy's denials waiting on `fd` to the report; return any
-    partial line. Not logged again here: the proxy logged each one itself.
-    Lines that aren't the proxy's JSON are dropped."""
+    """Add the helpers' denials waiting on `fd` to the report; return any
+    partial line. Not logged again here: the proxy and the gate log each one
+    themselves. Lines that aren't their JSON are dropped.
+
+    The gate's lines (Linux, 5.9) name the program and say how many times;
+    its last line counts what it didn't keep. Both helpers sit outside the
+    sandbox, but what they report comes from the agent (a host name, a
+    path), so the report checks every flag it is handed."""
     from .report import Denial
 
     data = rest
@@ -581,7 +592,12 @@ def _proxied(fd: int, rest: bytes, book: Any) -> bytes:
     for line in lines:
         try:
             event = json.loads(line)
-            denial = Denial("net", str(event["target"]), op=str(event["why"]), source="proxy",
+            if event.get("kind") == "more":
+                book.more += int(event.get("count") or 0)
+                continue
+            source = "gate" if event.get("source") == "gate" else "proxy"
+            denial = Denial("net", str(event["target"]), op=str(event["why"]), source=source,
+                            by=str(event.get("by") or ""), count=int(event.get("count") or 1),
                             allow=str(event.get("allow") or ""))
         except (ValueError, KeyError, TypeError):
             continue

@@ -41,6 +41,7 @@ import json
 import os
 import re
 import select
+import shlex
 import socket
 import time
 from collections.abc import Callable, Sequence
@@ -184,8 +185,11 @@ class Guard:
                     elif event & select.POLLIN:
                         self.step()
                     elif event & (select.POLLHUP | select.POLLERR | select.POLLNVAL):
+                        self.finish()
                         return
                 self._expire()
+                if isinstance(self.tell, Reporter):
+                    self.tell.flush()
         finally:
             self._poll = None
             if stop is None:
@@ -194,6 +198,11 @@ class Guard:
                     pending.sock.close()
                 self.waits.clear()
                 self.notice.close()
+
+    def finish(self) -> None:
+        """Nothing uses the filter any more: send the report what is owed."""
+        if isinstance(self.tell, Reporter):
+            self.tell.flush(final=True)
 
     def _next(self) -> int:
         """Milliseconds until the nearest verdict deadline, or 1 s."""
@@ -300,14 +309,15 @@ class Guard:
         if hosts.match(self.config.rules, port=port, address=ip) is not None:
             self._swap(call, target, address.family, header(ip, port), wait=True, shown=shown)
             return
-        self._event("dns" if port == 53 else "direct", shown, _flag(ip, port))
+        self._event(call, "dns" if port == 53 else "direct", shown, None if port == 53 else _flag(ip, port))
         self._no(call, errno.EACCES)
 
     def _unix(self, call: notify.Call, address: notify.Address | None, reduced: bool) -> None:
         """Unix sockets: a path needs a write grant on its folder and must
         not be on the refused list. Reduced mode refuses them all."""
         if reduced or address is None:
-            self._event("unix", "(unknown path)", None)
+            self._event(call, "unix", "(unknown path)", None,
+                        detail="reduced mode: the gate can't read addresses here")
             self._no(call, errno.EACCES)
             return
         if address.family == socket.AF_UNSPEC or (address.family == socket.AF_UNIX and address.path is None):
@@ -328,13 +338,14 @@ class Guard:
         path = os.path.normpath(path)
         real = os.path.realpath(path)
         if any(pattern.search(item) for pattern in _REFUSED for item in (path, real)):
-            self._event("unix", real, "--net-any", detail="never reachable with --net hosts")
+            self._event(call, "unix", real, "--net-any",
+                        detail="never allowed with --net hosts: the program behind it acts for its caller")
             self._no(call, errno.EACCES)
             return
         if self._granted(real):
             self._go(call)
             return
-        self._event("unix", real, f"--write {os.path.dirname(real) or '/'}")
+        self._event(call, "unix", real, f"--write {shlex.quote(os.path.dirname(real) or '/')}")
         self._no(call, errno.EACCES)
 
     def _granted(self, real: str) -> bool:
@@ -362,7 +373,7 @@ class Guard:
             sock.sendall(head)
         except OSError:
             # The proxy is gone: the network fails closed, never open.
-            self._event("proxy-gone", shown, None)
+            self._event(call, "proxy-gone", shown, None)
             self._no(call, errno.ECONNREFUSED)
             return
         cloexec = bool(flags & os.O_CLOEXEC)
@@ -455,15 +466,138 @@ class Guard:
                 with contextlib.suppress(OSError):
                     self._no(pending.call, errno.ETIMEDOUT)
 
-    def _event(self, why: str, target: str, allow: str | None, **more: object) -> None:
+    def _event(self, call: notify.Call, why: str, target: str, allow: str | None, **more: object) -> None:
         if self.tell is None:
             return
         with contextlib.suppress(Exception):
-            self.tell({"kind": "net", "target": target, "allow": allow, "why": why, "source": "gate", **more})
+            self.tell({"kind": "net", "target": target, "allow": allow, "why": why, "source": "gate",
+                       "pid": call.pid, **more})
+
+
+class Reporter:
+    """Where the gate's refusals go (DESIGN-host-allowlisting.md 4.6, 5.9).
+
+    - `log`: hlyn's JSON log. One `deny` record per refusal, in the same form
+      the proxy writes, with the program's name; repeats collapse the way
+      every hlyn log does (1st, 2nd, 4th, 8th ... occurrence, `log.line`).
+    - `events`: the pipe `hlyn run` reads for its report. The first of each
+      distinct refusal goes at once; repeats are counted and sent as one
+      line with a `count` now and then, and when the gate finishes.
+
+    It never blocks the gate: a line that can't be written now waits in a
+    short queue, and past that is dropped and counted. Distinct refusals are
+    capped (`LIMIT`); past the cap they are counted, not kept. So a flood of
+    connects to distinct addresses (matrix row 28) costs the gate a fixed
+    amount of memory, and the connects it answers keep their pace.
+    """
+
+    LIMIT = 1000  # distinct refusals kept, as report.LIMIT
+    QUEUE = 256  # log lines waiting for a writable log
+    EVERY = 0.5  # seconds between sending repeat counts
+
+    def __init__(self, log: int | None = None, events: int | None = None) -> None:
+        import collections
+
+        self.log = log
+        self.events = events
+        self.seen: dict[str, int] = {}  # log.line's repeat tally
+        self.counts: dict[tuple[str, str], int] = {}  # sent to the report so far
+        self.owed: dict[tuple[str, str], dict[str, object]] = {}  # repeats not yet sent
+        self.more = 0  # distinct refusals past LIMIT
+        self.dropped = 0  # lines that found no room
+        self.queue: collections.deque[bytes] = collections.deque()
+        self.names: dict[int, str] = {}
+        self.sent = time.monotonic()
+        if events is not None:
+            with contextlib.suppress(OSError):
+                os.set_blocking(events, False)
+
+    def __call__(self, event: dict[str, object]) -> None:
+        pid = event.pop("pid", None)
+        by = self._name(pid) if isinstance(pid, int) else ""
+        key = (str(event.get("why")), str(event.get("target")))
+        if key not in self.counts:
+            if len(self.counts) >= self.LIMIT:
+                self.more += 1
+                return
+            self.counts[key] = 1
+            self._send({**event, "by": by, "count": 1})
+        else:
+            self.counts[key] += 1
+            waiting = self.owed.setdefault(key, {**event, "by": by, "count": 0})
+            waiting["count"] = int(waiting["count"]) + 1  # type: ignore[call-overload]
+        if self.log is not None:
+            from .. import log
+
+            fields = {"what": "net", **{k: v for k, v in event.items() if k != "kind"}, "by": by}
+            text = log.line("deny", fields, self.seen, pid=os.getpid())
+            if text is not None:
+                if len(self.queue) >= self.QUEUE:
+                    self.dropped += 1
+                else:
+                    self.queue.append((text + "\n").encode())
+        self.flush()
+
+    def flush(self, final: bool = False) -> None:
+        """Write what can be written without waiting; with `final`, send
+        every repeat count still owed."""
+        if self.owed and (final or time.monotonic() - self.sent >= self.EVERY):
+            for waiting in self.owed.values():
+                self._send(waiting)
+            self.owed.clear()
+            self.sent = time.monotonic()
+        if final and (self.more or self.dropped):
+            self._send({"kind": "more", "count": self.more, "dropped": self.dropped})
+        while self.queue and self.log is not None and self._writable(self.log):
+            try:
+                os.write(self.log, self.queue[0])
+            except BlockingIOError:
+                break
+            except OSError:
+                self.queue.clear()
+                self.log = None
+                break
+            self.queue.popleft()
+
+    def _send(self, event: dict[str, object]) -> None:
+        if self.events is None:
+            return
+        line = json.dumps(event, separators=(",", ":"))
+        if len(line) >= 512:
+            # One atomic pipe write: keep what the report needs, then shorten.
+            event = {**event, "target": str(event.get("target", ""))[:200], "detail": None}
+            line = json.dumps(event, separators=(",", ":"))[:510]
+        try:
+            os.write(self.events, (line + "\n").encode())
+        except BlockingIOError:
+            self.dropped += 1  # a full pipe: the gate never waits on a reader
+        except OSError:
+            self.events = None
+
+    @staticmethod
+    def _writable(fd: int) -> bool:
+        poll = select.poll()
+        poll.register(fd, select.POLLOUT)
+        return any(event & select.POLLOUT for _, event in poll.poll(0))
+
+    def _name(self, pid: int) -> str:
+        """The program's name, from /proc (the thread's own `comm`)."""
+        if pid not in self.names:
+            if len(self.names) > 256:
+                self.names.clear()
+            try:
+                with open(f"/proc/{pid}/comm") as fh:
+                    self.names[pid] = fh.read().strip()[:32]
+            except OSError:
+                self.names[pid] = ""
+        return self.names[pid]
 
 
 def _flag(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, port: int) -> str | None:
-    """The `--net` flag that would allow a direct connection to `ip:port`."""
+    """The `--net` flag that would allow a direct connection to `ip:port`:
+    `localhost:PORT` for loopback, the way a local service is named (4.2)."""
+    if ip in _LOOPBACK:
+        return f"--net localhost:{port}"
     shown = f"[{ip}]:{port}" if ip.version == 6 else f"{ip}:{port}"
     try:
         return hosts.parse(shown).flag()

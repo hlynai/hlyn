@@ -177,21 +177,31 @@ WHY: dict[str, str] = {
     "not-listed": "",
     "private-address": "the name resolves to a private address, never reached by name",
     "sni-mismatch": "its TLS named a different host than it asked for, so hlyn closed the connection",
-    "dns": "DNS: with --net hosts the proxy looks up names, so programs never need it",
+    "dns": "DNS: the proxy looks up names for programs, so they never need it",
     "resolve-failed": "the name didn't resolve",
     "direct": "connected directly instead of through HTTPS_PROXY",
+    "proxy-gone": "hlyn's proxy had stopped, so the network was closed; nothing got through",
     "busy": "the proxy was at its limit of connections at once",
 }
 
+# Why a resolver, D-Bus or container-runtime socket is never allowed with
+# hosts, whatever the grants (5.3).
+REFUSED_NOTE = ("never allowed with --net hosts: the program behind it acts for you, on the "
+                "network or the machine (--net-any if you mean it)")
+
+
 def _refused(path: str) -> bool:
     """Whether host mode refuses a unix socket at `path` whatever the grants
-    (the macOS profile's list, core/mac.py `REFUSED`)."""
+    (core/mac.py's `REFUSED` on macOS, core/guard.py's on Linux)."""
     import re
 
-    from .core.mac import REFUSED
+    if sys.platform == "darwin":
+        from .core.mac import REFUSED
+    else:
+        from .core.guard import REFUSED
 
     real = os.path.realpath(path)
-    return any(re.search(pattern, real) for pattern in REFUSED)
+    return any(re.search(pattern, item) for pattern in REFUSED for item in (path, real))
 
 
 def removed(plan: Policy, env: Mapping[str, str]) -> list[str]:
@@ -375,6 +385,8 @@ class Report:
         kind, target = denial.kind, denial.target
         if denial.source == "proxy":
             return self._host(denial)
+        if denial.source == "gate":
+            return self._gate(denial)
         if kind in ("read", "write", "exec"):
             return self._path(denial)
         if kind == "net" and target.startswith("socket:"):
@@ -496,6 +508,29 @@ class Report:
             allow = None  # nothing to add to net would fix these
         return Entry("net", target, allow, WHY[why], source="proxy")
 
+    def _gate(self, denial: Denial) -> Entry | None:
+        """A refusal by the Linux gate (5.3, 5.9): a direct connection, a
+        unix socket, DNS. The gate is outside the sandbox, but the address
+        and path it reports came from the agent's memory, so they are
+        cleaned and every flag is built or checked here."""
+        why, where = denial.op, denial.target
+        if why == "unix":
+            if where == "(unknown path)":
+                return Entry("net", "a local socket", None,
+                             "the gate can't read connection addresses here (Yama ptrace_scope 2 or 3), "
+                             "so local sockets are refused; see hlyn probe", source="gate")
+            shown = f"local socket {safe(tilde(where))[:300]}"
+            if denial.allow == "--net-any" or _refused(where):
+                return Entry("net", shown, None, REFUSED_NOTE, source="gate")
+            return Entry("net", shown, flag("--write", os.path.dirname(where) or "/"),
+                         "a local socket needs write access to its folder", source="gate")
+        if why in ("direct", "dns", "proxy-gone"):
+            entry = self._host(Denial("net", where, op=why, allow=denial.allow, source="proxy"))
+            if entry is not None:
+                entry.source = "gate"
+            return entry
+        return None
+
     def _port(self, denial: Denial) -> Entry | None:
         head, _, rest = denial.target.partition(" ")
         if not head.isdigit():
@@ -504,6 +539,11 @@ class Report:
         net = self.plan.net
         anywhere = rest in ("", "*", "0.0.0.0", "::")  # noqa: S104 - read from a report, not bound
         shown = f"TCP {port}" + ("" if anywhere else f" ({safe(rest)})")
+        if self.plan.hosts() and sys.platform == "linux" and denial.op not in ("sendto", "sendmsg"):
+            # Host mode on Linux: the gate refused this connect, and reports
+            # it itself, from outside the sandbox (`_gate`). The preloaded
+            # reporter's copy of it would be the same line twice.
+            return None
         if self.plan.hosts():
             # Host mode: a program connected directly rather than through the
             # proxy. On macOS only localhost entries are reachable that way
@@ -583,14 +623,11 @@ class Report:
             # Host mode: a unix socket needs a write grant on its folder
             # (5.3, 5.4), except the always-refused ones.
             if _refused(where):
-                return Entry("net", f"local socket {safe(tilde(where))}", None,
-                             "never reachable with --net hosts: the program behind it acts for you, "
-                             "on the network or the machine. Use --net-any if you mean it",
+                return Entry("net", f"local socket {safe(tilde(where))}", None, REFUSED_NOTE,
                              source=denial.source)
             return Entry("net", f"local socket {safe(tilde(where))}",
                          flag("--write", os.path.dirname(where) or "/"),
-                         "connecting to a local socket needs write access to its folder",
-                         source=denial.source)
+                         "a local socket needs write access to its folder", source=denial.source)
         return Entry("net", f"local socket {safe(tilde(where))}", "--net-any",
                      "on macOS only the whole network allows local sockets", source=denial.source)
 

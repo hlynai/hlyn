@@ -624,3 +624,75 @@ def test_refusals_that_are_not_paths_are_never_folded_together():
     assert "local socket /var/run/a.sock" in text
     assert "local socket /var/run/b.sock" in text
     assert "paths under" not in text
+
+
+# ---------------------------------------------------------------------------
+# the Linux gate's refusals (host mode, DESIGN-host-allowlisting.md 5.9)
+# ---------------------------------------------------------------------------
+
+
+def gated(tmp_path):
+    return book(tmp_path, net=["pypi.org"])
+
+
+def test_the_gates_refusals_become_lines_with_the_flag_that_allows_each(tmp_path):
+    report = gated(tmp_path)
+    got = {
+        "direct": one(report, kind="net", target="140.82.112.5:443", op="direct", source="gate",
+                      allow="--net 140.82.112.5", by="curl"),
+        "dns": one(report, kind="net", target="1.1.1.1:53", op="dns", source="gate", allow=""),
+        "unix": one(report, kind="net", target="/run/my app/db.sock", op="unix", source="gate",
+                    allow="--write '/run/my app'"),
+        "refused": one(report, kind="net", target="/run/docker.sock", op="unix", source="gate"),
+        "unknown": one(report, kind="net", target="(unknown path)", op="unix", source="gate"),
+        "gone": one(report, kind="net", target="127.0.0.1:41000", op="proxy-gone", source="gate"),
+    }
+    for name, entry in got.items():
+        print(f"{name:8} {entry.target!r:40} allow={entry.allow!r} note={entry.note!r}")
+    assert got["direct"].allow == "--net 140.82.112.5" and got["direct"].by == {"curl"}
+    assert got["dns"].allow is None and got["dns"].note.startswith("DNS")
+    assert got["unix"].allow == "--write '/run/my app'"
+    assert got["unix"].target == "local socket /run/my app/db.sock"
+    assert got["refused"].allow is None and "--net-any if you mean it" in got["refused"].note
+    assert got["unknown"].allow is None and "hlyn probe" in got["unknown"].note
+    assert got["gone"].allow is None and "network was closed" in got["gone"].note
+    assert all(entry.source == "gate" for entry in got.values())
+
+
+def test_a_flag_the_gate_passes_on_is_checked_not_trusted(tmp_path):
+    """The address or path came from the agent's memory: a flag that doesn't
+    parse as exactly that entry is dropped, and a unix flag is always built
+    by the report from the path, never taken from the event."""
+    report = gated(tmp_path)
+    forged = one(report, kind="net", target="140.82.112.5:443", op="direct", source="gate",
+                 allow="--net 140.82.112.5; rm -rf ~")
+    unix = one(report, kind="net", target="/tmp/x.sock", op="unix", source="gate",
+               allow="--write / --read ~/.ssh")
+    print("forged direct flag ->", forged.allow, "| forged unix flag ->", unix.allow)
+    assert forged.allow is None
+    assert unix.allow == "--write /tmp"
+
+
+def test_repeats_reported_by_the_gate_add_up_on_one_line(tmp_path):
+    report = gated(tmp_path)
+    for count in (1, 4, 2):  # the first at once, then batched repeats (guard.Reporter)
+        one(report, kind="net", target="140.82.112.5:443", op="direct", source="gate",
+            allow="--net 140.82.112.5", count=count)
+    text = report.text(1, ["python3"])
+    print(text)
+    assert len(report.entries) == 1 and report.items()[0].count == 7
+    assert "[7 times]" in text
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the gate reports direct connects on Linux only")
+def test_on_linux_the_preload_copy_of_a_direct_connect_is_left_to_the_gate(tmp_path):
+    """The preloaded reporter hears the same refused connect from inside the
+    agent. With hosts, the gate's report (from outside) is the one kept, so
+    the line isn't there twice. Fast Open sends are the preload's alone."""
+    report = gated(tmp_path)
+    inside = one(report, kind="net", target="443 140.82.112.5", op="connect")
+    outside = one(report, kind="net", target="140.82.112.5:443", op="direct", source="gate",
+                  allow="--net 140.82.112.5")
+    print("preload's copy:", inside, "| gate's:", outside.target, outside.allow)
+    assert inside is None and outside is not None
+    assert [entry.target for entry in report.items()] == ["140.82.112.5:443"]

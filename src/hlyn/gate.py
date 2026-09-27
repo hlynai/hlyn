@@ -107,6 +107,8 @@ def become(
     isolate: bool,
     close: Sequence[int] = (),
     fresh: bool = True,
+    log: int | None = None,
+    events: int | None = None,
 ) -> NoReturn:
     """Fork. The child runs `body`, which must seal and exec or exit; the
     parent becomes the gate for it and exits as the child does.
@@ -123,6 +125,10 @@ def become(
     caller says so): then no lock was held by a thread fork didn't copy, the
     hazard a fresh interpreter avoids (5.1). The modules it needs must be
     imported and libseccomp loaded before the fork (`prepare`).
+
+    `log` and `events` are descriptors the gate reports its refusals to
+    (`core/guard.Reporter`): hlyn's log, and `hlyn run`'s report pipe. The
+    gate takes them over; the child never has them.
 
     Every signal is blocked across the fork and the exec that follows, so
     one sent in between waits for the gate's handlers instead of killing it
@@ -143,7 +149,9 @@ def become(
     # Built before the fork: after it, the parent does as little as possible.
     argv = helpers.command("gate", "--child", "0", *(["--forward"] if forward else []),
                           *(["--terminal"] if tty is not None else []),
-                          *(["--notify", str(gate_end.fileno())] if gate_end is not None else []))
+                          *(["--notify", str(gate_end.fileno())] if gate_end is not None else []),
+                          *(["--log", str(log)] if log is not None else []),
+                          *(["--events", str(events)] if events is not None else []))
     where = {key: value for key, value in os.environ.items() if key in ("PATH", "LANG", "LC_ALL")}
     if getattr(sys, "frozen", False):
         where = dict(os.environ)
@@ -156,6 +164,9 @@ def become(
             if gate_end is not None:
                 gate_end.close()
                 _handoff, pid = agent_end, me
+            for fd in (log, events):
+                if fd is not None:
+                    os.close(fd)
             signal.pthread_sigmask(signal.SIG_SETMASK, before)
             if isolate:
                 os.setpgid(0, 0)
@@ -189,25 +200,29 @@ def become(
             # closed a descriptor number the gate has since reused would
             # close the gate's socket instead.
             gc.disable()
-            os._exit(relay(child, forward=forward, terminal=tty, guard=_take(gate_end.detach())))
+            guard = _take(gate_end.detach(), _reporter(log, events))
+            os._exit(relay(child, forward=forward, terminal=tty, guard=guard))
         gate_end.set_inheritable(True)
+        for fd in (log, events):
+            if fd is not None:
+                os.set_inheritable(fd, True)
     argv[argv.index("--child") + 1] = str(child)
     try:
         os.execve(argv[0], argv, where)  # noqa: S606 - our own helper, argument vector built above
     except OSError:
         # No fresh interpreter to be had: be the gate in this process. The
         # caller's other threads, if any, live on beside it until it exits.
-        guard = _take(gate_end.detach()) if gate_end is not None else None
+        guard = _take(gate_end.detach(), _reporter(log, events)) if gate_end is not None else None
         os._exit(relay(child, forward=forward, terminal=tty, guard=guard))
 
 
-def detached() -> int:
+def detached(log: int | None = None) -> int:
     """Start a gate with no child, for `hlyn.on()` (5.2), and return its pid.
 
     It is started detached (a double fork, so the caller's `waitpid(-1)` or
     SIGCHLD handler never sees it) and takes the notification descriptor
     through `hand`, as `become`'s gate does. It exits once nothing uses the
-    filter, or at once if the seal never happens.
+    filter, or at once if the seal never happens. Its refusals go to `log`.
     """
     global _handoff, pid
     import subprocess
@@ -215,11 +230,13 @@ def detached() -> int:
     from . import helpers
 
     agent_end, gate_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-    argv = helpers.command("gate", "--child", "0", "--detach", "--notify", str(gate_end.fileno()))
+    argv = helpers.command("gate", "--child", "0", "--detach", "--notify", str(gate_end.fileno()),
+                           *(["--log", str(log)] if log is not None else []))
     try:
         process = subprocess.Popen(  # noqa: S603 - our own helper, argument vector built above
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            pass_fds=[gate_end.fileno()], start_new_session=True, cwd="/",
+            pass_fds=[gate_end.fileno(), *([log] if log is not None else [])], start_new_session=True,
+            cwd="/",
         )
     except OSError as exc:
         agent_end.close()
@@ -278,10 +295,17 @@ def hand(fd: int, config: Config) -> None:
             chan.close()
 
 
-def _take(fd: int) -> Guard | None:
+def _reporter(log: int | None, events: int | None) -> object:
+    from .core.guard import Reporter
+
+    return Reporter(log, events) if log is not None or events is not None else None
+
+
+def _take(fd: int, tell: object = None) -> Guard | None:
     """In the gate: receive the descriptor and config from the sealed
-    process, say so, and return the guard that answers them. `None` if the
-    process ended without sealing (its end closed with nothing sent)."""
+    process, say so, and return the guard that answers them, reporting to
+    `tell`. `None` if the process ended without sealing (its end closed with
+    nothing sent)."""
     from .core.guard import Config, Guard
 
     chan = socket.socket(fileno=fd)
@@ -290,7 +314,7 @@ def _take(fd: int) -> Guard | None:
         data, fds, _, _ = socket.recv_fds(chan, 65536, 1)
         if not fds:
             return None
-        guard = Guard(fds[0], Config.loads(data))
+        guard = Guard(fds[0], Config.loads(data), tell=tell)  # type: ignore[arg-type]
         chan.sendall(b"k")
         return guard
     except (OSError, ValueError, KeyError):
@@ -415,7 +439,9 @@ def _serve(child: int, forward: bool, guard: Guard) -> int | None:
         except ChildProcessError:
             return None
         return got
-    if not _hung(guard.fd) and os.fork() == 0:
+    if _hung(guard.fd):
+        guard.finish()  # the command was the last program using the filter
+    elif os.fork() == 0:
         # The successor: the command has exited, programs it started have
         # not. Keep answering them; exit when they have all gone. It holds
         # nothing of its caller's: not its terminal, pipes or files.
@@ -424,7 +450,9 @@ def _serve(child: int, forward: bool, guard: Guard) -> int | None:
                 signal.signal(number, signal.SIG_DFL)
         with contextlib.suppress(OSError):
             os.setsid()
-        _only({guard.fd, *guard.waits})
+        # Its refusals still go to the log and the report's pipe.
+        told = [getattr(guard.tell, name, None) for name in ("log", "events")]
+        _only({guard.fd, *guard.waits, *(fd for fd in told if isinstance(fd, int))})
         guard.serve()
         os._exit(0)
     return status[0]
@@ -477,6 +505,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--terminal", action="store_true")
     parser.add_argument("--notify", type=int, default=None)
     parser.add_argument("--detach", action="store_true")
+    parser.add_argument("--log", type=int, default=None)
+    parser.add_argument("--events", type=int, default=None)
     args = parser.parse_args(argv)
     if args.detach:
         # The classic double fork, with the caller's as the first: say the
@@ -490,7 +520,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         null = os.open(os.devnull, os.O_RDWR)
         os.dup2(null, 1)  # the pipe the pid went out on: let it close
         os.close(null)
-    guard = _take(args.notify) if args.notify is not None else None
+    guard = _take(args.notify, _reporter(args.log, args.events)) if args.notify is not None else None
     if args.child == 0:
         if guard is not None:
             guard.serve()

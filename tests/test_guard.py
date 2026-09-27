@@ -233,7 +233,7 @@ def test_row_1_and_2_any_other_address_is_refused_and_nothing_reaches_it(proxy):
     assert proxy.seen == []
     whys = [(event["why"], event["target"], event["allow"]) for event in events]
     assert ("direct", "93.184.215.14:443", "--net 93.184.215.14") in whys
-    assert ("dns", "1.1.1.1:53", "--net 1.1.1.1:53") in whys
+    assert ("dns", "1.1.1.1:53", None) in whys  # no flag: the proxy looks up names, DNS never helps
 
 
 def test_row_26_a_listed_address_waits_for_the_proxys_verdict(proxy):

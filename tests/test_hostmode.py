@@ -165,10 +165,17 @@ print("unlisted name, through the proxy:", proxied("https://evil.example.net/"))
            "evil.example.net:443 is not in --net (allow with --net evil.example.net)>" in out
     port = out.split("proxy 127.0.0.1:")[1].split()[0]
     assert f"HTTPS_PROXY http://127.0.0.1:{port} NO_PROXY localhost,127.0.0.1,::1" in out
-    seal, deny = records(log)[0], records(log)[1]
-    print("log:", seal, deny, sep="\n")
+    rows = records(log)
+    print("log:", *rows, sep="\n")
+    seal = rows[0]
+    deny = next(row for row in rows if row["kind"] == "deny" and row["source"] == "proxy")
     assert seal["kind"] == "seal" and seal["proxy"] == f"127.0.0.1:{port}"
-    assert deny["kind"] == "deny" and deny["target"] == "evil.example.net:443" and deny["port"] == int(port)
+    assert deny["target"] == "evil.example.net:443" and deny["port"] == int(port)
+    if sys.platform == "linux":
+        # The direct connects were refused by the gate, which logs them too.
+        gate = {row["target"]: row["allow"] for row in rows
+                if row["kind"] == "deny" and row["source"] == "gate"}
+        assert gate == {"127.0.0.1:9": "--net localhost:9", "1.1.1.1:443": "--net 1.1.1.1"}
     helpers = [int(pid) for pid in out.split("helpers [")[1].split("]")[0].split(",")]
     # macOS: [proxy]. Linux: [gate, proxy]; the gate exits with the process too.
     assert len(helpers) == (1 if sys.platform == "darwin" else 2)
@@ -744,3 +751,83 @@ print("new gates left:", [pid for pid in gates() if pid not in before])
     assert said(done.stdout, "refused").startswith("these paths could not be opened")
     assert said(done.stdout, "sealed") == "False"
     assert said(done.stdout, "new gates left") == "[]"
+
+
+# ---------------------------------------------------------------------------
+# Linux: what the gate refused, in the report and the log (5.9)
+# ---------------------------------------------------------------------------
+
+REFUSALS = """
+import socket
+for _ in range(5):
+    try: socket.create_connection(("140.82.112.5", 443), timeout=3)
+    except OSError: pass
+try: socket.create_connection(("1.1.1.1", 53), timeout=3)
+except OSError: pass
+for path in ("/run/hlyn-test-private/app.sock", "DOCKER"):
+    try: socket.socket(socket.AF_UNIX).connect(path)
+    except OSError: pass
+"""
+
+
+@linux
+@pytest.mark.parametrize("form", ["text", "json"])
+def test_hlyn_run_lists_each_refusal_by_the_gate_once_with_its_flag(tmp_path, form):
+    docker = str(tmp_path / "docker.sock")
+    done = subprocess.run(
+        [*HLYN, "run", "--no-log", *(["--json"] if form == "json" else []), "--net", "pypi.org",
+         "--write", str(tmp_path), "--", sys.executable, "-c",
+         REFUSALS.replace("DOCKER", docker) + "raise SystemExit(2)"],
+        capture_output=True, text=True, env=ENV, timeout=120, check=False, cwd=str(tmp_path),
+    )
+    print(done.stderr)
+    assert done.returncode == 2
+    if form == "json":
+        report = json.loads(next(line for line in done.stderr.splitlines() if line.startswith('{"exit"')))
+        gate = {row["target"]: row for row in report["blocked"] if row.get("source") == "gate"}
+        print(json.dumps(gate, indent=1))
+        assert gate["140.82.112.5:443"]["allow"] == "--net 140.82.112.5"
+        assert gate["140.82.112.5:443"]["count"] == 5
+        assert gate["1.1.1.1:53"]["allow"] is None
+        private = gate["local socket /run/hlyn-test-private/app.sock"]
+        assert private["allow"] == "--write /run/hlyn-test-private"
+        assert gate[f"local socket {docker}"]["allow"] is None
+        return
+    lines = done.stderr.splitlines()
+    assert sum("140.82.112.5" in line and "allow with" in line for line in lines) == 1
+    assert any("140.82.112.5:443" in line and "allow with --net 140.82.112.5" in line
+               and "[5 times]" in line for line in lines)
+    assert any("1.1.1.1:53" in line and "DNS: the proxy looks up names" in line for line in lines)
+    assert any("local socket /run/hlyn-test-private/app.sock" in line
+               and "allow with --write /run/hlyn-test-private" in line for line in lines)
+    assert any(f"local socket {docker}" in line and "never allowed with --net hosts" in line
+               for line in lines)
+    assert "  to allow all of these: --net 140.82.112.5 --write /run/hlyn-test-private" in lines
+
+
+@linux
+@pytest.mark.parametrize("entry", ["on", "run", "spawn"])
+def test_the_gates_refusals_reach_the_log_from_every_entry_point(tmp_path, entry):
+    log = str(tmp_path / "log.jsonl")
+    body = REFUSALS.replace("DOCKER", "/run/docker.sock")
+    if entry == "on":
+        code = f"import hlyn\nhlyn.on(net=['pypi.org'], log={log!r})\n" + body
+    elif entry == "run":
+        code = f"import hlyn\nhlyn.run(lambda: exec({body!r}, {{}}), net=['pypi.org'], log={log!r})\n"
+    else:
+        code = (f"import hlyn, sys\nhlyn.spawn([sys.executable, '-c', {body!r}], net=['pypi.org'], "
+                f"log={log!r})\n")
+    done = boot(code)
+    time.sleep(0.5)
+    rows = [row for row in records(log) if row["kind"] == "deny" and row.get("source") == "gate"]
+    print(done.stderr[-500:], *rows, sep="\n")
+    got = {(row["why"], row["target"]): row for row in rows}
+    assert got[("direct", "140.82.112.5:443")]["allow"] == "--net 140.82.112.5"
+    assert got[("direct", "140.82.112.5:443")]["by"].startswith("python")
+    assert got[("dns", "1.1.1.1:53")]["allow"] is None
+    assert got[("unix", "/run/hlyn-test-private/app.sock")]["allow"] == "--write /run/hlyn-test-private"
+    assert got[("unix", "/run/docker.sock")]["allow"] == "--net-any"
+    # Five connects to the same address: written on the 1st, 2nd and 4th, the
+    # way every hlyn log collapses repeats.
+    seen = [row.get("seen", 1) for row in rows if row["target"] == "140.82.112.5:443"]
+    assert seen == [1, 2, 4]

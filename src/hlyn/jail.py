@@ -162,16 +162,20 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
         )
     with _denials(plan) as fd:
         way = route.start(plan.hosts(), log=fd, inherit=True, gate=gated())
-    try:
-        if gated():
-            # The calling process can't gain a parent, so its gate runs
-            # detached, and is exempted from Yama's ancestors-only rule so it
-            # may read this process's memory (5.2). Children of this process
-            # aren't covered by the exemption: they get reduced mode where
-            # Yama is at 1 (5.3).
-            from . import gate
+        try:
+            if gated():
+                # The calling process can't gain a parent, so its gate runs
+                # detached, and is exempted from Yama's ancestors-only rule so
+                # it may read this process's memory (5.2). Children of this
+                # process aren't covered by the exemption: they get reduced
+                # mode where Yama is at 1 (5.3). Its refusals go to the log.
+                from . import gate
 
-            _ptracer(gate.detached())
+                _ptracer(gate.detached(log=fd))
+        except BaseException:
+            way.close()
+            raise
+    try:
         return _seal(plan, _proxied(_port(way)), found=found, proxy=(_port(way), way.pid))
     except BaseException:
         way.close()
@@ -413,6 +417,7 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     share = None
     port = 0
     alone = False
+    told: int | None = None
     found: list[str] = []
     if named:
         # Imported here, before the fork: the child must not take the
@@ -423,6 +428,7 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
         share = route.shared(named, gate=gated())
         with _denials(plan) as fd:
             port = share.lease(fd)
+            told = os.dup(fd) if fd is not None and gated() else None  # the gate's copy
         # A caller with one thread can have its gate serve in the forked
         # child with no interpreter start (gate.become, `fresh`).
         if sys.platform == "linux":
@@ -445,15 +451,20 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
                 _seal(plan, _proxied(port), found=found, proxy=(port, pid), closed=closed)
 
             gate.become(lambda: _child(fn, sealed, write), forward=False, isolate=False,
-                        close=[write], fresh=not alone)
+                        close=[write], fresh=not alone, log=told)
 
         os.close(write)
+        if told is not None:
+            os.close(told)
+            told = None
         with os.fdopen(read, "rb") as fh:
             body = fh.read()
         _, status = os.waitpid(kid, 0)
     finally:
         if share is not None:
             share.release(port)
+        if told is not None:
+            os.close(told)
 
     if not body:
         if os.WIFSIGNALED(status):
@@ -522,6 +533,7 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
     run, argv, plan = _prepare(cmd, plan)  # in this process, so a bad command is an exception
     with _denials(plan) as fd:
         way = route.start(plan.hosts(), log=fd, inherit=True, gate=gated())
+        told = os.dup(fd) if fd is not None and gated() else None  # the gate's copy
     port = _port(way)
 
     def body() -> None:
@@ -529,7 +541,7 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
         _seal(plan, _proxied(port), found=found, proxy=(port, way.pid), closed=closed)
         os.execv(run, argv)  # noqa: S606 - see _spawn
 
-    gate.become(body, forward=True, isolate=True, close=[way.life])
+    gate.become(body, forward=True, isolate=True, close=[way.life], log=told)
 
 
 def _prepare(cmd: Sequence[str] | str, plan: Policy) -> tuple[str, list[str], Policy]:
