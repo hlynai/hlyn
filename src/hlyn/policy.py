@@ -20,7 +20,9 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from .error import Invalid, Unsupported
+from .error import Invalid
+from .hosts import Rule
+from .hosts import parse as hostparse
 
 __all__ = ["SAFE", "Policy", "preset", "presets", "programs", "register", "runtime"]
 
@@ -83,50 +85,48 @@ def paths(value: object, field: str) -> tuple[str, ...] | bool:
     raise Invalid(f"{field}: expected a path, a list of paths, or a bool, got {value!r}.")
 
 
-def ports(value: object, field: str = "net") -> tuple[int, ...] | bool:
-    """Normalise a network option to `True`, `False`, or a tuple of TCP ports.
+def ports(value: object, field: str = "net") -> tuple[int, ...] | tuple[Rule, ...] | bool:
+    """Normalise a network option: `True`, `False`, ports, or hosts.
 
-    Host names are rejected rather than accepted-and-ignored. The kernel cannot
-    filter by host: Landlock matches ports, and a classic seccomp filter cannot
-    dereference the `sockaddr` pointer passed to `connect`. Accepting
-    `net=["api.openai.com"]` here would imply an enforcement that does not
-    exist, which is the one failure mode a containment layer must never have.
+    A list holds either TCP ports (`[443]`) or host entries
+    (`["api.openai.com", "localhost:5432"]`; see `hosts.parse` for the
+    grammar), never both: a bare port already reaches every host on it, so the
+    hosts would restrict nothing. Host entries come back as `hosts.Rule`s in
+    canonical form, sorted so equal policies compare equal.
 
     Named ports are **TCP only**, and this is worth reading twice, because it
     is the one place where naming a port grants more than it appears to.
     Landlock's network rules cover TCP bind and connect; UDP is outside them,
     so `net=[443]` leaves UDP open. Traffic can still leave over DNS or QUIC.
-
-    It is left open rather than refused because closing it would take the whole
-    of UDP with it -- the same wall that stops host filtering stops us reading
-    a UDP port number, so it is all of UDP or none, and none breaks every
-    hostname lookup the agent makes. `net=False` blocks the lot, TCP and UDP
-    together, by refusing to create the socket at all; that is the setting to
-    use when nothing may leave.
+    `net=False` blocks the lot. Host entries close UDP too (design section 5),
+    but are not enforced yet: sealing a policy that names hosts is refused
+    until they are (`jail.unbuilt`).
     """
     if isinstance(value, bool):
         return value
     if value is None:
         return False
-    if isinstance(value, int):
-        value = (value,)
-    if isinstance(value, (str, os.PathLike)):
+    if isinstance(value, (int, str, os.PathLike, Rule)):
         value = (value,)
     if not isinstance(value, Iterable):
-        raise Invalid(f"{field}: expected a port, a list of ports, or a bool, got {value!r}.")
+        raise Invalid(
+            f"{field}: expected a port, a host, a list of either, or a bool, got {value!r}."
+        )
 
     out: list[int] = []
+    named: list[Rule] = []
     for item in value:
         if isinstance(item, bool):
-            raise Invalid(f"{field}: expected a port number, got {item!r}.")
+            raise Invalid(f"{field}: expected a port number or a host, got {item!r}.")
+        if isinstance(item, Rule):
+            named.append(item)
+            continue
+        if isinstance(item, os.PathLike):
+            item = os.fspath(item)
         if isinstance(item, str):
             if not item.isdigit():
-                raise Unsupported(
-                    f"{field}: host names are not enforceable yet, so {item!r} is refused "
-                    f"rather than silently ignored. The kernel filters ports, not hosts. "
-                    f"Use net=False to block all network access, net=True to allow it, or "
-                    f"name the ports, e.g. net=[443] (on the command line: --net 443)."
-                )
+                named.append(hostparse(item, field))
+                continue
             port = int(item)
         elif isinstance(item, int):
             port = item
@@ -134,13 +134,12 @@ def ports(value: object, field: str = "net") -> tuple[int, ...] | bool:
             # Accept anything that converts to a whole number exactly, so a
             # numpy integer or a Decimal works. Refuse anything that would have
             # to be rounded: `int(1.5)` is 1, so accepting it would open a port
-            # the caller never named -- the same quiet substitution that host
-            # names are refused for above.
+            # the caller never named.
             try:
                 port = int(item)
             except (TypeError, ValueError):
                 raise Invalid(
-                    f"{field}: expected a port number, got {item!r} "
+                    f"{field}: expected a port number or a host, got {item!r} "
                     f"({type(item).__name__})."
                 ) from None
             if port != item:
@@ -151,7 +150,25 @@ def ports(value: object, field: str = "net") -> tuple[int, ...] | bool:
         if not 0 < port < 65536:
             raise Invalid(f"{field}: {port} is not a port number (1-65535).")
         out.append(port)
+
+    if out and named:
+        some = ", ".join(str(p) for p in sorted(set(out))[:3])
+        host = named[0]
+        raise Invalid(
+            f"{field} mixes ports ({some}) and hosts ({host}). A bare port reaches every "
+            f"host on it, so the hosts would restrict nothing. Use hosts only "
+            f"({host.flag()}; port 443 is the default) or ports only (--net {some.split(',')[0]})."
+        )
+    if named:
+        return tuple(sorted(set(named), key=str))
     return tuple(sorted(set(out)))
+
+
+def plain(value: object) -> object:
+    """A field as a file or JSON holds it: tuples as lists, host rules as text."""
+    if isinstance(value, tuple):
+        return [str(item) if isinstance(item, Rule) else item for item in value]
+    return value
 
 
 def names(value: object, field: str = "env") -> tuple[str, ...] | bool:
@@ -501,6 +518,7 @@ class Policy:
         Policy()                                    # nothing but the runtime
         Policy(read=["/src"], write=["/out"])       # named directories
         Policy(net=[443], exec=False)               # ports, no new programs
+        Policy(net=["api.openai.com"])              # hosts (refused at seal until built)
 
     Frozen on purpose. A policy that can be edited after it has been checked
     is a policy that can be edited by whatever compromised the agent.
@@ -514,7 +532,7 @@ class Policy:
     read: tuple[str, ...] | bool = ()
     write: tuple[str, ...] | bool = ()
     exec: tuple[str, ...] | bool = False
-    net: tuple[int, ...] | bool = False
+    net: tuple[int, ...] | tuple[Rule, ...] | bool = False
     env: tuple[str, ...] | bool = False
     tmp: bool | str = True
     log: bool | str = True
@@ -595,6 +613,12 @@ class Policy:
         if isinstance(self.env, tuple):
             allow.update(self.env)
         return {key: value for key, value in source.items() if key in allow}
+
+    def hosts(self) -> tuple[Rule, ...]:
+        """The host entries `net` names, or `()` when it is off, open, or ports."""
+        if isinstance(self.net, tuple) and self.net and isinstance(self.net[0], Rule):
+            return self.net  # type: ignore[return-value]
+        return ()
 
     def with_(self, **edits: object) -> Policy:
         """A copy with fields replaced. The original is untouched."""

@@ -37,7 +37,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .error import Invalid
-from .policy import Policy
+from .policy import Policy, plain
 
 __all__ = ["build", "dumps", "load", "loads", "raw", "shape"]
 
@@ -66,7 +66,7 @@ def shape(policy: Policy) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for field in FIELDS:
         value = getattr(policy, field)
-        out[field] = list(value) if isinstance(value, tuple) else value
+        out[field] = plain(value)
     return out
 
 

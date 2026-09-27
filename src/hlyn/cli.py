@@ -22,7 +22,7 @@ from typing import Any
 
 from . import __version__, jail, spec
 from .error import Error
-from .policy import Policy, preset, presets
+from .policy import Policy, plain, ports, preset, presets
 
 __all__ = ["build", "main"]
 
@@ -46,10 +46,10 @@ def build() -> argparse.ArgumentParser:
         p.add_argument("--exec", action="append", metavar="PATH", default=[],
                        help="runnable program (repeatable)")
         p.add_argument("--exec-any", action="store_true", help="allow running any program")
-        # No `type=int`: argparse would reject a host name with "invalid int
-        # value" before the policy can explain why host names are refused.
-        p.add_argument("--net", action="append", metavar="PORT", default=[],
-                       help="reachable TCP port, repeatable (TCP only: UDP stays open)")
+        # No `type=int`: a host is as valid here as a port.
+        p.add_argument("--net", action="append", metavar="PORT|HOST", default=[],
+                       help="reachable TCP port (UDP stays open), or host such as "
+                            "api.openai.com (not enforced yet); repeatable")
         p.add_argument("--net-any", action="store_true", help="allow all network access")
         p.add_argument("--env", action="append", metavar="NAME", default=[],
                        help="environment variable to keep (repeatable)")
@@ -166,9 +166,13 @@ def _narrow_net(base: tuple[object, ...] | bool, extra: list[str], source: str |
     if base is not True:
         return _add(base, extra)
     if source:
+        try:
+            shown = ", ".join(str(item) for item in ports(extra))  # type: ignore[union-attr]
+        except Error:
+            shown = ", ".join(extra)  # the policy will refuse it, with the reason
         print(
             f"hlyn: net was any network (from {source}); --net narrows it to "
-            f"{', '.join(extra)}. Use --net-any to keep it open.",
+            f"{shown}. Use --net-any to keep it open.",
             file=sys.stderr,
         )
     return list(extra)
@@ -303,7 +307,12 @@ def _gist(plan: Policy) -> str:
     if plan.exec:
         said.append("run any program" if plan.exec is True else f"run {which(plan.exec)}")
     if plan.net:
-        said.append("any network" if plan.net is True else f"TCP ports {which(plan.net)}")
+        if plan.net is True:
+            said.append("any network")
+        elif plan.hosts():
+            said.append(f"hosts {which(plan.hosts())}")
+        else:
+            said.append(f"TCP ports {which(plan.net)}")
     if plan.env:
         said.append("the whole environment" if plan.env is True else f"env {which(plan.env)}")
     if not said:
@@ -458,6 +467,29 @@ def _exposed(plan: Policy) -> bool:
     return True
 
 
+def _reach(plan: Policy) -> bool:
+    """Warn, on stderr, for each host entry that names a local service giving
+    onward reach (design 6.7). Same filters and exit rule as `_exposed`."""
+    import warnings
+
+    from .hosts import Reach, warn
+
+    for rule in plan.hosts():
+        text = warn(rule)
+        if not text:
+            continue
+        try:
+            with warnings.catch_warnings(record=True) as heard:
+                warnings.warn(text, Reach, stacklevel=1)
+        except Reach:
+            print(text.replace("hlyn:", "hlyn: refused:", 1), file=sys.stderr)
+            print("  Refused because warnings are errors here (PYTHONWARNINGS / -W error).", file=sys.stderr)
+            return False
+        if heard:
+            print(text, file=sys.stderr)
+    return True
+
+
 def _listener(quiet: bool) -> Any:
     """What will hear the command's refusals. Never raises: a run is never
     refused because its report could not be set up."""
@@ -554,7 +586,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
 
     if args.verb == "show":
         p = _policy(args)
-        if not _exposed(p):
+        if not _exposed(p) or not _reach(p):
             return 2
         if args.intent:
             # What was asked for, not what it becomes: this is the form a file
@@ -570,7 +602,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
             "read": reads if isinstance(reads, bool) else list(reads),
             "write": writes if isinstance(writes, bool) else list(writes),
             "exec": runs if isinstance(runs, bool) else list(runs),
-            "net": p.net if isinstance(p.net, bool) else list(p.net),
+            "net": plain(p.net),
             "env": "all" if p.env is True else sorted(p.keep().keys()),
             "tmp": p.tmp,
         }
@@ -600,8 +632,9 @@ def _run(argv: Sequence[str] | None = None) -> int:
     # Built here, before the fork, so a malformed policy is reported once, as
     # a sentence, with exit code 2 -- like every other command.
     plan = _policy(args)
-    if not _exposed(plan):
+    if not _exposed(plan) or not _reach(plan):
         return 2
+    jail.unbuilt(plan)
     return _launch(cmd, plan, args.no_report, args.json)
 
 

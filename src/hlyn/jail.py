@@ -22,7 +22,7 @@ from types import ModuleType
 from typing import Any
 
 from . import log
-from .error import Failed, Invalid, Sealed
+from .error import Failed, Invalid, Sealed, Unsupported
 from .policy import Policy, preset, presets
 
 __all__ = ["back", "on", "probe", "run", "sealed", "spawn"]
@@ -140,7 +140,29 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
             "changed once applied. Build the full policy before calling on()."
         )
     plan = _plan(policy, edits)
+    unbuilt(plan)
     return _seal(plan, found=_warn(plan))
+
+
+def unbuilt(plan: Policy) -> None:
+    """Refuse to seal a policy that names hosts, until host mode is enforced.
+
+    `net=["api.openai.com"]` parses, shows and saves, but nothing yet makes it
+    hold: the proxy and the connection gate (DESIGN-host-allowlisting.md
+    sections 5.3-5.5) are still being built. Sealing with it quietly treated
+    as ports, or as open, would be the one thing a containment layer must
+    never do, so every entry point refuses here first, before anything is
+    changed.
+    """
+    named = plan.hosts()
+    if named:
+        shown = ", ".join(str(rule) for rule in named[:3]) + (" ..." if len(named) > 3 else "")
+        raise Unsupported(
+            f"net names hosts ({shown}), and host allowlisting isn't enforced yet: the proxy "
+            f"and connection gate that make it hold are still being built. Nothing was "
+            f"sealed. For now use ports (--net 443, or net=[443]), which allow every host "
+            f"on them, or net=False."
+        )
 
 
 def _warn(plan: Policy) -> list[str]:
@@ -157,6 +179,12 @@ def _warn(plan: Policy) -> list[str]:
 
     from .secret import Exposed, exposed, warning
 
+    from .hosts import Reach, warn
+
+    for rule in plan.hosts():
+        said = warn(rule)
+        if said:
+            warnings.warn(said, Reach, stacklevel=3)
     found = exposed(plan)
     if found:
         warnings.warn(warning(found, cli=False), Exposed, stacklevel=3)
@@ -179,6 +207,7 @@ def _seal(
             "changed once applied. Build the full policy before calling on()."
         )
 
+    unbuilt(plan)
     plan, box = _scratch(plan)
 
     # Find the backend's libraries before the environment is scrubbed. The
@@ -230,6 +259,7 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     child would take the loader lock, which is the one most likely to be held.
     """
     plan = _plan(policy, edits)
+    unbuilt(plan)  # in the parent, so the refusal is an exception, not a dead child
     # Before the fork, never after: see the note above.
     back().ready()
     read, write = os.pipe()
@@ -286,6 +316,7 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
     breath is a contradiction, not a policy.
     """
     plan = _plan(policy, edits)
+    unbuilt(plan)
     _spawn(cmd, plan, found=_warn(plan))
 
 

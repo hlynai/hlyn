@@ -72,7 +72,15 @@ from typing import Union
 
 from .error import Invalid
 
-__all__ = ["Rule", "classify", "match", "normalize", "parse", "unwrap", "warn"]
+__all__ = ["Reach", "Rule", "classify", "match", "normalize", "parse", "unwrap", "warn"]
+
+
+class Reach(UserWarning):
+    """A `net` entry names a local service that gives onward reach (design 6.7).
+
+    A warning, not a refusal: the user may mean it. Filter it like any other
+    (`warnings.simplefilter("ignore", hlyn.Reach)`), or make it an error.
+    """
 
 IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
 IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
@@ -117,6 +125,9 @@ class Rule:
             addr = self.network.network_address
             return f"[{addr}]" if addr.version == 6 else str(addr)
         return f"[{self.network}]" if self.network.version == 6 else str(self.network)
+
+    def __repr__(self) -> str:
+        return f"Rule({str(self)!r})"
 
     def __str__(self) -> str:
         """The canonical form of this rule, e.g. `"api.openai.com:443"`."""

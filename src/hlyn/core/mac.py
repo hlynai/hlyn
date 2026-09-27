@@ -175,6 +175,10 @@ def profile(policy: Policy, tag: str | None = None) -> str:
     process and its children, which is how `hlyn run` picks this run's
     refusals out of the system log. It changes nothing about what is allowed.
     """
+    if policy.hosts():
+        # Host entries aren't ports: never let them reach a rule that reads
+        # them as such. jail.unbuilt refuses first, with the user's message.
+        raise Unsupported("host entries in net are not enforced by this backend yet.")
     deny = f"(deny default (with message {quote(tag)}))" if tag else "(deny default)"
     lines = ["(version 1)", deny, *BASE]
     refused: list[str] = []

@@ -366,3 +366,35 @@ def test_the_backend_is_found_before_the_environment_is_scrubbed():
     assert "ready saw /nowhere/libhlyn.so" in done.stdout, done.stdout + done.stderr
     # And the scrub still happens: the override is read early, not kept around.
     assert "load saw None" in done.stdout, done.stdout + done.stderr
+
+
+def test_every_entry_point_refuses_a_host_policy_and_leaves_the_process_unsealed():
+    # Until host mode is enforced (design phases 2-4), naming a host must stop
+    # every entry point before anything is changed: no seal, no scrubbed
+    # environment, no child that ran.
+    done = boot(
+        """
+        import os, hlyn
+        os.environ["CANARY"] = "still here"
+        for name, call in [
+            ("on", lambda: hlyn.on(net=["api.openai.com"])),
+            ("run", lambda: hlyn.run(lambda: print("CHILD RAN"), net=["api.openai.com"])),
+            ("spawn", lambda: hlyn.spawn(["echo", "SPAWNED"], net=["api.openai.com"])),
+            ("preset + hosts", lambda: hlyn.on("web", net=["api.openai.com"])),
+        ]:
+            try:
+                call()
+                print(name, "DID NOT REFUSE")
+            except hlyn.Unsupported as exc:
+                print(name, "refused:", exc)
+        print("sealed:", hlyn.sealed(), "| env kept:", os.environ.get("CANARY"))
+        print("still open:", open("/etc/hosts").read()[:0] == "")
+        """
+    )
+    print(done.stdout, done.stderr[-500:])
+    for name in ("on", "run", "spawn", "preset + hosts"):
+        assert f"{name} refused: net names hosts (api.openai.com:443)" in done.stdout
+    assert "DID NOT REFUSE" not in done.stdout
+    assert "CHILD RAN" not in done.stdout and "SPAWNED" not in done.stdout
+    assert "sealed: False | env kept: still here" in done.stdout
+    assert "still open: True" in done.stdout

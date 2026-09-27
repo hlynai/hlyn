@@ -134,3 +134,13 @@ def test_logging_can_be_turned_off(sink):
         assert rows(sink) == []
     finally:
         log.sink(sink)
+
+
+def test_a_host_policy_is_recorded_as_text():
+    from hlyn.log import _shape
+    from hlyn.policy import Policy
+
+    shaped = _shape(Policy(net=["api.openai.com", "localhost:5432"]).net)
+    print(shaped)
+    assert shaped == ["api.openai.com:443", "localhost:5432"]
+    json.dumps(shaped)  # a log line must serialise

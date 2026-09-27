@@ -122,7 +122,8 @@ def _shape(value: Any) -> Any:
     if isinstance(value, bool) or value is None:
         return value
     if isinstance(value, tuple):
-        return list(value) if len(value) <= 12 else [*value[:12], f"+{len(value) - 12} more"]
+        items = [item if isinstance(item, (str, int)) else str(item) for item in value]
+        return items if len(items) <= 12 else [*items[:12], f"+{len(items) - 12} more"]
     return value
 
 

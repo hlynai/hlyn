@@ -85,11 +85,24 @@ def test_an_unknown_field_is_refused_not_ignored(tmp_path):
 
 
 def test_a_file_is_checked_by_the_same_rules_as_a_keyword(tmp_path):
-    """A host name must be refused however it arrives."""
-    path = write(tmp_path, "p.toml", 'net = ["api.openai.com"]\n')
-    with pytest.raises(Exception) as caught:
-        spec.load(path)
-    assert "host names" in str(caught.value)
+    """A host entry means the same, and is refused the same, however it arrives."""
+    path = write(tmp_path, "p.toml", 'net = ["API.openai.com.", "localhost:5432"]\n')
+    loaded = spec.load(path)
+    print(loaded.net)
+    assert loaded == Policy(net=["api.openai.com", "localhost:5432"])
+    bad = write(tmp_path, "q.toml", 'net = ["https://api.openai.com/v1"]\n')
+    with pytest.raises(Invalid) as caught:
+        spec.load(bad)
+    print(caught.value)
+    assert "--net api.openai.com" in str(caught.value)
+
+
+def test_hosts_round_trip_through_json_and_toml(tmp_path):
+    p = Policy(net=["*.githubusercontent.com", "[::ffff:10.0.0.5]:5432", "10.20.0.0/16:8080"])
+    text = spec.dumps(p)
+    print(text)
+    assert json.loads(text)["net"] == ["*.githubusercontent.com:443", "10.0.0.5:5432", "10.20.0.0/16:8080"]
+    assert spec.loads(text, "json") == p
 
 
 def test_an_empty_file_is_refused(tmp_path):

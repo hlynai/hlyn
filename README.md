@@ -191,7 +191,7 @@ A few rules worth knowing:
 - **A folder grant covers everything inside it.** `read=["./src"]` includes `./src/app/main.py`.
 - **Writing implies reading what you wrote.** A path in `write` can also be read back.
 - **Paths must exist.** A typo such as `read=["./scr"]` is an error, not a grant that silently matches nothing.
-- **`net` takes ports, not host names.** `net=["api.openai.com"]` is refused with an explanation; the kernel filters ports, not hosts. Use `net=[443]`.
+- **`net` enforces ports, not host names, today.** `net=["api.openai.com"]` is accepted by `Policy`, `hlyn show` and policy files, but every entry point refuses to seal it until host allowlisting is built ([design](DESIGN-host-allowlisting.md)). Use `net=[443]` for now.
 - **Allowing any network also allows what the network needs.** DNS configuration and TLS certificate stores become readable automatically, so `net=[443]` really can make HTTPS requests. Private key folders such as `/etc/ssl/private` are never included.
 
 ### Secrets in granted folders
@@ -436,8 +436,8 @@ Every error inherits from `hlyn.Error`, so one `except` catches them all. `hlyn.
 
 | Error | Raised when | The process is |
 |---|---|---|
-| `hlyn.Invalid` | The policy is malformed: a typo, a missing path, a host name in `net` | Untouched |
-| `hlyn.Unsupported` | This machine can't enforce the policy (old kernel, unsupported OS) | Untouched |
+| `hlyn.Invalid` | The policy is malformed: a typo, a missing path, a malformed host in `net`, ports and hosts mixed | Untouched |
+| `hlyn.Unsupported` | This machine can't enforce the policy (old kernel, unsupported OS), or `net` names hosts, which aren't enforced yet | Untouched |
 | `hlyn.Failed` | The kernel refused to apply the boundary | **Not** confined, so don't continue |
 | `hlyn.Sealed` | You called `on()` twice. The boundary can't be changed once applied. | Already confined |
 

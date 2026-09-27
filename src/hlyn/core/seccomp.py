@@ -325,6 +325,10 @@ def load(policy: Policy) -> None:
     One-way. Once loaded the filter applies to this process and every thread
     and child it has, and cannot be removed.
     """
+    if policy.hosts():
+        # Host entries aren't ports: never let them reach a rule that reads
+        # them as such. jail.unbuilt refuses first, with the user's message.
+        raise Unsupported("host entries in net are not enforced by this backend yet.")
     api = lib()
     ctx = api.seccomp_init(ALLOW)
     if not ctx:

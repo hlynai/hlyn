@@ -163,15 +163,16 @@ def test_ports_out_of_range_are_rejected_not_clamped(bad):
 
 
 @given(st.text(min_size=1).filter(lambda s: not s.isdigit()))
-def test_ports_never_silently_accepts_a_non_numeric_string(text):
-    # A host name, an empty-ish string, or garbage must be refused loudly
-    # (Unsupported for anything that looks like a hostname attempt, Invalid
-    # otherwise) rather than coerced into some port number or dropped.
+def test_ports_never_turns_a_non_numeric_string_into_a_port(text):
+    # A non-numeric string is a host entry (a Rule, refused at seal until host
+    # mode is enforced) or refused with Invalid -- never coerced into a port
+    # number, and never dropped.
     try:
-        ports([text])
-    except (Invalid, Unsupported):
+        out = ports([text])
+    except Invalid:
         return
-    raise AssertionError(f"{text!r} was accepted as a port without raising")
+    assert isinstance(out, tuple) and len(out) == 1, f"{text!r} became {out!r}"
+    assert not isinstance(out[0], int), f"{text!r} was accepted as port {out[0]}"
 
 
 @given(st.floats(allow_nan=False, allow_infinity=False))

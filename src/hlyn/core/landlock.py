@@ -263,6 +263,10 @@ def load(policy: Policy) -> int:
     the kernel applied less than was asked for: a caller that believes it is
     confined and is not is the single worst outcome this package can produce.
     """
+    if policy.hosts():
+        # Host entries aren't ports: never let them reach a rule that reads
+        # them as such. jail.unbuilt refuses first, with the user's message.
+        raise Unsupported("host entries in net are not enforced by this backend yet.")
     api = lib()
     _alone()
 

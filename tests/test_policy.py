@@ -202,12 +202,33 @@ def test_net_accepts_bools_and_ports():
     assert ports(["443"]) == (443,)
 
 
-def test_net_refuses_host_names_loudly():
-    # The kernel filters ports, not hosts. Accepting this would imply an
-    # enforcement that does not exist, which is the one unacceptable failure.
+def test_net_holds_hosts_in_canonical_form():
+    p = Policy(net=["API.OpenAI.com.", "localhost:5432", "api.openai.com"])
+    print(p.net)
+    assert [str(r) for r in p.hosts()] == ["api.openai.com:443", "localhost:5432"]
+    assert p == Policy(net=["localhost:5432", "api.openai.com:443"])
+    assert p.with_(read=["/tmp"]).net == p.net  # rules survive a copy
+    assert Policy(net=[443]).hosts() == ()
+
+
+def test_net_refuses_ports_and_hosts_together():
+    with pytest.raises(Invalid) as caught:
+        Policy(net=[443, "api.openai.com"])
+    print(caught.value)
+    assert "restrict nothing" in str(caught.value)
+
+
+def test_a_host_policy_is_refused_before_sealing():
+    # Hosts parse, but nothing enforces them yet: sealing must refuse rather
+    # than treat them as ports or as an open network.
+    from hlyn import jail
+
     with pytest.raises(Unsupported) as caught:
-        Policy(net=["api.openai.com"])
-    assert "api.openai.com" in str(caught.value)
+        jail.unbuilt(Policy(net=["api.openai.com"]))
+    print(caught.value)
+    assert "api.openai.com:443" in str(caught.value)
+    assert "--net 443" in str(caught.value)
+    jail.unbuilt(Policy(net=[443]))  # ports are unaffected
 
 
 def test_net_rejects_impossible_ports():

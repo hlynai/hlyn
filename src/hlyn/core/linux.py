@@ -131,6 +131,10 @@ def load(policy: Policy, tag: str | None = None) -> int:
     `tag` is unused here. On Linux, refusals are reported from inside the
     confined programs rather than by the kernel; see `listen`.
     """
+    if policy.hosts():
+        # Host entries aren't ports: never let them reach a rule that reads
+        # them as such. jail.unbuilt refuses first, with the user's message.
+        raise Unsupported("host entries in net are not enforced by this backend yet.")
     if policy.net is False:
         open_sockets = wired()
         if open_sockets:

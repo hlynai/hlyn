@@ -235,12 +235,68 @@ def test_net_narrowing_does_not_fire_when_the_base_is_not_already_open(tmp_path)
     assert out["net"] == [443, 8080]
 
 
-def test_a_host_name_gets_the_reason_not_a_type_error():
-    done = hlyn("show", "--net", "api.openai.com")
+def test_a_host_is_shown_in_canonical_form():
+    done = hlyn("show", "--net", "API.OpenAI.com.", "--net", "localhost:5432", "--json")
+    print("show --net API.OpenAI.com. --net localhost:5432:", done.stdout, done.stderr)
+    assert done.returncode == 0
+    assert json.loads(done.stdout)["net"] == ["api.openai.com:443", "localhost:5432"]
+
+
+def test_running_with_a_host_is_refused_until_it_is_enforced():
+    # Design phase 1 parses hosts; the proxy and gate that enforce them come
+    # later. Until then a run must be refused, never quietly treated as ports.
+    done = hlyn("run", "--net", "api.openai.com", "--", sys.executable, "-c", "print('RAN')")
+    print("run --net api.openai.com:", done.returncode, done.stdout, done.stderr)
     assert done.returncode == 2
-    assert "host names are not enforceable" in done.stderr
+    assert "RAN" not in done.stdout
+    assert "isn't enforced yet" in done.stderr
     assert "--net 443" in done.stderr
     assert "invalid int" not in done.stderr
+
+
+def test_a_malformed_host_names_the_fix():
+    done = hlyn("show", "--net", "https://api.openai.com/v1")
+    print(done.returncode, done.stderr)
+    assert done.returncode == 2
+    assert "--net api.openai.com" in done.stderr
+
+
+def test_ports_and_hosts_do_not_mix_even_across_a_file_and_a_flag(tmp_path):
+    # Design 4.1: the check runs on the final merged policy.
+    policy = tmp_path / "policy.toml"
+    policy.write_text("net = [443]\n")
+    done = hlyn("show", "-f", str(policy), "--net", "api.openai.com")
+    print(done.returncode, done.stderr)
+    assert done.returncode == 2
+    assert "mixes ports (443) and hosts (api.openai.com:443)" in done.stderr
+    assert "--net api.openai.com" in done.stderr and "--net 443" in done.stderr
+
+
+def test_a_host_narrows_an_open_network():
+    done = hlyn("show", "--preset", "web", "--net", "api.openai.com", "--json")
+    print(done.stdout, done.stderr)
+    assert "net was any network (from --preset web); --net narrows it to api.openai.com:443" in done.stderr
+    assert json.loads(done.stdout)["net"] == ["api.openai.com:443"]
+
+
+def test_a_local_service_port_is_warned_about():
+    done = hlyn("show", "--net", "localhost:2375", "--json")
+    print(done.returncode, done.stderr)
+    assert done.returncode == 0
+    assert "localhost:2375 is Docker's API port" in done.stderr
+    assert "Remove --net localhost:2375" in done.stderr
+
+
+def test_the_local_service_warning_can_be_made_an_error():
+    env_error = {"PYTHONWARNINGS": "error::hlyn.Reach"}
+    done = subprocess.run(
+        [sys.executable, "-m", "hlyn.cli", "show", "--net", "localhost:2375"],
+        capture_output=True, text=True, timeout=60, check=False,
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": SRC, **env_error},
+    )
+    print(done.returncode, done.stderr)
+    assert done.returncode == 2
+    assert "hlyn: refused: localhost:2375" in done.stderr
 
 
 def test_run_without_a_command_explains_itself():

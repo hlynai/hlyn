@@ -7,6 +7,7 @@ cannot be lifted once set. There is deliberately no way to turn it off.
 from __future__ import annotations
 
 from .error import Error, Failed, Invalid, Sealed, Unsupported
+from .hosts import Reach
 from .jail import on, probe, run, sealed, spawn
 from .policy import SAFE, Policy, preset, presets, register, runtime
 from .secret import Exposed, exposed
@@ -21,6 +22,7 @@ __all__ = [
     "Failed",
     "Invalid",
     "Policy",
+    "Reach",
     "Sealed",
     "Unsupported",
     "__version__",
