@@ -150,6 +150,17 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
     plan = _plan(policy, edits)
     unbuilt(plan)
     _ready(plan)
+    from . import route
+
+    open_ = _loose(plan)
+    if open_:
+        raise Unsupported(
+            f"{len(open_)} network connection{'s are' if len(open_) > 1 else ' is'} already open "
+            f"({route.describe(open_)}) that this policy's net wouldn't allow. "
+            f"{'They' if len(open_) > 1 else 'It'} would keep working after the seal, whatever its "
+            f"destination. Close them first (for example session.close()), call hlyn.on() before "
+            f"creating network clients, or use hlyn.run(fn), which closes them in its child."
+        )
     found = _warn(plan)
     if not plan.hosts():
         return _seal(plan, found=found)
@@ -157,16 +168,6 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
     # Host mode (DESIGN-host-allowlisting.md 5.2, 5.8): a proxy started now,
     # before the seal, and held alive by this process for the rest of its
     # life -- the lifetime pipe survives exec too.
-    from . import route
-
-    open_ = route.sockets()
-    if open_:
-        raise Unsupported(
-            f"{len(open_)} network connection{'s are' if len(open_) > 1 else ' is'} already open "
-            f"({route.describe(open_)}). {'They' if len(open_) > 1 else 'It'} would keep working "
-            f"after the seal, whatever its destination. Close them first (for example "
-            f"session.close()), or call hlyn.on() before creating network clients."
-        )
     with _denials(plan) as fd:
         way = route.start(plan.hosts(), log=fd, inherit=True, gate=gated())
         try:
@@ -225,6 +226,41 @@ def unbuilt(plan: Policy) -> None:
             f"net names hosts ({shown}), and this platform can't enforce them. Nothing was "
             f"sealed. hlyn enforces host names on Linux and macOS."
         )
+
+
+def _loose(plan: Policy) -> list[Any]:
+    """Network sockets this process holds that `plan` wouldn't let it open.
+
+    Landlock, seccomp and Seatbelt all act when a connection is made, so one
+    made before the seal keeps working after it, to wherever it goes. With
+    `net=True` nothing is loose. With ports, a TCP connection to a listed
+    port is one the policy would allow anyway, so it stays usable; anything
+    else -- listeners, UDP, other ports -- is loose. With hosts or
+    `net=False`, every socket is: the proxy is the only way out.
+    """
+    if plan.net is True:
+        return []
+    from . import route
+
+    found = route.sockets()
+    if plan.hosts() or not isinstance(plan.net, tuple):
+        return found
+    listed = {port for port in plan.net if isinstance(port, int)}
+
+    def allowed(item: Any) -> bool:
+        if item.kind != "TCP" or not item.peer:
+            return False
+        port = item.peer.rpartition(":")[2]
+        return port.isdigit() and int(port) in listed
+
+    return [item for item in found if not allowed(item)]
+
+
+def _neutral(plan: Policy) -> int:
+    """In a child about to seal: put the loose sockets out of use (5.2)."""
+    from . import route
+
+    return route.neutralise(_loose(plan))
 
 
 def _ready(plan: Policy) -> None:
@@ -388,6 +424,8 @@ def _seal(
         more = {"proxy": f"127.0.0.1:{port}", "helpers": helpers, "closed": closed}
     else:
         level = back().load(plan, tag) if tag else back().load(plan)
+        if closed:
+            more = {"closed": closed}
 
     _sealed = True
     log.seal(plan, back().__name__, level, box, **more)
@@ -449,11 +487,11 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
         if kid == 0:  # child
             os.close(read)
             if share is None:
-                _child(fn, lambda: on(plan), write)
+                _child(fn, lambda: _seal(plan, found=_warn(plan), closed=_neutral(plan)), write)
             pid = share.route.pid
 
             def sealed() -> None:
-                closed = route.neutralise(route.sockets())
+                closed = _neutral(plan)
                 _seal(plan, _proxied(port), found=found, proxy=(port, pid), closed=closed)
 
             gate.become(lambda: _child(fn, sealed, write), forward=False, isolate=False,
@@ -543,7 +581,7 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
     port = _port(way)
 
     def body() -> None:
-        closed = route.neutralise(route.sockets())
+        closed = _neutral(plan)
         _seal(plan, _proxied(port), found=found, proxy=(port, way.pid), closed=closed)
         os.execv(run, argv)  # noqa: S606 - see _spawn
 
@@ -591,11 +629,7 @@ def _spawn(
     """`spawn`, with the same additions as `_seal`. In host mode (`proxy`
     given) the caller has already arranged the gate; this is the child."""
     run, argv, plan = _prepare(cmd, plan)
-    closed = 0
-    if proxy is not None:
-        from . import route
-
-        closed = route.neutralise(route.sockets())
+    closed = _neutral(plan)
     _seal(plan, extra, tag, found, proxy=proxy, closed=closed)
     # No shell, deliberately: the command is executed as given, so nothing in
     # it is ever interpreted as shell syntax.

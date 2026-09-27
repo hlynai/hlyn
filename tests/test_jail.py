@@ -401,3 +401,95 @@ def test_every_entry_point_refuses_a_host_policy_and_leaves_the_process_unsealed
     assert "CHILD RAN" not in done.stdout and "SPAWNED" not in done.stdout
     assert "sealed: False | env kept: still here" in done.stdout
     assert "still open: True" in done.stdout
+
+
+# ---------------------------------------------------------------------------
+# connections opened before the seal (matrix row 27, in every net mode)
+# ---------------------------------------------------------------------------
+#
+# A socket connected before the seal keeps working after it: the kernel checks
+# connections when they are made. Found open under ports: an inherited
+# connection carried data to a port the policy never named.
+
+INHERITED = """
+    import socket, hlyn
+    srv = socket.create_server(("127.0.0.1", 0))
+    conn = socket.create_connection(srv.getsockname())
+    peer, _ = srv.accept()
+    def leak():
+        try:
+            conn.sendall(b"SECRET")
+            return "sent"
+        except OSError as exc:
+            return f"refused ({exc.strerror})"
+    def heard():
+        peer.settimeout(0.5)
+        try:
+            return peer.recv(100) or b""
+        except OSError:
+            return b""
+"""
+
+
+@here
+@pytest.mark.parametrize("net", ["False", "[9]"])
+def test_run_fn_closes_a_connection_the_policy_would_not_allow(net):
+    done = boot(INHERITED + f"""
+    print("child:", hlyn.run(leak, net={net}))
+    print("server heard:", heard())
+    """)
+    print(done.stdout, done.stderr[-800:])
+    assert "child: refused" in done.stdout
+    assert "server heard: b''" in done.stdout
+
+
+@here
+def test_run_fn_keeps_a_connection_to_a_listed_port_under_ports():
+    # Not a leak: the policy would let the child open that same connection.
+    done = boot(INHERITED + """
+    port = srv.getsockname()[1]
+    print("child:", hlyn.run(leak, net=[port]))
+    print("server heard:", heard())
+    """)
+    print(done.stdout, done.stderr[-800:])
+    assert "child: sent" in done.stdout
+    assert "server heard: b'SECRET'" in done.stdout
+
+
+@here
+@pytest.mark.parametrize("net", ["False", "[9]"])
+def test_on_refuses_with_a_connection_the_policy_would_not_allow(net):
+    done = boot(INHERITED + f"""
+    try:
+        hlyn.on(net={net})
+        print("SEALED:", leak())
+    except hlyn.Unsupported as exc:
+        print("refused:", exc)
+    print("sealed:", hlyn.sealed())
+    """)
+    print(done.stdout, done.stderr[-800:])
+    # The listener, the client and the accepted end: all three.
+    assert "refused: 3 network connections are already open (fd" in done.stdout
+    assert "hlyn.run(fn), which closes them" in done.stdout
+    assert "SEALED" not in done.stdout and "sealed: False" in done.stdout
+
+
+@here
+def test_spawn_closes_an_inherited_connection_under_ports(tmp_path):
+    # The command inherits the socket (made inheritable, as a parent passing
+    # it on would) and writes to it by number.
+    done = boot(INHERITED + f"""
+    import os, sys
+    os.set_inheritable(conn.fileno(), True)
+    kid = os.fork()
+    if kid == 0:
+        script = "import os; os.write({{fd}}, b'SECRET'); print('command: sent')".format(fd=conn.fileno())
+        hlyn.spawn([sys.executable, "-c", script], net=[9])
+    os.waitpid(kid, 0)
+    print("server heard:", heard())
+    """)
+    print(done.stdout, done.stderr[-800:])
+    # The descriptor now holds /dev/null, so the write "succeeds" and goes
+    # nowhere; what matters is that the server heard nothing.
+    assert "command: sent" in done.stdout
+    assert "server heard: b''" in done.stdout
