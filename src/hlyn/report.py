@@ -445,6 +445,13 @@ class Report:
             return Entry("net", f"macOS service {target}", "--net 443",
                          f"{SERVICES[target]} on the program's behalf; refused while net is off",
                          source=denial.source)
+        if kind == "system" and denial.op == "lsopen":
+            # macOS: `open`, or LaunchServices called directly. Never allowed
+            # in any mode: the app, or the browser for a URL, would run outside
+            # the sandbox, and a URL carries whatever the program puts in it.
+            return Entry("exec", "opening an app or URL (open, LaunchServices)", None,
+                         "never allowed: it would run outside the sandbox. Open it yourself, outside hlyn",
+                         source=denial.source)
         if kind == "system":
             # The OS's own plumbing (macOS): counted, shown with --json, left
             # out of the list, since no flag allows it and a list full of

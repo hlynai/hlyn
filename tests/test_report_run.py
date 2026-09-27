@@ -241,6 +241,23 @@ def test_a_refused_fast_open_send_is_listed(tmp_path):
     assert item["target"] == "TCP Fast Open to port 5432 (127.0.0.1)"
 
 
+@pytest.mark.skipif(not MAC, reason="LaunchServices is macOS's")
+def test_opening_a_url_is_refused_and_explained(tmp_path):
+    """`open URL` from inside the sandbox would have the browser, outside it,
+    fetch whatever the URL carries. Seatbelt refuses it (`lsopen`) in every
+    mode, even with the network open, and the report says so."""
+    done = run(tmp_path, """
+        import subprocess
+        url = "http://127.0.0.1:9/hlyn-test"
+        got = subprocess.run(["/usr/bin/open", "-g", url], capture_output=True, text=True)
+        print("open exited", got.returncode, got.stderr.strip()[-120:])
+    """, "--exec", "/usr/bin/open", "--net-any",
+        until=lambda done: any(i["target"].startswith("opening an app") for i in report(done)["blocked"]))
+    assert "open exited 1" in done.stdout and "error -54" in done.stdout
+    item = next(i for i in report(done)["blocked"] if i["target"].startswith("opening an app"))
+    assert item["kind"] == "exec" and item["allow"] is None
+
+
 @here
 def test_a_credential_is_named_and_never_suggested(tmp_path):
     home = tmp_path / "home"

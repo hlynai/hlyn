@@ -608,6 +608,18 @@ def test_a_sandbox_report_parses():
     assert found == Denial("read", "/Users/k/a b.txt", "file-read-data", "python3", 4211, 1, "kernel")
 
 
+def test_opening_an_app_or_url_is_named_and_never_suggested(tmp_path):
+    """Seatbelt's `lsopen` (macOS `open`, LaunchServices): no field allows it,
+    so the report says what it was and what to do instead of counting it as
+    plumbing."""
+    found = oslog.parse(event(f"Sandbox: open(12) deny(1) lsopen\n{TAG}"), TAG)
+    entry = book(tmp_path).add(found)
+    print(found, "\n", entry)
+    assert (found.kind, found.op) == ("system", "lsopen")
+    assert entry.target == "opening an app or URL (open, LaunchServices)" and entry.allow is None
+    assert "Open it yourself, outside hlyn" in entry.note
+
+
 def test_resolved_system_paths_are_shown_as_typed():
     found = oslog.parse(event(f"Sandbox: cat(1) deny(1) file-read-data /private/etc/hosts\n{TAG}"), TAG)
     assert found.target == "/etc/hosts"
