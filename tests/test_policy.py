@@ -218,17 +218,24 @@ def test_net_refuses_ports_and_hosts_together():
     assert "restrict nothing" in str(caught.value)
 
 
-def test_a_host_policy_is_refused_before_sealing():
-    # Hosts parse, but nothing enforces them yet: sealing must refuse rather
-    # than treat them as ports or as an open network.
+def test_a_host_policy_is_refused_where_the_backend_does_not_enforce_hosts(monkeypatch):
+    # Sealing must refuse rather than treat hosts as ports or as an open
+    # network, on any backend that doesn't enforce them (Linux until design
+    # phase 4). A stand-in backend makes this run on every platform.
+    import types
+
     from hlyn import jail
 
+    linux = types.SimpleNamespace(HOSTS=False, UNBUILT="host names in net aren't enforced on Linux yet")
+    monkeypatch.setattr(jail, "back", lambda: linux)
     with pytest.raises(Unsupported) as caught:
         jail.unbuilt(Policy(net=["api.openai.com"]))
     print(caught.value)
-    assert "api.openai.com:443" in str(caught.value)
+    assert "api.openai.com:443" in str(caught.value) and "aren't enforced on Linux yet" in str(caught.value)
     assert "--net 443" in str(caught.value)
     jail.unbuilt(Policy(net=[443]))  # ports are unaffected
+    monkeypatch.setattr(jail, "back", lambda: types.SimpleNamespace(HOSTS=True))
+    jail.unbuilt(Policy(net=["api.openai.com"]))  # a backend that enforces them lets them through
 
 
 def test_net_rejects_impossible_ports():

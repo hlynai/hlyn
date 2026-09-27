@@ -12,14 +12,15 @@ pretends to restore anything on exit. The three entry points differ only in
 
 from __future__ import annotations
 
+import contextlib
 import os
 import pickle
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from types import ModuleType
-from typing import Any
+from typing import Any, NoReturn
 
 from . import log
 from .error import Failed, Invalid, Sealed, Unsupported
@@ -141,28 +142,113 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
         )
     plan = _plan(policy, edits)
     unbuilt(plan)
-    return _seal(plan, found=_warn(plan))
+    found = _warn(plan)
+    if not plan.hosts():
+        return _seal(plan, found=found)
+
+    # Host mode (DESIGN-host-allowlisting.md 5.2, 5.8): a proxy started now,
+    # before the seal, and held alive by this process for the rest of its
+    # life -- the lifetime pipe survives exec too.
+    from . import route
+
+    open_ = route.sockets()
+    if open_:
+        raise Unsupported(
+            f"{len(open_)} network connection{'s are' if len(open_) > 1 else ' is'} already open "
+            f"({route.describe(open_)}). {'They' if len(open_) > 1 else 'It'} would keep working "
+            f"after the seal, whatever its destination. Close them first (for example "
+            f"session.close()), or call hlyn.on() before creating network clients."
+        )
+    with _denials(plan) as fd:
+        way = route.start(plan.hosts(), log=fd, inherit=True)
+    try:
+        return _seal(plan, _proxied(_port(way)), found=found, proxy=(_port(way), way.pid))
+    except BaseException:
+        way.close()
+        raise
 
 
 def unbuilt(plan: Policy) -> None:
-    """Refuse to seal a policy that names hosts, until host mode is enforced.
+    """Refuse to seal a policy that names hosts where host mode isn't enforced.
 
-    `net=["api.openai.com"]` parses, shows and saves, but nothing yet makes it
-    hold: the proxy and the connection gate (DESIGN-host-allowlisting.md
-    sections 5.3-5.5) are still being built. Sealing with it quietly treated
-    as ports, or as open, would be the one thing a containment layer must
-    never do, so every entry point refuses here first, before anything is
-    changed.
+    macOS enforces it (the proxy behind a Seatbelt profile that allows only
+    the proxy's port, DESIGN-host-allowlisting.md 5.4). Linux doesn't yet:
+    the connection gate that makes the proxy the only way out there is
+    phase 4. Sealing with hosts quietly treated as ports, or as open, would
+    be the one thing a containment layer must never do, so every entry point
+    refuses here first, before anything is changed.
     """
     named = plan.hosts()
-    if named:
+    if named and not getattr(back(), "HOSTS", False):
         shown = ", ".join(str(rule) for rule in named[:3]) + (" ..." if len(named) > 3 else "")
+        why = getattr(back(), "UNBUILT", "this platform doesn't enforce host names in net")
         raise Unsupported(
-            f"net names hosts ({shown}), and host allowlisting isn't enforced yet: the proxy "
-            f"and connection gate that make it hold are still being built. Nothing was "
-            f"sealed. For now use ports (--net 443, or net=[443]), which allow every host "
-            f"on them, or net=False."
+            f"net names hosts ({shown}), and {why}. Nothing was sealed. For now use ports "
+            f"(--net 443, or net=[443]), which allow every host on them, or net=False."
         )
+
+
+@contextlib.contextmanager
+def _denials(plan: Policy) -> Iterator[int | None]:
+    """The descriptor host mode's helpers write `deny` records to (4.6), for
+    as long as it takes to hand them their own copy.
+
+    None when there is nowhere they can write: the log is off, or it is an
+    in-memory stream another process can't reach (warned about once). A log
+    path is opened here in append mode, so records from several processes
+    never interleave within a line, and closed again on the way out.
+    """
+    if plan.log is False:
+        yield None
+        return
+    if isinstance(plan.log, str):
+        opened = os.open(plan.log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        try:
+            yield opened
+        finally:
+            os.close(opened)
+        return
+    fd: int | None
+    try:
+        fd = log.fileno()
+    except ValueError:
+        global _memory
+        if not _memory:
+            import warnings
+
+            warnings.warn(
+                "hlyn: network denials can't reach an in-memory log; pass a file path or "
+                "stderr to hlyn.log.sink()", RuntimeWarning, stacklevel=4,
+            )
+            _memory = True
+        fd = None
+    yield fd
+
+
+# Whether the in-memory-log warning has been given in this process.
+_memory = False
+
+
+def _port(way: object) -> int:
+    """A started proxy's port. A proxy started for one run always has one."""
+    port = getattr(way, "port", None)
+    if not isinstance(port, int):
+        raise Failed("the proxy started without a port. Nothing was sealed.")
+    return port
+
+
+def _proxied(port: int) -> Extra:
+    """The environment hook that points the agent at the proxy (5.7)."""
+    from . import route
+
+    return lambda keep: route.env(port, keep)
+
+
+def _both(one: Extra | None, two: Extra) -> Extra:
+    """Two environment hooks, applied in order."""
+    if one is None:
+        return two
+    return lambda keep: {**one(keep), **two(keep)}
 
 
 def _warn(plan: Policy) -> list[str]:
@@ -177,9 +263,8 @@ def _warn(plan: Policy) -> list[str]:
     """
     import warnings
 
-    from .secret import Exposed, exposed, warning
-
     from .hosts import Reach, warn
+    from .secret import Exposed, exposed, warning
 
     for rule in plan.hosts():
         said = warn(rule)
@@ -192,13 +277,21 @@ def _warn(plan: Policy) -> list[str]:
 
 
 def _seal(
-    plan: Policy, extra: Extra | None = None, tag: str | None = None, found: list[str] | None = None
+    plan: Policy,
+    extra: Extra | None = None,
+    tag: str | None = None,
+    found: list[str] | None = None,
+    proxy: tuple[int, int] | None = None,
+    closed: int = 0,
 ) -> dict[str, object]:
     """`on`, for callers that also shape the environment or tag the seal.
 
     `extra` returns variables to add after the environment is scrubbed, given
     what the scrub kept; `tag` marks the backend's refusal reports. Both exist
     for `hlyn run`, which uses them to hear what the command is refused.
+    `proxy` is `(port, pid)` of the proxy a host policy goes through, and
+    `closed` how many inherited sockets were put out of use (5.2); both go
+    into the seal record.
     """
     global _sealed
     if _sealed:
@@ -236,12 +329,19 @@ def _seal(
     if found:
         log.emit("exposed", paths=found[:20])
 
-    level = back().load(plan, tag) if tag else back().load(plan)
+    more: dict[str, object] = {}
+    if proxy is not None:
+        port, pid = proxy
+        level = back().load(plan, tag, port)
+        # `net` is in the record already, as the rules' text.
+        more = {"proxy": f"127.0.0.1:{port}", "helpers": [pid], "closed": closed}
+    else:
+        level = back().load(plan, tag) if tag else back().load(plan)
 
     _sealed = True
-    log.seal(plan, back().__name__, level, box)
+    log.seal(plan, back().__name__, level, box, **more)
 
-    return {"policy": plan, "tmp": box, "level": level, "backend": back().__name__}
+    return {"policy": plan, "tmp": box, "level": level, "backend": back().__name__, **more}
 
 
 def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
@@ -257,38 +357,51 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     that needs a lock another thread was holding waits forever. The libraries
     are loaded in the parent below for exactly that reason -- `dlopen` in the
     child would take the loader lock, which is the one most likely to be held.
+
+    When `net` names hosts, the child forks once more (DESIGN-host-allowlisting.md
+    5.2): the grandchild is sealed and runs `fn`, and the child becomes its
+    gate. The proxy is shared by every call with the same hosts, for the life
+    of this process, and each call gets its own port on it (5.8).
     """
     plan = _plan(policy, edits)
     unbuilt(plan)  # in the parent, so the refusal is an exception, not a dead child
     # Before the fork, never after: see the note above.
     back().ready()
-    read, write = os.pipe()
+    named = plan.hosts()
+    share = None
+    port = 0
+    found: list[str] = []
+    if named:
+        # Imported here, before the fork: the child must not take the
+        # import lock another thread might have been holding.
+        from . import gate, route
 
-    kid = os.fork()
-    if kid == 0:  # child
-        os.close(read)
-        code = 0
-        try:
-            on(plan)
-            out = ("ok", fn())
-        except BaseException as exc:  # noqa: BLE001 - report it rather than die silently
-            out, code = ("no", exc), 1
-        try:
-            body = pickle.dumps(out)
-        except Exception:  # noqa: BLE001 - any pickling failure, not a known set
-            # A result or exception that will not pickle must not look like a
-            # crash, which is what an empty pipe would mean.
-            body = pickle.dumps(("no", Failed(f"the result could not be returned: {out[0]}")))
-        try:
-            with os.fdopen(write, "wb") as fh:
-                fh.write(body)
-        finally:
-            os._exit(code)
+        found = _warn(plan)
+        share = route.shared(named)
+        with _denials(plan) as fd:
+            port = share.lease(fd)
+    try:
+        read, write = os.pipe()
+        kid = os.fork()
+        if kid == 0:  # child
+            os.close(read)
+            if share is None:
+                _child(fn, lambda: on(plan), write)
+            pid = share.route.pid
 
-    os.close(write)
-    with os.fdopen(read, "rb") as fh:
-        body = fh.read()
-    _, status = os.waitpid(kid, 0)
+            def sealed() -> None:
+                closed = route.neutralise(route.sockets())
+                _seal(plan, _proxied(port), found=found, proxy=(port, pid), closed=closed)
+
+            gate.become(lambda: _child(fn, sealed, write), forward=False, isolate=False)
+
+        os.close(write)
+        with os.fdopen(read, "rb") as fh:
+            body = fh.read()
+        _, status = os.waitpid(kid, 0)
+    finally:
+        if share is not None:
+            share.release(port)
 
     if not body:
         if os.WIFSIGNALED(status):
@@ -308,26 +421,67 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     raise value
 
 
+def _child(fn: Callable[[], Any], seal: Callable[[], object], write: int) -> NoReturn:
+    """In the confined child: seal, run `fn`, send back its result or its
+    exception, and exit."""
+    code = 0
+    try:
+        seal()
+        out: tuple[str, Any] = ("ok", fn())
+    except BaseException as exc:  # noqa: BLE001 - report it rather than die silently
+        out, code = ("no", exc), 1
+    try:
+        body = pickle.dumps(out)
+    except Exception:  # noqa: BLE001 - any pickling failure, not a known set
+        # A result or exception that will not pickle must not look like a
+        # crash, which is what an empty pipe would mean.
+        body = pickle.dumps(("no", Failed(f"the result could not be returned: {out[0]}")))
+    try:
+        with os.fdopen(write, "wb") as fh:
+            fh.write(body)
+    finally:
+        os._exit(code)
+
+
 def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
     """Confine this process, then become `cmd`. Does not return.
 
     Used by the command line wrapper. The program being launched is granted
     execute on itself: asking to run something and forbidding it in the same
     breath is a contradiction, not a policy.
+
+    When `net` names hosts (DESIGN-host-allowlisting.md 5.2), this process
+    forks once: the child is sealed and becomes `cmd`, and this process
+    becomes its gate -- it passes on every signal it is sent and exits with
+    `cmd`'s status, as the container inits `tini` and `dumb-init` do. From
+    outside it still "becomes `cmd`": same PID, same signals, same exit
+    status. A proxy runs beside it for as long as `cmd` and what it starts.
     """
     plan = _plan(policy, edits)
     unbuilt(plan)
-    _spawn(cmd, plan, found=_warn(plan))
+    found = _warn(plan)
+    if not plan.hosts():
+        _spawn(cmd, plan, found=found)
+        return
+
+    from . import gate, route
+
+    run, argv, plan = _prepare(cmd, plan)  # in this process, so a bad command is an exception
+    with _denials(plan) as fd:
+        way = route.start(plan.hosts(), log=fd, inherit=True)
+    port = _port(way)
+
+    def body() -> None:
+        closed = route.neutralise(route.sockets())
+        _seal(plan, _proxied(port), found=found, proxy=(port, way.pid), closed=closed)
+        os.execv(run, argv)  # noqa: S606 - see _spawn
+
+    gate.become(body, forward=True, isolate=True, close=[way.life])
 
 
-def _spawn(
-    cmd: Sequence[str] | str,
-    plan: Policy,
-    extra: Extra | None = None,
-    tag: str | None = None,
-    found: list[str] | None = None,
-) -> None:
-    """`spawn`, with the same additions as `_seal`."""
+def _prepare(cmd: Sequence[str] | str, plan: Policy) -> tuple[str, list[str], Policy]:
+    """What `spawn` executes, with what arguments, and the policy widened to
+    let it run. Raises `Invalid` for a command that can't be found."""
     if isinstance(cmd, str):
         cmd = [cmd]
     if not cmd:
@@ -351,11 +505,27 @@ def _spawn(
 
     plan, run = interpreter.grants(interpreter.ask(cmd[0], where), plan, where)
     if run == where:
-        run, argv = named, list(cmd)
-    else:
-        argv = [run, *cmd[1:]]  # a launcher, followed: see interpreter.py
+        return named, list(cmd), plan
+    return run, [run, *cmd[1:]], plan  # a launcher, followed: see interpreter.py
 
-    _seal(plan, extra, tag, found)
+
+def _spawn(
+    cmd: Sequence[str] | str,
+    plan: Policy,
+    extra: Extra | None = None,
+    tag: str | None = None,
+    found: list[str] | None = None,
+    proxy: tuple[int, int] | None = None,
+) -> None:
+    """`spawn`, with the same additions as `_seal`. In host mode (`proxy`
+    given) the caller has already arranged the gate; this is the child."""
+    run, argv, plan = _prepare(cmd, plan)
+    closed = 0
+    if proxy is not None:
+        from . import route
+
+        closed = route.neutralise(route.sockets())
+    _seal(plan, extra, tag, found, proxy=proxy, closed=closed)
     # No shell, deliberately: the command is executed as given, so nothing in
     # it is ever interpreted as shell syntax.
     os.execv(run, argv)  # noqa: S606

@@ -16,7 +16,9 @@ from ..error import Unsupported
 from ..policy import Policy
 from ..report import Quiet
 
-__all__ = ["listen", "load", "probe", "ready", "seal"]
+__all__ = ["HOSTS", "listen", "load", "probe", "ready", "seal"]
+
+HOSTS = False
 
 
 def ready() -> bool:

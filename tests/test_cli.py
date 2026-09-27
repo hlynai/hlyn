@@ -42,7 +42,7 @@ def _listening():
         while not stop.is_set():
             try:
                 conn, _ = srv.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 return
@@ -242,16 +242,22 @@ def test_a_host_is_shown_in_canonical_form():
     assert json.loads(done.stdout)["net"] == ["api.openai.com:443", "localhost:5432"]
 
 
-def test_running_with_a_host_is_refused_until_it_is_enforced():
-    # Design phase 1 parses hosts; the proxy and gate that enforce them come
-    # later. Until then a run must be refused, never quietly treated as ports.
-    done = hlyn("run", "--net", "api.openai.com", "--", sys.executable, "-c", "print('RAN')")
+def test_running_with_a_host_runs_where_hosts_are_enforced_and_is_refused_elsewhere():
+    # macOS enforces hosts (the proxy behind Seatbelt); Linux does from design
+    # phase 4. Until then a Linux run must be refused, never quietly treated
+    # as ports. The macOS run itself is tested in test_hostmode.py.
+    from hlyn.jail import back
+
+    done = hlyn("run", "--no-report", "--net", "api.openai.com", "--", sys.executable, "-c", "print('RAN')")
     print("run --net api.openai.com:", done.returncode, done.stdout, done.stderr)
+    assert "invalid int" not in done.stderr
+    if getattr(back(), "HOSTS", False):
+        assert done.returncode == 0 and "RAN" in done.stdout
+        return
     assert done.returncode == 2
     assert "RAN" not in done.stdout
-    assert "isn't enforced yet" in done.stderr
+    assert "aren't enforced on Linux yet" in done.stderr or "doesn't enforce host names" in done.stderr
     assert "--net 443" in done.stderr
-    assert "invalid int" not in done.stderr
 
 
 def test_a_malformed_host_names_the_fix():

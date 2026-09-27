@@ -1,0 +1,149 @@
+"""The gate: the sealed program's parent (DESIGN-host-allowlisting.md 5.2).
+
+`gate.become` forks; the child runs the command, the parent turns into the
+gate. These tests check what makes that layout invisible from outside, the
+`tini` pattern: the original PID stays the command's, every signal sent to it
+reaches the command, the command's exit code or death by signal comes back
+unchanged, the command gets its own process group, and stopping it stops the
+gate. Nothing here seals anything, so it runs on every platform. Each test
+prints what it observed.
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+import subprocess
+import sys
+import textwrap
+import time
+
+import pytest
+from conftest import SRC
+
+BOOT = textwrap.dedent(f"""
+    import os, sys
+    sys.path.insert(0, {SRC!r})
+    from hlyn import gate
+    cmd = sys.argv[2:]
+    print("original pid", os.getpid(), flush=True)
+    relay = sys.argv[1] == "forward"
+    gate.become(lambda: os.execv(cmd[0], cmd), forward=relay, isolate=relay)
+""")
+
+
+def start(mode: str, *cmd: str) -> subprocess.Popen[str]:
+    return subprocess.Popen([sys.executable, "-c", BOOT, mode, *cmd], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True)
+
+
+def finish(process: subprocess.Popen[str], timeout: float = 20) -> tuple[int, str, str]:
+    out, err = process.communicate(timeout=timeout)
+    print(f"returncode {process.returncode}\nstdout:\n{out}stderr:\n{err}")
+    return process.returncode, out, err
+
+
+def child_of(pid: int, timeout: float = 10) -> int:
+    """The pid of `pid`'s child, once it exists."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        found = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True,
+                               check=False).stdout.split()
+        if found:
+            return int(found[0])
+        time.sleep(0.05)
+    raise AssertionError(f"{pid} never had a child")
+
+
+def state(pid: int) -> str:
+    done = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
+    return done.stdout.strip()
+
+
+@pytest.mark.parametrize("code", [0, 7, 255])
+def test_the_exit_code_comes_back_unchanged(code):
+    got, _, _ = finish(start("forward", "/bin/sh", "-c", f"exit {code}"))
+    assert got == code
+
+
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGSEGV, signal.SIGKILL, signal.SIGUSR1])
+def test_a_death_by_signal_comes_back_as_that_signal(number):
+    got, _, _ = finish(start("forward", "/bin/sh", "-c", f"kill -{int(number)} $$"))
+    print(f"wanted -{int(number)} ({number.name})")
+    assert got == -number
+
+
+def test_the_gate_keeps_the_original_pid_and_the_command_is_its_child():
+    process = start("forward", "/bin/sh", "-c", "echo sh $$ parent $PPID; sleep 1")
+    got, out, _ = finish(process)
+    original = int(out.split("original pid ")[1].split()[0])
+    sh, parent = out.split("sh ")[1].split()[0], out.split("parent ")[1].split()[0]
+    assert original == process.pid and int(parent) == process.pid and int(sh) != process.pid and got == 0
+
+
+@pytest.mark.parametrize("number", [
+    signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGUSR1, signal.SIGUSR2,
+])
+def test_a_signal_sent_to_the_original_pid_reaches_the_command(number):
+    name = number.name[3:]
+    process = start("forward", "/bin/sh", "-c",
+                    f"trap 'echo command got {name}; exit 42' {name}; while :; do sleep 0.05; done")
+    child_of(process.pid)
+    time.sleep(0.5)  # the trap is set once "ready" could be printed; give the shell a beat
+    os.kill(process.pid, number)
+    got, out, _ = finish(process)
+    assert f"command got {name}" in out and got == 42
+
+
+def test_the_command_gets_its_own_process_group():
+    process = start("forward", "/bin/sleep", "2")
+    kid = child_of(process.pid)
+    groups = (os.getpgid(process.pid), os.getpgid(kid))
+    print(f"gate {process.pid} in group {groups[0]}; command {kid} in group {groups[1]}")
+    os.kill(process.pid, signal.SIGTERM)
+    finish(process)
+    assert groups[1] == kid and groups[0] != groups[1]
+
+
+def test_stopping_the_command_stops_the_gate_and_continuing_the_gate_continues_both():
+    process = start("forward", "/bin/sh", "-c", "sleep 1; echo woke")
+    kid = child_of(process.pid)
+    os.kill(kid, signal.SIGSTOP)
+    end = time.monotonic() + 5
+    while "T" not in state(process.pid) and time.monotonic() < end:
+        time.sleep(0.05)
+    stopped = (state(process.pid), state(kid))
+    os.kill(process.pid, signal.SIGCONT)
+    got, out, _ = finish(process)
+    print(f"after SIGSTOP to the command: gate {stopped[0]!r}, command {stopped[1]!r}")
+    assert "T" in stopped[0] and "T" in stopped[1]
+    assert "woke" in out and got == 0
+
+
+def test_without_forwarding_the_gate_only_waits_and_reports_the_status():
+    """`hlyn.run(fn)`'s gate: no forwarding, no new group, same status."""
+    got, _, _ = finish(start("wait", "/bin/sh", "-c", "exit 3"))
+    assert got == 3
+    got, _, _ = finish(start("wait", "/bin/sh", "-c", "kill -TERM $$"))
+    assert got == -signal.SIGTERM
+
+
+def test_a_signal_sent_while_the_gate_starts_never_orphans_the_command():
+    """Signals are blocked across the fork and the gate's exec, then handed to
+    its handlers. So a TERM sent the moment the command exists -- while the
+    gate is still starting its interpreter -- reaches the command, and the
+    gate never dies leaving the command running without it."""
+    for attempt in range(5):
+        process = start("forward", "/bin/sh", "-c", "trap 'echo got TERM; exit 9' TERM; sleep 5 & wait")
+        kid = child_of(process.pid)
+        os.kill(process.pid, signal.SIGTERM)
+        got, _, _ = finish(process)
+        try:
+            os.kill(kid, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        print(f"attempt {attempt}: gate status {got}, command {kid} still running: {alive}")
+        # 9: the trap ran. -SIGTERM: the TERM reached the shell before it set
+        # the trap, so it died of it and the gate reproduced that.
+        assert got in (9, -signal.SIGTERM) and not alive

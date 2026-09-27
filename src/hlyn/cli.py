@@ -18,7 +18,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NoReturn
 
 from . import __version__, jail, spec
 from .error import Error
@@ -49,7 +49,7 @@ def build() -> argparse.ArgumentParser:
         # No `type=int`: a host is as valid here as a port.
         p.add_argument("--net", action="append", metavar="PORT|HOST", default=[],
                        help="reachable TCP port (UDP stays open), or host such as "
-                            "api.openai.com (not enforced yet); repeatable")
+                            "api.openai.com (macOS; Linux soon); repeatable")
         p.add_argument("--net-any", action="store_true", help="allow all network access")
         p.add_argument("--env", action="append", metavar="NAME", default=[],
                        help="environment variable to keep (repeatable)")
@@ -284,6 +284,7 @@ def _machine(out: dict[str, object]) -> str:
     rows = [
         ("files and programs", out.get("enforce")),
         ("network ports", out.get("ports")),
+        ("host names in net (api.openai.com)", out.get("hosts")),
         ("isolation between agents on this machine", out.get("scope")),
         ("listing what was blocked, after hlyn run", out.get("report")),
     ]
@@ -368,6 +369,26 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
 
     # SIGCHLD wakes the wait below the moment the command exits, instead of
     # on the next poll. Set up before the fork so an instant exit is not missed.
+    # Host mode (DESIGN-host-allowlisting.md 5.2, 5.8): the proxy starts
+    # here, before the fork, and lives as long as the command and what it
+    # starts; its denials go to this run's log.
+    way = None
+    heard = -1  # the proxy's denials, one JSON line each, for the report
+    if plan.hosts():
+        from . import gate, route
+
+        heard, said = os.pipe()
+        try:
+            with jail._denials(plan) as fd:
+                way = route.start(plan.hosts(), log=fd, events=said, inherit=True)
+        except BaseException:
+            os.close(heard)
+            raise
+        finally:
+            os.close(said)
+        os.set_blocking(heard, False)
+    proxied = b""
+
     wake_r, wake_w = os.pipe()
     for fd in (wake_r, wake_w):
         os.set_blocking(fd, False)
@@ -380,20 +401,34 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
         if pid == 0:
             signal.set_wakeup_fd(-1)
             signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-            for fd in (r, wake_r, wake_w):
+            for fd in (r, wake_r, wake_w, *([heard] if heard >= 0 else [])):
                 os.close(fd)
-            try:
-                jail._spawn(cmd, grants, ear.env, ear.tag)
-            except Error as exc:
-                print(f"hlyn: {exc}", file=sys.stderr)
-            except BaseException:  # noqa: BLE001 - anything at all, reported, then the child exits
-                import traceback
 
-                traceback.print_exc()
-            os.write(w, b"x")
-            os._exit(1)
+            def start() -> NoReturn:
+                try:
+                    if way is None:
+                        jail._spawn(cmd, grants, ear.env, ear.tag)
+                    else:
+                        port = jail._port(way)
+                        jail._spawn(cmd, grants, jail._both(ear.env, jail._proxied(port)), ear.tag,
+                                    proxy=(port, way.pid))
+                except Error as exc:
+                    print(f"hlyn: {exc}", file=sys.stderr)
+                except BaseException:  # noqa: BLE001 - anything at all, reported, then the child exits
+                    import traceback
+
+                    traceback.print_exc()
+                os.write(w, b"x")
+                os._exit(1)
+
+            if way is None:
+                start()
+            # This child becomes the gate for the command: CLI -> gate -> agent.
+            gate.become(start, forward=True, isolate=True, close=[way.life])
 
         os.close(w)
+        if way is not None:
+            way.close()  # the command holds the proxy now
         # Ctrl-C reaches the child through the terminal; this process only
         # waits. A signal sent to this process by pid is passed on, so killing
         # hlyn kills the command it launched.
@@ -405,11 +440,13 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
         failed = False
         status = None
         while status is None:
-            watch = [wake_r] + ([r] if r >= 0 else [])
-            heard = ear.fileno()
-            if heard is not None:
-                watch.append(heard)
+            watch = [wake_r] + ([r] if r >= 0 else []) + ([heard] if heard >= 0 else [])
+            listening = ear.fileno()
+            if listening is not None:
+                watch.append(listening)
             ready, _, _ = select.select(watch, [], [], 0.5)
+            if heard >= 0 and heard in ready:
+                proxied = _proxied(heard, proxied, book)
             if wake_r in ready:
                 with contextlib.suppress(OSError):
                     os.read(wake_r, 512)
@@ -418,15 +455,25 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
                 os.close(r)
                 r = -1
             _hear(ear, book)
-            done, found = os.waitpid(pid, os.WNOHANG)
-            if done:
+            done, found = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+            if done and os.WIFSTOPPED(found):
+                # The command was stopped (Ctrl-Z) and its gate with it: stop
+                # too, so the shell sees the job stop, then wake the gate,
+                # which hands the command back its terminal.
+                os.kill(os.getpid(), signal.SIGSTOP)
+                os.kill(pid, signal.SIGCONT)
+            elif done:
                 status = found
         for denial in ear.finish():
             _file(book, denial)
+        if heard >= 0:
+            _proxied(heard, proxied, book)
         return failed, status
     finally:
         if r >= 0:
             os.close(r)
+        if heard >= 0:
+            os.close(heard)
         signal.set_wakeup_fd(old_wake)
         signal.signal(signal.SIGCHLD, old_chld)
         for fd in (wake_r, wake_w):
@@ -515,6 +562,28 @@ def _deaf(ear: Any, cmd: list[str]) -> str | None:
     if where and preload.static(where):
         return f"{os.path.basename(cmd[0])} is statically linked, so hlyn cannot see inside it"
     return None
+
+
+def _proxied(fd: int, rest: bytes, book: Any) -> bytes:
+    """Add the proxy's denials waiting on `fd` to the report; return any
+    partial line. Not logged again here: the proxy logged each one itself.
+    Lines that aren't the proxy's JSON are dropped."""
+    from .report import Denial
+
+    data = rest
+    with contextlib.suppress(BlockingIOError):
+        while chunk := os.read(fd, 65536):
+            data += chunk
+    *lines, rest = data.split(b"\n")
+    for line in lines:
+        try:
+            event = json.loads(line)
+            denial = Denial("net", str(event["target"]), op=str(event["why"]), source="proxy",
+                            allow=str(event.get("allow") or ""))
+        except (ValueError, KeyError, TypeError):
+            continue
+        book.add(denial)
+    return rest[-4096:]
 
 
 def _hear(ear: Any, book: Any) -> None:
@@ -606,6 +675,14 @@ def _run(argv: Sequence[str] | None = None) -> int:
             "env": "all" if p.env is True else sorted(p.keep().keys()),
             "tmp": p.tmp,
         }
+        if p.hosts():
+            # 4.7: where the agent's traffic goes, and what points it there.
+            from . import route
+
+            resolved["proxy"] = "127.0.0.1, a port chosen for each run"
+            added = sorted(route.env(0))
+            if isinstance(resolved["env"], list):
+                resolved["env"] = sorted({*resolved["env"], *added})
         sys.stdout.write(json.dumps(resolved, indent=2) + "\n" if args.json else _toml(resolved))
         return 0
 

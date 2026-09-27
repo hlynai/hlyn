@@ -368,10 +368,11 @@ def test_the_backend_is_found_before_the_environment_is_scrubbed():
     assert "load saw None" in done.stdout, done.stdout + done.stderr
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="macOS enforces hosts: see test_hostmode.py")
 def test_every_entry_point_refuses_a_host_policy_and_leaves_the_process_unsealed():
-    # Until host mode is enforced (design phases 2-4), naming a host must stop
-    # every entry point before anything is changed: no seal, no scrubbed
-    # environment, no child that ran.
+    # Where host mode isn't enforced yet (Linux until design phase 4), naming
+    # a host must stop every entry point before anything is changed: no seal,
+    # no scrubbed environment, no child that ran.
     done = boot(
         """
         import os, hlyn

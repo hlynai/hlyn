@@ -33,6 +33,13 @@ def ready() -> bool:
     return landlock.ready() and seccomp.ready()
 
 
+# Whether this backend enforces host entries in `net`. Not yet: the connection
+# gate that makes the proxy the only way out on Linux is design phase 4.
+HOSTS = False
+UNBUILT = ("host names in net aren't enforced on Linux yet: the connection gate that makes the "
+           "proxy the only way out (design phase 4) is still being built")
+
+
 def probe() -> dict[str, object]:
     """What this machine can actually enforce, without enforcing anything.
 
@@ -56,6 +63,7 @@ def probe() -> dict[str, object]:
         "enforce": ok and filter,
         "scope": ok,  # signals and abstract sockets between agents
         "ports": ok,  # network rules at all
+        "hosts": HOSTS and ok,
         # Whether `hlyn run` can list what was blocked: needs the preloaded
         # reporting library. Not part of `enforce` -- the boundary holds
         # either way; only the explanation is missing.

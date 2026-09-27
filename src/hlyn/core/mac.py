@@ -23,6 +23,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+import re
 import sys
 from collections.abc import Iterable
 
@@ -30,7 +31,11 @@ from ..error import Failed, Invalid, Unsupported
 from ..policy import Policy
 from ..report import SERVICES, Listener
 
-__all__ = ["listen", "load", "probe", "profile", "ready", "seal"]
+__all__ = ["HOSTS", "hosts", "listen", "load", "probe", "profile", "ready", "seal"]
+
+# Whether this backend enforces host entries in `net` (DESIGN-host-allowlisting.md
+# 5.4): Seatbelt allows only the proxy's port, and the proxy checks the rest.
+HOSTS = True
 
 
 # The interpreter cannot start without these. They grant no access to user
@@ -61,6 +66,45 @@ BASE: tuple[str, ...] = (
 
 # The system resolver's socket. Every name lookup on macOS goes through it.
 RESOLVER = "/private/var/run/mDNSResponder"
+
+# Host mode's Mach allowlist (DESIGN-host-allowlisting.md 5.4), in place of
+# BASE's blanket `(allow mach-lookup)`. Every entry is measured, and checked
+# for work done on the caller's behalf (tools/hostlab/hostmode.py; FINDINGS.md,
+# "macOS host mode"). Python, curl, git and node fetch through the proxy with
+# none at all.
+#   - opendirectoryd.libinfo answers user and group lookups. Without it
+#     `pwd.getpwuid()` fails, which breaks real programs. It resolves no host
+#     names (those still go to the refused mDNSResponder socket; measured).
+#     Residual: on a Mac bound to a network directory, a user lookup reaches
+#     that directory's server.
+#   - cfprefsd serves preferences. Without it CoreFoundation reads the plist
+#     files itself, and every run reports those reads. It checks the caller's
+#     sandbox for both reading and writing (measured: `defaults read` and
+#     `defaults write` of a domain outside the grants both fail under the
+#     seal), and does no network work.
+MACH: tuple[str, ...] = (
+    "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.cfprefsd.daemon",
+    "com.apple.cfprefsd.agent",
+)
+
+# Unix sockets never reachable in host mode, whatever folders are granted
+# (5.3, 5.6): the program behind each acts for its caller, on the network or
+# the machine. Written as regexes over the resolved path, and placed after
+# every allow so they win.
+REFUSED: tuple[str, ...] = (
+    # The system resolver: any name, attacker-chosen ones included, and the
+    # answer carries data out one DNS label at a time.
+    f"^{re.escape(RESOLVER)}$",
+    # Container runtimes (docker.sock, docker.raw.sock, docker-cli.sock,
+    # containerd.sock, podman.sock, crio.sock): an agent that reaches one
+    # controls the machine.
+    r"/(docker|containerd|podman|crio)[^/]*\.sock$",
+    # Docker Desktop, Colima, OrbStack, Lima and Rancher Desktop keep their
+    # API sockets in these folders under other names too.
+    r"^/Users/[^/]+/Library/Containers/com\.docker\.docker/",
+    r"^/Users/[^/]+/\.(colima|orbstack|lima|rd)/",
+)
 
 
 _lib: ctypes.CDLL | None = None
@@ -113,6 +157,9 @@ def probe() -> dict[str, object]:
         # left for someone to discover.
         "scope": False,
         "ports": ready(),
+        # Host names in `net`: the proxy (5.5) behind a profile that allows
+        # only its port (5.4).
+        "hosts": ready(),
         # Whether `hlyn run` can list what was blocked. Read from the system
         # log, so it needs nothing built or installed.
         "report": os.access("/usr/bin/log", os.X_OK),
@@ -164,7 +211,7 @@ def where(paths: Iterable[str], refused: list[str] | None = None) -> list[str]:
     return out
 
 
-def profile(policy: Policy, tag: str | None = None) -> str:
+def profile(policy: Policy, tag: str | None = None, port: int | None = None) -> str:
     """The SBPL text enforcing `policy`.
 
     Returned as a string so it can be inspected and tested without applying it.
@@ -174,13 +221,19 @@ def profile(policy: Policy, tag: str | None = None) -> str:
     `tag` is appended by the kernel to every refusal it reports for this
     process and its children, which is how `hlyn run` picks this run's
     refusals out of the system log. It changes nothing about what is allowed.
+
+    `port` is the local proxy's port, which a policy naming hosts requires:
+    see `hosts` for what that mode grants.
     """
-    if policy.hosts():
-        # Host entries aren't ports: never let them reach a rule that reads
-        # them as such. jail.unbuilt refuses first, with the user's message.
-        raise Unsupported("host entries in net are not enforced by this backend yet.")
+    named = bool(policy.hosts())
+    if named and port is None:
+        raise Invalid("net names hosts, so the profile needs the proxy's port. Start it with route.start().")
     deny = f"(deny default (with message {quote(tag)}))" if tag else "(deny default)"
-    lines = ["(version 1)", deny, *BASE]
+    base = BASE
+    if named:
+        base = tuple(line for line in BASE if line != "(allow mach-lookup)")
+        base += tuple(f'(allow mach-lookup (global-name "{name}"))' for name in MACH)
+    lines = ["(version 1)", deny, *base]
     refused: list[str] = []
 
     reads = policy.reads()
@@ -214,7 +267,9 @@ def profile(policy: Policy, tag: str | None = None) -> str:
             + ". Create them, or remove them from the policy."
         )
 
-    if policy.net is True:
+    if named and port is not None:
+        lines.extend(hosts(policy, port, tag))
+    elif policy.net is True:
         lines.append("(allow network*)")
     elif isinstance(policy.net, tuple) and policy.net:
         # Outbound only, matching the Linux backend: binding a port accepts
@@ -233,7 +288,9 @@ def profile(policy: Policy, tag: str | None = None) -> str:
         # closes it (DESIGN-host-allowlisting.md 5.4, 5.6).
         lines.append(f'(allow network-outbound (remote unix-socket (path-literal "{RESOLVER}")))')
 
-    if not policy.net:
+    if not policy.net or named:
+        # Host mode refuses them too: its allowlist above leaves them out,
+        # and this says so in the log, so the report can explain (5.4).
         # net=False (or an empty port list, which forbids the same thing):
         # HTTPS is impossible either way, so refusing these two services costs
         # nothing while closing two routes past the sandbox that the blanket
@@ -264,19 +321,49 @@ def profile(policy: Policy, tag: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def hosts(policy: Policy, port: int, tag: str | None = None) -> list[str]:
+    """The network rules of host mode (DESIGN-host-allowlisting.md 5.4).
+
+    TCP goes to the proxy's port and to each `localhost:PORT` entry, and
+    nowhere else: Seatbelt's host token takes only `*` or `localhost`, so
+    remote address entries are reachable only through the proxy. `localhost`
+    here also matches ::1, ::ffff:127.0.0.1 and this machine's own addresses
+    (measured); the proxy refuses a port something listens on at those.
+
+    Unix sockets need a *write* grant on their folder, since connecting sends
+    data to whatever listens there. `REFUSED` comes last so it wins over
+    those grants. No DNS, no UDP, no bind: nothing else is allowed.
+    """
+    out = [f'(allow network-outbound (remote tcp "localhost:{port}"))']
+    for rule in policy.hosts():
+        if rule.kind == "localhost" and rule.port != port:
+            out.append(f'(allow network-outbound (remote tcp "localhost:{rule.port}"))')
+    writes = policy.writes()
+    if writes is True:
+        out.append("(allow network-outbound (remote unix-socket))")
+    else:
+        for item in where(writes):
+            out.append(f"(allow network-outbound (remote unix-socket {item}))")
+    said = f" (with message {quote(tag)})" if tag else ""
+    for pattern in REFUSED:
+        out.append(f'(deny network-outbound{said} (remote unix-socket (regex #"{pattern}")))')
+    return out
+
+
 # -- applying it ------------------------------------------------------------
 
 
-def load(policy: Policy, tag: str | None = None) -> int:
+def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int:
     """Apply `policy` to the calling process. One-way, and irreversible.
 
-    `tag` marks this process's refusals in the system log; see `profile`.
+    `tag` marks this process's refusals in the system log, and `port` is the
+    proxy's port in host mode; see `profile`.
     """
     if sys.platform != "darwin":
         raise Unsupported("Seatbelt is a macOS facility.")
 
     api = lib()
-    text = profile(policy, tag).encode()
+    text = profile(policy, tag, port).encode()
     err = ctypes.c_char_p()
     rc = api.sandbox_init(text, 0, ctypes.byref(err))
     if rc != 0:

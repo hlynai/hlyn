@@ -47,7 +47,10 @@ from typing import Any, Protocol
 from .policy import Policy, under
 from .secret import credential, secret
 
-__all__ = ["Denial", "Entry", "Listener", "Quiet", "Report", "SERVICES", "credential", "removed", "safe", "secret"]
+__all__ = [
+    "HOSTED", "SERVICES", "WHY", "Denial", "Entry", "Listener", "Quiet", "Report",
+    "credential", "removed", "safe", "secret",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +74,11 @@ class Denial:
     by: str = ""
     pid: int = 0
     count: int = 1
-    source: str = "kernel"  # "kernel": from the OS; "program": from inside the agent
+    # "kernel": from the OS; "program": from inside the agent; "proxy": from
+    # hlyn's proxy (host mode), where `op` is its reason (4.6's `why`) and
+    # `allow` the flag it suggests, checked before use (see `_host`).
+    source: str = "kernel"
+    allow: str = ""
 
 
 class Listener(Protocol):
@@ -150,6 +157,41 @@ SERVICES: dict[str, str] = {
     "com.apple.trustd.agent": "checks certificates, and fetches URLs named inside them",
     "com.apple.dnssd.service": "looks up host names",
 }
+
+# The same services when `net` names hosts, where no flag lifts the refusal
+# (DESIGN-host-allowlisting.md 5.4): what to tell the user instead.
+HOSTED: dict[str, str] = {
+    "com.apple.trustd.agent": (
+        "this program checks certificates through macOS's trustd, which fetches URLs on its "
+        "behalf and would carry data past --net. It can't run with --net hosts on macOS yet"
+    ),
+    "com.apple.dnssd.service": (
+        "this program looked up a host name itself. With --net hosts the proxy looks up names: "
+        "it has to use HTTPS_PROXY"
+    ),
+}
+
+# What each of the proxy's reasons (4.6) means, for the report.
+WHY: dict[str, str] = {
+    "not-listed": "",
+    "private-address": "the name resolves to a private address, never reached by name",
+    "sni-mismatch": "its TLS named a different host than it asked for, so hlyn closed the connection",
+    "dns": "DNS: with --net hosts the proxy looks up names, so programs never need it",
+    "resolve-failed": "the name didn't resolve",
+    "direct": "connected directly instead of through HTTPS_PROXY",
+    "busy": "the proxy was at its limit of connections at once",
+}
+
+def _refused(path: str) -> bool:
+    """Whether host mode refuses a unix socket at `path` whatever the grants
+    (the macOS profile's list, core/mac.py `REFUSED`)."""
+    import re
+
+    from .core.mac import REFUSED
+
+    real = os.path.realpath(path)
+    return any(re.search(pattern, real) for pattern in REFUSED)
+
 
 def removed(plan: Policy, env: Mapping[str, str]) -> list[str]:
     """Environment variables `plan` strips, secret-looking names first.
@@ -330,6 +372,8 @@ class Report:
     def judge(self, denial: Denial) -> Entry | None:
         """What a refusal means and how to allow it, or None to drop it."""
         kind, target = denial.kind, denial.target
+        if denial.source == "proxy":
+            return self._host(denial)
         if kind in ("read", "write", "exec"):
             return self._path(denial)
         if kind == "net" and target.startswith("socket:"):
@@ -338,6 +382,8 @@ class Report:
             return self._local(denial)
         if kind in ("net", "bind"):
             return self._port(denial)
+        if kind == "system" and denial.op == "mach-lookup" and target in HOSTED and self.plan.hosts():
+            return Entry("net", f"macOS service {target}", None, HOSTED[target], source=denial.source)
         if kind == "system" and denial.op == "mach-lookup" and target in SERVICES:
             # Not plumbing: a service that would reach the network for the
             # program. Refused only while the network is off, so naming a
@@ -428,6 +474,27 @@ class Report:
                          quiet=True, source=source)
         return None
 
+    def _host(self, denial: Denial) -> Entry | None:
+        """A block by hlyn's proxy (host mode, 4.6). Its words are checked,
+        not trusted: the proxy reads what the agent sends, so a suggested flag
+        is used only if it parses as an entry and says exactly that."""
+        from .error import Invalid
+        from .hosts import parse
+
+        why = denial.op
+        if why not in WHY:
+            return None
+        target = safe(denial.target)[:300] or "a connection"
+        allow = denial.allow if denial.allow.startswith("--net ") else None
+        if allow is not None:
+            try:
+                allow = allow if parse(allow[len("--net "):]).flag() == allow else None
+            except Invalid:
+                allow = None
+        if why in ("sni-mismatch", "resolve-failed", "busy", "dns"):
+            allow = None  # nothing to add to net would fix these
+        return Entry("net", target, allow, WHY[why], source="proxy")
+
     def _port(self, denial: Denial) -> Entry | None:
         head, _, rest = denial.target.partition(" ")
         if not head.isdigit():
@@ -436,6 +503,16 @@ class Report:
         net = self.plan.net
         anywhere = rest in ("", "*", "0.0.0.0", "::")  # noqa: S104 - read from a report, not bound
         shown = f"TCP {port}" + ("" if anywhere else f" ({safe(rest)})")
+        if self.plan.hosts():
+            # Host mode: a program connected directly rather than through the
+            # proxy. On macOS only localhost entries are reachable that way
+            # (5.4), so that is the only flag that could help.
+            local = rest in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
+            if local:
+                return Entry("net", shown, f"--net localhost:{port}", WHY["direct"], source=denial.source)
+            return Entry("net", shown, None,
+                         WHY["direct"] + "; on macOS a program must use the proxy for anything but "
+                         "localhost entries", source=denial.source)
         if denial.op in ("sendto", "sendmsg"):
             # TCP Fast Open, which hlyn refuses whenever ports are named: Linux
             # before 7.2 lets it past Landlock's port rules, allowed port or not.
@@ -488,6 +565,18 @@ class Report:
             return None
         if self.plan.net is True:
             return None
+        if self.plan.hosts():
+            # Host mode: a unix socket needs a write grant on its folder
+            # (5.3, 5.4), except the always-refused ones.
+            if _refused(where):
+                return Entry("net", f"local socket {safe(tilde(where))}", None,
+                             "never reachable with --net hosts: the program behind it acts for you, "
+                             "on the network or the machine. Use --net-any if you mean it",
+                             source=denial.source)
+            return Entry("net", f"local socket {safe(tilde(where))}",
+                         flag("--write", os.path.dirname(where) or "/"),
+                         "connecting to a local socket needs write access to its folder",
+                         source=denial.source)
         return Entry("net", f"local socket {safe(tilde(where))}", "--net-any",
                      "on macOS only the whole network allows local sockets", source=denial.source)
 
@@ -567,6 +656,11 @@ class Report:
             unique = list(dict.fromkeys(combined))
             if len(unique) > 1:
                 out.append(f"  to allow all of these: {' '.join(unique)}")
+            if any(e.kind == "net" and e.allow and e.allow.startswith("--net ") and not e.allow[6:].isdigit()
+                   for e in items):
+                # 4.6: the agent picks where it tries to go.
+                out.append("  Only allow hosts you recognise: an injected agent chooses where it "
+                           "tries to go.")
         elif code:
             said = f"signal {-code}" if code < 0 else f"code {code}"
             out.append(f"hlyn: the command exited with {said}.")

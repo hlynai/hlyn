@@ -136,6 +136,18 @@ async def talk(port: int, data: bytes, wait: float = 2.0, host: str = "127.0.0.1
     return bytes(got)
 
 
+def arrived(events: list[dict]) -> list[dict]:
+    """`events` with the arrival port checked and taken out: every denial
+    names the proxy port its connection came in on (design 5.8)."""
+    out = []
+    for event in events:
+        rest = dict(event)
+        port = rest.pop("port", None)
+        assert isinstance(port, int) and port > 0, f"no arrival port on {event}"
+        out.append(rest)
+    return out
+
+
 def status(answer: bytes) -> str:
     return answer.split(b"\r\n", 1)[0].decode("ascii", "replace")
 
@@ -439,8 +451,8 @@ def test_row_13_an_unlisted_port_on_a_listed_host_is_403():
         "HTTP/1.1 403 hlyn: api.example.com:8443 is not in --net (allow with --net api.example.com:8443)"
     )
     assert net.dialled == [] and net.looked == []
-    assert events == [{"kind": "net", "target": "api.example.com:8443", "allow": "--net api.example.com:8443",
-                       "why": "not-listed"}]
+    assert arrived(events) == [{"kind": "net", "target": "api.example.com:8443",
+                                "allow": "--net api.example.com:8443", "why": "not-listed"}]
 
 
 def test_a_listed_host_is_tunnelled_and_bytes_flow_both_ways():
@@ -522,7 +534,8 @@ def test_row_9_a_loose_ipv4_spelling_is_refused(target):
     print(target, "->", status(answer), events, net.dialled, net.looked)
     assert status(answer).startswith("HTTP/1.1 403 hlyn: (invalid host name)")
     assert net.dialled == [] and net.looked == []
-    assert events[0] == {"kind": "net", "target": "(invalid host name)", "allow": None, "why": "not-listed"}
+    assert arrived(events)[0] == {"kind": "net", "target": "(invalid host name)", "allow": None,
+                                  "why": "not-listed"}
 
 
 @pytest.mark.parametrize("spelling", ["[::ffff:127.0.0.1]", "[::ffff:7f00:1]", "[0:0:0:0:0:ffff:7f00:1]",
@@ -952,7 +965,8 @@ def test_gate_mode_direct_to_an_unlisted_address_answers_eacces():
     answer, received, events, _, _ = _gate(proxy.header(PUBLIC, 443) + b"secret")
     print(f"verdict {answer!r}, server got {received!r}, events {events}")
     assert answer == bytes((errno.EACCES,)) and received == b""
-    assert events == [{"kind": "net", "target": f"{PUBLIC}:443", "allow": f"--net {PUBLIC}", "why": "direct"}]
+    assert arrived(events) == [{"kind": "net", "target": f"{PUBLIC}:443", "allow": f"--net {PUBLIC}",
+                                "why": "direct"}]
 
 
 def test_gate_mode_direct_to_port_53_is_reported_as_dns():
@@ -998,7 +1012,7 @@ def test_gate_mode_unknown_destination_serves_only_proxy_requests():
     assert status(answer).endswith("200 Connection established")
     answer, received, events, _, _ = _gate(proxy.header(), wait=1.5, limits=proxy.Limits(wait=0.5))
     print("unknown + silence:", answer, events)
-    assert answer == b"" and events == [{"kind": "net", "target": "(unknown address)", "allow": None,
+    assert answer == b"" and arrived(events) == [{"kind": "net", "target": "(unknown address)", "allow": None,
                                          "why": "direct", "mode": "reduced"}]
     answer, received, events, _, _ = _gate(proxy.header() + b"\x16\x03\x01\x00\x05hello", wait=1)
     print("unknown + raw TLS:", answer, events)
@@ -1315,7 +1329,7 @@ def test_the_helper_seals_itself_serves_and_exits_with_its_caller():
 @pytest.mark.parametrize(("args", "said"), [
     ([], "name at least one host"),
     (["--net", "https://api.openai.com"], "Give the host name"),
-    (["--net", "a.example", "--upstream", "socks5://p:1"], "--upstream 'socks5://p:1'"),
+    (["--net", "a.example", "--upstream", "socks5://p:1"], "give an http:// URL"),
     (["--net", "a.example", "--idle", "0"], "must be above 0"),
 ])
 def test_the_helper_refuses_bad_arguments_before_listening(args, said):

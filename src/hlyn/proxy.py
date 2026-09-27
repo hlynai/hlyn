@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import contextvars
 import errno
 import ipaddress
 import os
@@ -684,6 +685,10 @@ _CLASS = {
 
 T = TypeVar("T")
 Report = Callable[[dict[str, object]], None]
+
+# The local port the connection being served arrived on; each connection's
+# task has its own copy.
+_arrived: contextvars.ContextVar[int] = contextvars.ContextVar("arrived", default=0)
 Stream = tuple[asyncio.StreamReader, asyncio.StreamWriter]
 Dial = Callable[[Sequence[hosts.IPAddress], int], Awaitable[Stream]]
 Resolve = Callable[[str, int], Awaitable[Sequence[hosts.IPAddress]]]
@@ -721,8 +726,9 @@ class Proxy:
     dial: Dial | None = None
     mine: Callable[[], Sequence[hosts.IPAddress]] | None = None
     ports: tuple[int, ...] = field(default=(), init=False)
-    _servers: list[asyncio.Server] = field(default_factory=list, init=False, repr=False)
-    _active: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
+    _servers: dict[int, list[asyncio.Server]] = field(default_factory=dict, init=False, repr=False)
+    # Each connection being served, and the port it arrived on.
+    _active: dict[asyncio.Task[None], int] = field(default_factory=dict, init=False, repr=False)
     _own: tuple[float, tuple[hosts.IPAddress, ...]] = field(default=(0.0, ()), init=False, repr=False)
 
     # -- listening ------------------------------------------------------------
@@ -768,10 +774,12 @@ class Proxy:
                 if port:
                     raise OSError(errno.EADDRINUSE, f"port {port} is in use on another local address")
                 continue
+            servers = []
             for sock in bound:
                 sock.listen(128)
                 sock.setblocking(False)
-                self._servers.append(await asyncio.start_server(self._handle, sock=sock))
+                servers.append(await asyncio.start_server(self._handle, sock=sock))
+            self._servers[chosen] = servers
             self.ports = (*self.ports, chosen)
             return int(chosen)
         raise OSError(errno.EADDRINUSE, "no free port for the proxy after 20 tries")
@@ -800,21 +808,37 @@ class Proxy:
             self._own = (now, known)
         return known
 
+    async def unlisten(self, port: int) -> None:
+        """Stop listening on `port` and end the connections that came in on it:
+        the run it was opened for is over (5.8)."""
+        servers = self._servers.pop(port, [])
+        self.ports = tuple(item for item in self.ports if item != port)
+        for server in servers:
+            server.close()
+        ending = [task for task, where in self._active.items() if where == port]
+        for task in ending:
+            task.cancel()
+        await asyncio.gather(*ending, return_exceptions=True)
+        for server in servers:
+            await server.wait_closed()
+
     async def close(self) -> None:
         """Stop listening and end every open connection."""
-        for server in self._servers:
-            server.close()
+        for port in list(self._servers):
+            await self.unlisten(port)
         for task in list(self._active):
             task.cancel()
         await asyncio.gather(*self._active, return_exceptions=True)
-        for server in self._servers:
-            await server.wait_closed()
-        self._servers.clear()
 
     # -- one connection ---------------------------------------------------------
 
     def _event(self, why: str, target: str, allow: str | None, **more: object) -> dict[str, object]:
         event: dict[str, object] = {"kind": "net", "target": target, "allow": allow, "why": why, **more}
+        port = _arrived.get()
+        if port:
+            # The port a connection came in on names the run it belongs to
+            # (5.8), so its denials reach that run's log.
+            event["port"] = port
         return event
 
     def _tell(self, event: dict[str, object] | None) -> None:
@@ -824,17 +848,23 @@ class Proxy:
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
+        where = writer.get_extra_info("sockname")
+        port = int(where[1]) if isinstance(where, tuple) and len(where) >= 2 else 0
+        _arrived.set(port)  # this task's own context: see `_event`
         if len(self._active) >= self.limits.clients or task is None:
-            self._tell(self._event("busy", "", None, detail=f"over {self.limits.clients} connections"))
+            limit = self.limits.clients
+            self._tell(self._event("busy", "", None,
+                                   detail=f"already serving {limit} connection{'s' * (limit != 1)}, "
+                                          f"the most it takes at once"))
             writer.close()
             return
-        self._active.add(task)
+        self._active[task] = port
         try:
             await self._serve(reader, writer)
         except (OSError, asyncio.IncompleteReadError, *_TIMEOUT, Bad, asyncio.CancelledError):
             pass
         finally:
-            self._active.discard(task)
+            self._active.pop(task, None)
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
@@ -1238,31 +1268,121 @@ def _flag(target: str) -> str | None:
 _LINE = 512
 
 
-def _writer(fd: int | None, machine: bool) -> Report:
-    """Where denial events go: JSON lines on `fd`, never blocking; otherwise
-    one line each on stderr, human-readable unless `machine`."""
-    import json
+class Sinks:
+    """Where the helper's denials go (design 4.6).
 
-    if fd is not None:
-        os.set_blocking(fd, False)
+    - `events`: one JSON line per denial on a pipe `hlyn run` reads for its
+      report. Non-blocking: a full pipe drops the line.
+    - log records (`deny`, the same shape `hlyn.log` writes) on the run's log
+      descriptor: the default one given at start, or the one handed over with
+      a run's port (`--control`). A log descriptor is often the caller's own
+      stderr, whose flags are shared with the caller, so it can't be made
+      non-blocking; a writer thread does the writing instead, from a bounded
+      queue, and a full queue drops records and says how many.
+    - `human`: a line on stderr, for a proxy run by hand.
 
-        def send(event: dict[str, object]) -> None:
+    Nothing here ever makes the proxy wait.
+    """
+
+    QUEUE = 1024
+
+    def __init__(self, log: int | None = None, events: int | None = None, human: bool = False,
+                 machine: bool = False) -> None:
+        import queue
+
+        self.default = log
+        self.logs: dict[int, int] = {}  # port -> the log descriptor of the run it belongs to
+        self.seen: dict[int, dict[str, int]] = {}  # per descriptor, for repeat collapsing
+        self.events = events
+        self.human = human
+        self.machine = machine
+        self.dropped = 0
+        self._queue: queue.Queue[tuple[int, bytes | None]] = queue.Queue(self.QUEUE)
+        self._thread: object = None
+        if events is not None:
+            os.set_blocking(events, False)
+
+    def start(self) -> None:
+        """Start the writer. Called after the seal: Landlock refuses to seal a
+        process that already has threads."""
+        import threading
+
+        thread = threading.Thread(target=self._write, name="hlyn-log", daemon=True)
+        thread.start()
+        self._thread = thread
+
+    def add(self, port: int, fd: int | None) -> None:
+        if fd is not None:
+            self.logs[port] = fd
+
+    def remove(self, port: int) -> None:
+        """Forget a run's port. Its descriptor is closed by the writer, after
+        every record already queued for it, so nothing lands on a reused one."""
+        fd = self.logs.pop(port, None)
+        if fd is not None:
+            self._queue.put((fd, None))
+
+    def __call__(self, event: dict[str, object]) -> None:
+        port = event.get("port")
+        fd = self.logs.get(port, self.default) if isinstance(port, int) else self.default
+        if fd is not None:
+            from . import log
+
+            fields = {"what": event.get("kind", "net"), **{k: v for k, v in event.items() if k != "kind"},
+                      "by": "hlyn-proxy", "source": "proxy"}
+            text = log.line("deny", fields, self.seen.setdefault(fd, {}))
+            if text is not None:
+                self._put(fd, text)
+        if self.events is not None:
+            self._event(event)
+        if self.human:
+            self._say(event)
+
+    def _put(self, fd: int, text: str) -> None:
+        import json
+        import queue
+
+        try:
+            if self.dropped:
+                self._queue.put_nowait((fd, (json.dumps({"kind": "dropped", "count": self.dropped,
+                                                         "by": "hlyn-proxy"}) + "\n").encode()))
+                self.dropped = 0
+            self._queue.put_nowait((fd, (text + "\n").encode()))
+        except queue.Full:
+            self.dropped += 1
+
+    def _write(self) -> None:
+        while True:
+            fd, data = self._queue.get()
+            with contextlib.suppress(OSError):
+                if data is None:
+                    os.close(fd)
+                    continue
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+
+    def _event(self, event: dict[str, object]) -> None:
+        import json
+
+        if self.events is None:
+            return
+        line = json.dumps(event, separators=(",", ":"))
+        if len(line) >= _LINE:
+            # Keep what the report needs; drop the rest, then shorten.
+            event = {key: event[key] for key in ("kind", "target", "allow", "why", "port") if key in event}
             line = json.dumps(event, separators=(",", ":"))
-            if len(line) >= _LINE:
-                # Keep what the report needs; drop the rest, then shorten.
-                event = {key: event[key] for key in ("kind", "target", "allow", "why") if key in event}
-                line = json.dumps(event, separators=(",", ":"))
-            if len(line) >= _LINE:
-                event = {**event, "target": str(event.get("target", ""))[:200], "allow": None}
-                line = json.dumps(event, separators=(",", ":"))
-            # A full pipe drops the event: the proxy never waits on a reader.
-            with contextlib.suppress(BlockingIOError, BrokenPipeError):
-                os.write(fd, (line + "\n").encode())
+        if len(line) >= _LINE:
+            event = {**event, "target": str(event.get("target", ""))[:200], "allow": None}
+            line = json.dumps(event, separators=(",", ":"))
+        # A full pipe drops the event: the proxy never waits on a reader.
+        with contextlib.suppress(BlockingIOError, BrokenPipeError):
+            os.write(self.events, (line + "\n").encode())
 
-        return send
+    def _say(self, event: dict[str, object]) -> None:
+        import json
 
-    def say(event: dict[str, object]) -> None:
-        if machine:
+        if self.machine:
             print(json.dumps(event, separators=(",", ":")), file=sys.stderr, flush=True)
             return
         text = f"hlyn: blocked {event.get('target') or 'a connection'} ({event.get('why')})"
@@ -1272,7 +1392,10 @@ def _writer(fd: int | None, machine: bool) -> Report:
             text += f": {event['detail']}"
         print(text, file=sys.stderr, flush=True)
 
-    return say
+
+def _writer(fd: int | None, machine: bool) -> Report:
+    """Events on `fd` as JSON lines, or on stderr for a person (or `machine`)."""
+    return Sinks(events=fd, human=fd is None, machine=machine)
 
 
 def seal() -> str:
@@ -1296,6 +1419,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     Prints one line when ready: where it listens and that it is sealed
     (`--json` for a machine-readable line). The caller keeps the other end of
     stdin; when that closes -- the caller exited -- so does the proxy.
+
+    With `--control FD` it listens nowhere at first. Its caller asks it for a
+    port per run over that socket instead (`route.Shared`, design 5.8), each
+    with that run's log, and closes the port when the run ends.
     """
     import json
 
@@ -1315,8 +1442,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--skip", metavar="LIST", default="",
                         help="with --upstream: hosts that go direct (the user's NO_PROXY)")
     parser.add_argument("--port", type=int, default=0, help="port to listen on (default: any free one)")
+    parser.add_argument("--log", type=int, metavar="FD",
+                        help="write a deny record for each block to this descriptor (hlyn's log)")
     parser.add_argument("--events", type=int, metavar="FD",
                         help="write denial events as JSON lines to this descriptor")
+    parser.add_argument("--control", type=int, metavar="FD",
+                        help="take requests for per-run ports on this unix datagram socket")
+    parser.add_argument("--quiet", action="store_true", help="print nothing for each block")
     parser.add_argument("--connect", type=float, default=default.connect, metavar="SECONDS",
                         help=f"connect timeout (default {default.connect:g})")
     parser.add_argument("--idle", type=float, default=default.idle, metavar="SECONDS",
@@ -1325,6 +1457,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help=f"most connections at once (default {default.clients})")
     parser.add_argument("--stay", action="store_true",
                         help="keep serving when stdin closes (for running it by hand)")
+    parser.add_argument("--detach", action="store_true",
+                        help="leave the parent's process tree first (how hlyn starts it)")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
 
@@ -1336,18 +1470,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.upstream:
             try:
                 chain = upstream({"HTTPS_PROXY": args.upstream, "NO_PROXY": args.skip})
-            except Invalid as exc:
-                raise Invalid(f"--upstream {args.upstream!r}: {exc}") from None
+            except Invalid:
+                raise Invalid(f"--upstream {args.upstream!r} isn't a proxy hlyn can chain through: "
+                              f"give an http:// URL, e.g. --upstream http://proxy.corp:3128") from None
         if args.connect <= 0 or args.idle <= 0 or args.clients <= 0:
             raise Invalid("--connect, --idle and --clients must be above 0")
+        if args.control is not None and args.port:
+            raise Invalid("--port and --control don't mix: with --control, each run gets its own port")
+        for name in ("log", "events", "control"):
+            fd = getattr(args, name)
+            if fd is not None:
+                try:
+                    os.fstat(fd)
+                except OSError:
+                    raise Invalid(f"--{name} {fd}: no such open descriptor") from None
         limits = Limits(connect=args.connect, idle=args.idle, clients=args.clients)
     except Invalid as exc:
         print(f"hlyn: {exc}", file=sys.stderr)
         return 2
 
-    report = _writer(args.events, args.json)
+    if args.detach:
+        _detach()
+    sinks = Sinks(log=args.log, events=args.events,
+                  human=not (args.quiet or args.log is not None or args.events is not None),
+                  machine=args.json)
     try:
-        return asyncio.run(_main(rules, args, chain, limits, report, json.dumps))
+        return asyncio.run(_main(rules, args, chain, limits, sinks, json.dumps))
     except KeyboardInterrupt:
         return 130
 
@@ -1357,16 +1505,18 @@ async def _main(
     args: argparse.Namespace,
     chain: Upstream | None,
     limits: Limits,
-    report: Report,
+    sinks: Sinks,
     dumps: Callable[[object], str],
 ) -> int:
-    proxy = Proxy(rules, gate=args.gate, upstream=chain, limits=limits, report=report)
-    try:
-        port = await proxy.listen(args.port)
-    except OSError as exc:
-        print(f"hlyn: the proxy can't listen: {exc}. Pick another --port, or leave it out.",
-              file=sys.stderr)
-        return 1
+    proxy = Proxy(rules, gate=args.gate, upstream=chain, limits=limits, report=sinks)
+    port: int | None = None
+    if args.control is None:
+        try:
+            port = await proxy.listen(args.port)
+        except OSError as exc:
+            print(f"hlyn: the proxy can't listen: {exc}. Pick another --port, or leave it out.",
+                  file=sys.stderr)
+            return 1
     # Sealed after binding, before accepting: nothing a client sends is read
     # by an unconfined process. If the seal fails, the proxy never serves.
     try:
@@ -1375,7 +1525,9 @@ async def _main(
         print(f"hlyn: the proxy could not seal itself, so it won't serve: {exc}", file=sys.stderr)
         await proxy.close()
         return 1
-    where = [f"127.0.0.1:{port}"] + ([f"[::1]:{port}"] if len(proxy._servers) > 1 else [])
+    sinks.start()
+    where = [] if port is None else [f"127.0.0.1:{port}"] + (
+        [f"[::1]:{port}"] if len(proxy._servers.get(port, ())) > 1 else [])
     # The own-address check must keep working once sealed (appendix B's last
     # row). Read once more now, so a seal that breaks it is seen at start.
     try:
@@ -1388,18 +1540,102 @@ async def _main(
         print(dumps({"port": port, "listen": where, "pid": os.getpid(), "sealed": level, "own": own,
                      "net": [str(rule) for rule in rules]}), flush=True)
     else:
-        print(f"hlyn: proxy for {', '.join(str(rule) for rule in rules)} on {' and '.join(where)} "
+        at = " and ".join(where) if where else "ports given out per run"
+        print(f"hlyn: proxy for {', '.join(str(rule) for rule in rules)} on {at} "
               f"(pid {os.getpid()}, sealed: {level})", flush=True)
 
     ended = asyncio.Event()
     watching = None if args.stay else await _watch(ended)
+    control = None if args.control is None else _Control(args.control, proxy, sinks, dumps)
     try:
         await ended.wait()
     finally:
         if watching is not None:
             watching.cancel()
+        if control is not None:
+            control.close()
         await proxy.close()
     return 0
+
+
+def _detach() -> None:
+    """Fork, and let the first process exit at once (the classic daemon
+    double fork, with the caller's fork as the first).
+
+    The proxy then belongs to init (launchd on macOS), not to the process
+    that started it: nobody else's `waitpid(-1)` or SIGCHLD handler ever sees
+    it, and if it dies it is reaped rather than left a zombie (5.2). Done
+    first thing, in a fresh single-threaded interpreter, before any socket or
+    thread exists. The caller reaps the first process; the proxy's own pid is
+    in its ready line.
+    """
+    if os.fork():
+        os._exit(0)
+
+
+class _Control:
+    """Per-run ports, asked for over a unix datagram socket (design 5.8).
+
+    One datagram per request, one per answer, so a descriptor sent with a
+    request can never be mistaken for another's:
+
+        {"open": ID} + optional log descriptor  ->  {"open": ID, "port": P}
+        {"close": P}                             ->  {"close": P}
+
+    Anything else is answered with {"error": why}. The caller is the process
+    that started this proxy; nothing else holds the other end.
+    """
+
+    def __init__(self, fd: int, proxy: Proxy, sinks: Sinks, dumps: Callable[[object], str]) -> None:
+        self.sock = socket.socket(fileno=fd)
+        self.sock.setblocking(False)
+        self.proxy, self.sinks, self.dumps = proxy, sinks, dumps
+        self.loop = asyncio.get_running_loop()
+        self.tasks: set[asyncio.Task[None]] = set()
+        self.loop.add_reader(self.sock.fileno(), self._readable)
+
+    def _readable(self) -> None:
+        try:
+            data, fds, _, _ = socket.recv_fds(self.sock, 4096, 4)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError:
+            self.loop.remove_reader(self.sock.fileno())
+            return
+        task = self.loop.create_task(self._answer(data, fds))
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def _answer(self, data: bytes, fds: list[int]) -> None:
+        import json
+
+        reply: dict[str, object]
+        try:
+            ask = json.loads(data)
+            if not isinstance(ask, dict):
+                raise ValueError("not an object")
+            if "open" in ask and len(fds) <= 1:
+                port = await self.proxy.listen()
+                self.sinks.add(port, fds.pop() if fds else None)
+                reply = {"open": ask["open"], "port": port}
+            elif "close" in ask and isinstance(ask["close"], int) and not fds:
+                await self.proxy.unlisten(ask["close"])
+                self.sinks.remove(ask["close"])
+                reply = {"close": ask["close"]}
+            else:
+                raise ValueError(f"unknown request {data[:80]!r}")
+        except (ValueError, OSError) as exc:
+            reply = {"error": str(exc)}
+        for fd in fds:
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            self.sock.send(self.dumps(reply).encode())
+
+    def close(self) -> None:
+        self.loop.remove_reader(self.sock.fileno())
+        for task in self.tasks:
+            task.cancel()
+        self.sock.close()
 
 
 async def _watch(ended: asyncio.Event) -> asyncio.Task[None] | None:

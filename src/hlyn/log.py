@@ -26,7 +26,7 @@ import sys
 import time
 from typing import Any, TextIO
 
-__all__ = ["allow", "deny", "emit", "off", "seal", "sink", "totals"]
+__all__ = ["allow", "deny", "emit", "fileno", "line", "off", "seal", "sink", "totals"]
 
 
 _where: TextIO | None = None
@@ -68,7 +68,7 @@ def off() -> None:
     _on = False
 
 
-def _often(kind: str, fields: dict[str, Any]) -> int | None:
+def _often(kind: str, fields: dict[str, Any], seen: dict[str, int] | None = None) -> int | None:
     """How many times this exact record has been seen, or None to not track it.
 
     One startup under a tight policy refuses the same handful of things over
@@ -82,11 +82,29 @@ def _often(kind: str, fields: dict[str, Any]) -> int | None:
     survive to the end of the process for the log to be useful -- which matters
     here, because a process refused by seccomp is killed rather than exiting.
     """
+    book = _seen if seen is None else seen
     key = json.dumps([kind, fields], sort_keys=True, default=str)
-    if key not in _seen and len(_seen) >= LIMIT:
+    if key not in book and len(book) >= LIMIT:
         return None
-    count = _seen[key] = _seen.get(key, 0) + 1
+    count = book[key] = book.get(key, 0) + 1
     return count
+
+
+def line(kind: str, fields: dict[str, Any], seen: dict[str, int], pid: int | None = None) -> str | None:
+    """One record as a JSON line, or None when `_often` says to count it only.
+
+    `seen` is the caller's own tally, so a process writing to several logs
+    (hlyn's proxy, one per run) collapses repeats per log. `emit` is this
+    with the module's own tally and sink.
+    """
+    count = _often(kind, fields, seen)
+    if count is not None and count > 1 and count & (count - 1):
+        return None  # not a power of two, so counted and not written
+    row: dict[str, Any] = {"t": round(time.time(), 3), "kind": kind, "pid": pid or os.getpid()}
+    row.update(fields)
+    if count is not None and count > 1:
+        row["seen"] = count
+    return json.dumps(row, default=str)
 
 
 def totals() -> dict[str, int]:
@@ -105,16 +123,28 @@ def emit(kind: str, **fields: Any) -> None:
     # Never raises: a record that cannot be written must not take the agent
     # down with it. The boundary is what matters; the log is evidence about it.
     with contextlib.suppress(Exception):
-        seen = _often(kind, fields)
-        if seen is not None and seen > 1 and seen & (seen - 1):
-            return  # not a power of two, so counted and not written
-        row: dict[str, Any] = {"t": round(time.time(), 3), "kind": kind, "pid": os.getpid()}
-        row.update(fields)
-        if seen is not None and seen > 1:
-            row["seen"] = seen
+        text = line(kind, fields, _seen)
+        if text is None:
+            return
         stream = _where if _where is not None else sys.stderr
-        stream.write(json.dumps(row, default=str) + "\n")
+        stream.write(text + "\n")
         stream.flush()
+
+
+def fileno() -> int | None:
+    """The descriptor records go to, for handing to a helper process.
+
+    `None` when recording is off. Raises `ValueError` when the sink is a
+    stream with no descriptor (an `io.StringIO`), which another process
+    cannot write to.
+    """
+    if not _on:
+        return None
+    stream = _where if _where is not None else sys.stderr
+    try:
+        return int(stream.fileno())
+    except (AttributeError, OSError, ValueError):
+        raise ValueError("the log is an in-memory stream") from None
 
 
 def _shape(value: Any) -> Any:
@@ -127,8 +157,12 @@ def _shape(value: Any) -> Any:
     return value
 
 
-def seal(policy: Any, backend: str, level: Any, tmp: str | None = None) -> None:
-    """Record the boundary that was applied. The one record that always matters."""
+def seal(policy: Any, backend: str, level: Any, tmp: str | None = None, **more: Any) -> None:
+    """Record the boundary that was applied. The one record that always matters.
+
+    `more` carries what host mode adds (design 4.6): the proxy's address, the
+    helpers' pids, and whether its denials can reach this log.
+    """
     emit(
         "seal",
         backend=backend.rsplit(".", 1)[-1],
@@ -139,6 +173,7 @@ def seal(policy: Any, backend: str, level: Any, tmp: str | None = None) -> None:
         net=_shape(policy.net),
         env=_shape(policy.env),
         tmp=tmp,
+        **more,
     )
 
 
