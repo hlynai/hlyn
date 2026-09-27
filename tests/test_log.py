@@ -32,7 +32,14 @@ def sink():
 
 
 def rows(buf: io.StringIO) -> list[dict]:
-    return [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
+    """The records written so far, printed as read so the log shows them."""
+    lines = [line for line in buf.getvalue().splitlines() if line.strip()]
+    print(f"{len(lines)} record(s) in the sink:")
+    for line in lines[:10]:
+        print("  ", line)
+    if len(lines) > 10:
+        print(f"   ... and {len(lines) - 10} more")
+    return [json.loads(line) for line in lines]
 
 
 def test_each_record_is_one_json_object(sink):
@@ -82,6 +89,7 @@ def test_a_broken_sink_never_breaks_the_agent():
     log.sink(Broken())
     try:
         log.emit("test")  # must not raise
+        print("emit into a sink that raises OSError('disk full'): returned normally")
     finally:
         log.sink(True)
 
@@ -116,6 +124,7 @@ def test_a_first_occurrence_is_always_written_immediately(sink):
 def test_totals_report_what_was_collapsed(sink):
     for _ in range(5):
         log.deny("path", "EACCES", path="/etc/shadow")
+    print("totals:", log.totals())
     assert list(log.totals().values()) == [5]
 
 
@@ -123,6 +132,7 @@ def test_tracking_stops_rather_than_growing_without_bound(sink):
     """An agent walking a large tree must not make the log module the leak."""
     for n in range(log.LIMIT + 50):
         log.emit("test", n=n)
+    print(f"LIMIT {log.LIMIT}; tracked {len(log._seen)} distinct records after {log.LIMIT + 50}")
     assert len(log._seen) == log.LIMIT
     assert len(rows(sink)) == log.LIMIT + 50
 
@@ -131,6 +141,7 @@ def test_logging_can_be_turned_off(sink):
     log.off()
     try:
         log.emit("test")
+        print("emitted one record with logging off")
         assert rows(sink) == []
     finally:
         log.sink(sink)

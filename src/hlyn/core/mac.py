@@ -278,8 +278,8 @@ def profile(policy: Policy, tag: str | None = None, port: int | None = None) -> 
     elif isinstance(policy.net, tuple) and policy.net:
         # Outbound only, matching the Linux backend: binding a port accepts
         # inbound connections, which an agent should have to ask for.
-        for port in policy.net:
-            lines.append(f'(allow network-outbound (remote tcp "*:{port}"))')
+        for number in policy.net:
+            lines.append(f'(allow network-outbound (remote tcp "*:{number}"))')
         # macOS resolves names through this daemon rather than by sending DNS
         # itself. Without it, allowing port 443 still cannot reach a host by
         # name. Granting it is not a closed door, though: it answers whatever

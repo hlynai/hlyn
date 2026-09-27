@@ -600,7 +600,7 @@ A sandbox that oversells itself is worse than one that doesn't, so here is exact
 | Limit | What it means | What to do |
 |---|---|---|
 | **Data sent to a host you allowed** | A listed host can receive anything the agent can read. | Keep secrets unreadable (see [Secrets in granted folders](#secrets-in-granted-folders)). |
-| **Named ports are TCP only, and reach every host** | `net=[443]` leaves UDP open, so DNS and QUIC can still leave, and reaches any host on 443. | Name hosts instead, which closes both, or use `net=False` when nothing may leave. |
+| **Named ports are TCP only, and reach every host** | `net=[443]` leaves UDP open, so DNS and QUIC can still leave, and reaches any host on 443. On macOS it also grants the system resolver, which looks up any name it is asked, so data can leave one DNS label at a time. | Name hosts instead, which closes all three (the proxy looks names up; the agent can't), or use `net=False` when nothing may leave. |
 | **Host names on Linux are new** | Tested on x86_64 without Yama so far. aarch64, and kernels with Yama, are designed for but not yet run. | `hlyn probe` says what this machine can do. |
 | **Seal before threads** | A thread started before `on()` would keep its access, so hlyn refuses to seal. | Call `on()` first, or use `hlyn.run(fn)`. |
 | **A granted socket grants its service** | The service behind a socket you allow (e.g. `docker.sock`) can hand the agent anything it can open. | Treat a socket grant like `exec` on that service. |

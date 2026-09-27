@@ -64,11 +64,12 @@ Nothing here changes `Policy` or wires into the CLI; that is a later step.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import re
 import socket
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Union
 
 from .error import Invalid
 
@@ -82,8 +83,8 @@ class Reach(UserWarning):
     (`warnings.simplefilter("ignore", hlyn.Reach)`), or make it an error.
     """
 
-IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
-IPNetwork = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 DEFAULT_PORT = 443
 
@@ -120,7 +121,8 @@ class Rule:
             return f"*.{self.host}"
         if self.kind == "localhost":
             return "localhost"
-        assert self.network is not None
+        if self.network is None:
+            raise ValueError(f"a {self.kind} rule without an address")
         if self.network.num_addresses == 1:
             addr = self.network.network_address
             return f"[{addr}]" if addr.version == 6 else str(addr)
@@ -184,10 +186,8 @@ def normalize(name: str, field: str = "net") -> str:
         raise Invalid(f"{field}: expected a non-empty host name, got {name!r}.")
     if not name.isascii():
         suggestion = None
-        try:
+        with contextlib.suppress(UnicodeError):
             suggestion = name.encode("idna").decode("ascii")
-        except (UnicodeError, UnicodeDecodeError):
-            pass
         hint = f" Try {suggestion!r}." if suggestion else ""
         raise Invalid(
             f"{field}: {name!r} has non-ASCII characters. Write it in its `xn--` form.{hint}"
@@ -308,7 +308,7 @@ def _address_rule(network: IPNetwork, port: int) -> Rule:
     return Rule(kind="address" if network.num_addresses == 1 else "range", port=port, network=network)
 
 
-def parse(entry: str, field: str = "net") -> Rule:  # noqa: C901 - one grammar, read top to bottom
+def parse(entry: str, field: str = "net") -> Rule:
     """Parse one `net` list entry into a `Rule`.
 
     See the module docstring for what is accepted. Raises `Invalid`, naming
@@ -369,7 +369,8 @@ def parse(entry: str, field: str = "net") -> Rule:  # noqa: C901 - one grammar, 
     if not host_part:
         raise Invalid(f"{field}: {entry!r} has no host name before the ':'.")
     if colon and not port_text:
-        raise Invalid(f"{field}: {entry!r} ends in ':' with no port. Drop the ':' (443 is the default) or add one.")
+        raise Invalid(f"{field}: {entry!r} ends in ':' with no port. "
+                      f"Drop the ':' (443 is the default) or add one.")
 
     # -- ADDRESS/PREFIX, or a name with a path ---------------------------------
     if "/" in host_part:
@@ -381,14 +382,16 @@ def parse(entry: str, field: str = "net") -> Rule:  # noqa: C901 - one grammar, 
                 f"{field}: {entry!r} has a path. Give just the host name: --net {before}"
                 if before else f"{field}: {entry!r} is not a host name or address range."
             ) from None
-        return _address_rule(_network_of(host_part, entry, field), _parse_port(port_text or None, entry, field))
+        port = _parse_port(port_text or None, entry, field)
+        return _address_rule(_network_of(host_part, entry, field), port)
 
     try:
         ipaddress.ip_address(host_part)
     except ValueError:
         pass
     else:
-        return _address_rule(_network_of(host_part, entry, field), _parse_port(port_text or None, entry, field))
+        port = _parse_port(port_text or None, entry, field)
+        return _address_rule(_network_of(host_part, entry, field), port)
     loose = _loose_ipv4(host_part)
     if loose is not None:
         raise Invalid(
@@ -494,7 +497,7 @@ def _as_address(value: IPAddress | str) -> IPAddress | None:
 
 
 def match(
-    rules,
+    rules: Iterable[Rule],
     *,
     port: int,
     name: str | None = None,
@@ -525,21 +528,20 @@ def match(
         ip = unwrap(parsed) if parsed is not None else None
 
     for rule in rules:
-        if rule.port != port:
-            continue
-        if rule.kind == "host":
-            if candidate is not None and candidate == rule.host:
-                return rule
-        elif rule.kind == "wildcard":
-            if candidate is not None and rule.host is not None and _wildcard_matches(candidate, rule.host):
-                return rule
-        elif rule.kind == "localhost":
-            if candidate == "localhost" or (ip is not None and ip in _LOOPBACK):
-                return rule
-        elif rule.kind in ("address", "range"):
-            if ip is not None and rule.network is not None and ip in rule.network:
-                return rule
+        if rule.port == port and _allows(rule, candidate, ip):
+            return rule
     return None
+
+
+def _allows(rule: Rule, name: str | None, ip: IPAddress | None) -> bool:
+    """Whether `rule` covers an already-normalised name or unwrapped address."""
+    if rule.kind == "host":
+        return name is not None and name == rule.host
+    if rule.kind == "wildcard":
+        return name is not None and rule.host is not None and _wildcard_matches(name, rule.host)
+    if rule.kind == "localhost":
+        return name == "localhost" or (ip is not None and ip in _LOOPBACK)
+    return ip is not None and rule.network is not None and ip in rule.network
 
 
 # ---------------------------------------------------------------------------
@@ -571,11 +573,12 @@ _TABLE: tuple[tuple[IPNetwork, str], ...] = (
     (ipaddress.ip_network("255.255.255.255/32"), "broadcast"),
     (ipaddress.ip_network("240.0.0.0/4"), "reserved"),
     (ipaddress.ip_network("198.18.0.0/15"), "reserved"),  # benchmarking
-    (ipaddress.ip_network("192.0.0.0/24"), "reserved"),  # IETF protocol assignments, incl. 192.0.0.192 Oracle metadata
+    # IETF protocol assignments, incl. 192.0.0.192 (Oracle's metadata service)
+    (ipaddress.ip_network("192.0.0.0/24"), "reserved"),
 )
 
 
-def classify(address: IPAddress | str, mine=()) -> str | None:
+def classify(address: IPAddress | str, mine: Iterable[IPAddress | str] = ()) -> str | None:
     """`None` if `address` may be reached by name; otherwise which class it is.
 
     Appendix B / matching rule 4. `address` is unwrapped first (`unwrap`), so

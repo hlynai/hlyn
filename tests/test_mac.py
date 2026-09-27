@@ -353,7 +353,7 @@ def listener():
     got: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 - the stdlib's name
+        def do_GET(self):
             got.append(f"{self.path} (User-Agent: {self.headers.get('User-Agent')})")
             self.send_response(404)
             self.end_headers()

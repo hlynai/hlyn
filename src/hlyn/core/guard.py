@@ -236,8 +236,9 @@ class Guard:
         if call.nr == self.socket_nr:
             # Only IP sockets other than TCP come here (the filter): refuse,
             # and say what it was, from the registers alone.
-            kind = call.args[1] & seccomp.KINDS
-            shown = {socket.SOCK_DGRAM: "UDP", socket.SOCK_RAW: "raw IP"}.get(kind, f"IP socket type {kind}")
+            sort = call.args[1] & seccomp.KINDS
+            names = {int(socket.SOCK_DGRAM): "UDP", int(socket.SOCK_RAW): "raw IP"}
+            shown = names.get(sort, f"IP socket type {sort}")
             self._event(call, "udp", shown, None)
             self._no(call, errno.EPERM)
             return

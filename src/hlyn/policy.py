@@ -122,13 +122,12 @@ def ports(value: object, field: str = "net") -> tuple[int, ...] | tuple[Rule, ..
         if isinstance(item, Rule):
             named.append(item)
             continue
-        if isinstance(item, os.PathLike):
-            item = os.fspath(item)
-        if isinstance(item, str):
-            if not item.isdigit():
-                named.append(hostparse(item, field))
+        text = os.fspath(item) if isinstance(item, os.PathLike) else item
+        if isinstance(text, str):
+            if not text.isdigit():
+                named.append(hostparse(text, field))
                 continue
-            port = int(item)
+            port = int(text)
         elif isinstance(item, int):
             port = item
         else:
@@ -618,7 +617,7 @@ class Policy:
     def hosts(self) -> tuple[Rule, ...]:
         """The host entries `net` names, or `()` when it is off, open, or ports."""
         if isinstance(self.net, tuple) and self.net and isinstance(self.net[0], Rule):
-            return self.net  # type: ignore[return-value]
+            return self.net
         return ()
 
     def with_(self, **edits: object) -> Policy:

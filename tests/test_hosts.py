@@ -133,7 +133,7 @@ def test_case_and_one_trailing_dot_match_the_same_rule(spelling):
 
 @pytest.mark.parametrize("sent", [
     "api.openai.com..", "api­openai.com", "api.openai.com\x00.evil.net", "api.openai.com\r\n",
-    "api_openai.com", "аpi.openai.com",  # the first letter is Cyrillic
+    "api_openai.com", "аpi.openai.com",  # noqa: RUF001 - the first letter is Cyrillic, on purpose
     "", "a" * 254,
 ])
 def test_a_malformed_name_from_a_client_matches_nothing(sent):
@@ -227,7 +227,7 @@ def test_a_range_matches_addresses_inside_it_only():
     ("168.63.129.16", "cloud-metadata"),
     ("100.100.100.200", "cgnat"),
     ("192.0.0.192", "reserved"),
-    ("0.0.0.0", "unspecified"),
+    ("0.0.0.0", "unspecified"),  # noqa: S104 - classified, not bound
     ("::", "unspecified"),
     ("::1", "loopback"),
     ("fe80::1", "link-local"),

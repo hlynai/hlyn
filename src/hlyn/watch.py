@@ -314,15 +314,15 @@ def _hosts() -> tuple[str, ...]:
     names: dict[str, set[int]] = {}
     for kind, value in _seen:
         if kind == "host":
-            host, _, port = value.rpartition(" ")
+            host, _, text = value.rpartition(" ")
             try:
                 ipaddress.ip_address(host.strip("[]"))
                 continue  # an address, not a name: see the connections
             except ValueError:
                 pass
             names.setdefault(host, set())
-            if port.isdigit() and int(port):
-                names[host].add(int(port))
+            if text.isdigit() and int(text):
+                names[host].add(int(text))
     if not names:
         return ()
     dialled = {(host, int(port)) for kind, value in _seen if kind == "addr"
