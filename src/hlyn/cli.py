@@ -93,6 +93,16 @@ def _policy(args: argparse.Namespace) -> Policy:
     was given -- never replace or narrow it. They are mutually exclusive on
     purpose: silently layering a file on top of a preset would make the
     effective policy something neither document states.
+
+    `--net` is the one field where that "always widen" rule is wrong (design
+    4.1, gap 8.6). A bare port or host already means "reachable"; if the base
+    already allows any network, naming one is the user asking to restrict to
+    it, not to add it to "any". `--net` narrows an open network instead of
+    being silently swallowed by it, and says so on stderr. `--net-any` is the
+    explicit way to keep it open. Every other field (`--read`, `--write`,
+    `--exec`, `--env`) only ever widens: naming a path or name on top of a
+    field that already grants everything is a no-op, since the wider grant
+    already covers it, so there is nothing misleading about leaving it be.
     """
     if args.preset and args.policy:
         raise Error("give either --preset or --policy, not both: each is a whole policy.")
@@ -102,6 +112,12 @@ def _policy(args: argparse.Namespace) -> Policy:
         base = jail._plan(args.preset, {})
     else:
         base = Policy()
+    net_from = None
+    if base.net is True:
+        if args.policy:
+            net_from = f"net = true in {args.policy}"
+        elif args.preset:
+            net_from = f"--preset {args.preset}"
     edits: dict[str, object] = {}
     if args.read:
         edits["read"] = _add(base.read, args.read)
@@ -114,7 +130,7 @@ def _policy(args: argparse.Namespace) -> Policy:
     if args.net_any:
         edits["net"] = True
     elif args.net:
-        edits["net"] = _add(base.net, args.net)
+        edits["net"] = _narrow_net(base.net, args.net, net_from)
     if args.env_any:
         edits["env"] = True
     elif args.env:
@@ -133,6 +149,29 @@ def _add(base: tuple[object, ...] | bool, extra: list[str]) -> object:
     if base is True:
         return True
     return [*(base or ()), *extra]
+
+
+def _narrow_net(base: tuple[object, ...] | bool, extra: list[str], source: str | None) -> object:
+    """`--net` widens a list of ports (and, once hosts exist, hosts), but
+    *replaces* a base that already allows any network.
+
+    This is the opposite of `_add`, on purpose (design 4.1, gap 8.6): naming a
+    port when the base is "any network" is the one place widening would
+    silently restrict nothing, which defeats the point of naming it at all.
+    Reported on stderr so the change is never silent, with the flag that
+    would keep the network open. `source` names where the "any network" came
+    from (a preset or a policy file); it is only unset when `base` is not
+    `True`, in which case this behaves exactly like `_add`.
+    """
+    if base is not True:
+        return _add(base, extra)
+    if source:
+        print(
+            f"hlyn: net was any network (from {source}); --net narrows it to "
+            f"{', '.join(extra)}. Use --net-any to keep it open.",
+            file=sys.stderr,
+        )
+    return list(extra)
 
 
 SEED = """\
