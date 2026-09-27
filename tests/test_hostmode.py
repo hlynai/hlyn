@@ -197,7 +197,8 @@ held.sendall(b"still mine"); print("caller's connection:", held.recv(20))
 """)
     print(done.stdout, done.stderr[-800:], sep="\n")
     assert "REFUSED: 1 network connection is already open (fd " in done.stdout
-    assert f"to 127.0.0.1:{service.port}). It would keep working after the seal" in done.stdout
+    assert f"to 127.0.0.1:{service.port}) that this policy's net wouldn't allow. It would keep working " \
+           "after the seal" in done.stdout
     assert "sealed: False" in done.stdout and "caller's connection: b'hi still mine'" in done.stdout
 
 

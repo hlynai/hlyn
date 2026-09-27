@@ -560,10 +560,10 @@ Files and connections that are already open are never re-checked, so throughput 
 
 | Measure | Without hosts | With hosts |
 |---|---|---|
-| `hlyn run -- true` | 96 ms (102 ms with `--net 443`) | 304 ms: +208 ms, mostly starting the proxy |
+| `hlyn run -- true` | 95 ms | 135 ms: +41 ms. The proxy's own start overlaps the command's (its sockets are bound first and handed over) |
 | `connect()` to the proxy (Linux), median / p99 | 18-21 µs / 68-77 µs, unconfined | 234-239 µs / 565-619 µs, through the gate |
 | One connection's throughput (512 MB over loopback) | 2,717 MB/s, unconfined | 502 MB/s |
-| `hlyn.run(fn)` per call, after the first | — | +1-6 ms (+60-66 ms if the caller has threads) |
+| `hlyn.run(fn)` per call, after the first | — | +1-6 ms (+46-49 ms if the caller has threads) |
 
 **Reporting under `hlyn run`:** nothing measurable on successful calls and under 0.1 µs per refused call on Linux; about 50 ms per run on macOS.
 
@@ -654,7 +654,7 @@ Docker packages and deploys software; it wasn't built to contain a compromised p
 No. The boundary lives in the kernel, not in Python. Once applied, it lasts for the life of the process and is inherited by everything it starts. hlyn has no off switch either.
 
 **Does it slow the agent down?**
-Not measurably with ports. Naming hosts adds about 0.2 ms to each new connection and 0.2 s to starting `hlyn run`. See [Performance](#performance).
+Not measurably with ports. Naming hosts adds about 0.2 ms to each new connection and 40 ms to starting `hlyn run`. See [Performance](#performance).
 
 **Does it work with LangChain / CrewAI / AutoGen / my own framework?**
 Yes. hlyn confines a process, not a framework. Call `hlyn.on()` at startup, wrap the command with `hlyn run`, or put a single risky tool call inside `hlyn.run(fn)`.
