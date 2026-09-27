@@ -105,6 +105,14 @@ fn bonus(real: ABI) -> bool {
     real >= ABI::V9
 }
 
+/// Whether a seal handles `ResolveUnix`: only when the network is handled at
+/// all -- a pathname unix socket is somewhere to send data, so `net=True`
+/// leaves it open, as it always has here and as `(allow network*)` does on
+/// macOS -- and only when the real kernel has it (`bonus`).
+fn resolves(flags: u32, real: ABI) -> bool {
+    flags & NET != 0 && bonus(real)
+}
+
 /// Execute, and nothing else.
 ///
 /// `ReadFile` used to be here, on the reasoning that a program must be
@@ -270,11 +278,12 @@ unsafe fn build(plan: &Plan) -> Result<RulesetCreated, i32> {
     };
 
     let abi = WANT;
-    // The real, freshly-probed kernel ABI -- used only to decide whether
-    // `ResolveUnix` (V9, Linux 7.1+) can be requested without downgrading
-    // this seal to `PartiallyEnforced` (see `bonus`). `abi` above stays fixed
-    // at the floor `hlyn_seal` always requires, whatever this comes back as.
-    let extra = bonus(ABI::from(hlyn_abi()));
+    // Whether to handle `ResolveUnix` (V9, Linux 7.1+); see `resolves`. `abi`
+    // above stays fixed at the floor `hlyn_seal` always requires. `ABI::from`
+    // is the crate's only way to turn a number into an ABI; its "testing
+    // only" note is about overriding detection, while this is the kernel's
+    // own answer to the same syscall the crate asks.
+    let extra = resolves(plan.flags, ABI::from(hlyn_abi()));
 
     // Handle every right the running kernel understands. Anything handled and
     // not granted is denied, so this is what makes the ruleset deny-by-default
@@ -351,12 +360,14 @@ unsafe fn build(plan: &Plan) -> Result<RulesetCreated, i32> {
         };
         let mut want = fit(writable(), dir, abi);
         // DESIGN-host-allowlisting.md 5.3: on a kernel new enough, a pathname
-        // unix socket living under a write grant stays connectable, and
-        // Landlock itself now refuses one bound anywhere else -- closing, at
-        // the kernel, the race a gate or a `net=False` seal could otherwise
-        // lose to a multi-threaded agent (measured: 762 of 3000 tries won it
-        // without this bit, FINDINGS.md). Only writes carry it: a read or
-        // exec grant says nothing about what may be dialled.
+        // unix socket under a write grant stays connectable, and Landlock
+        // itself refuses one bound anywhere else -- so the gate's racy path
+        // check (measured: 762 of 3000 tries won it, FINDINGS.md) and
+        // `net=False`'s missing one (gap 8.2) no longer decide it for
+        // sockets outside the grants. Inside a grant the kernel allows
+        // everything, so a refused socket there stays racy. Only writes
+        // carry it: a read or exec grant says nothing about what may be
+        // dialled.
         if extra {
             want |= AccessFs::ResolveUnix;
         }
@@ -656,6 +667,19 @@ mod tests {
             assert!(!bonus(abi), "{abi:?} does not have ResolveUnix");
         }
         assert!(bonus(ABI::V9), "V9 is exactly where ResolveUnix landed");
+    }
+
+    #[test]
+    fn socket_files_are_limited_only_while_the_network_is() {
+        // net=True (no NET flag) leaves socket files open on every kernel;
+        // any other net limits them, from V9 up.
+        for flags in [0, SIGNAL | UNIX] {
+            assert!(!resolves(flags, ABI::V9), "net=True must not limit socket files");
+        }
+        for flags in [NET, SIGNAL | UNIX | NET] {
+            assert!(resolves(flags, ABI::V9));
+            assert!(!resolves(flags, ABI::V8), "V8 has no ResolveUnix to ask for");
+        }
     }
 
     #[test]

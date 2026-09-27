@@ -197,6 +197,16 @@ LOOKUP = ("it looked up a name itself, ignoring HTTPS_PROXY; only the proxy look
           "Point the client at it (aiohttp: trust_env=True; urllib3: ProxyManager)")
 
 
+# The system log's sockets on Linux (syslog and journald). Refused outside
+# the write grants on Landlock ABI 9, like any socket file (5.3's residual).
+LOGS = frozenset({
+    "/dev/log",
+    "/run/systemd/journal/dev-log",
+    "/run/systemd/journal/socket",
+    "/run/systemd/journal/stdout",
+})
+
+
 def _resolver(path: str) -> bool:
     """Whether `path` is the system resolver's socket (a name lookup)."""
     import re
@@ -649,10 +659,7 @@ class Report:
                          "belongs to a process outside this agent; hlyn never allows reaching it",
                          source=denial.source)
         if denial.source == "program":
-            # Landlock does not govern connecting to a socket file on the
-            # kernels hlyn supports, so a refusal here is the file's own
-            # permissions -- or the agent's word, which is not enough.
-            return None
+            return self._socket_file(where, denial)
         if self.plan.net is True:
             return None
         if self.plan.hosts():
@@ -666,6 +673,37 @@ class Report:
                          "a local socket needs write access to its folder", source=denial.source)
         return Entry("net", f"local socket {safe(tilde(where))}", "--net-any",
                      "on macOS only the whole network allows local sockets", source=denial.source)
+
+    def _socket_file(self, where: str, denial: Denial) -> Entry | None:
+        """A unix socket file the preloaded reporter heard refused (Linux).
+
+        Landlock decides these only from ABI 9 (Linux 7.1+) and only while it
+        handles the network (the shim's `bonus`); before that the refusal is
+        the file's own permissions. In host mode the gate reports its own
+        refusals (`_gate`), so this copy would be the same line twice.
+        """
+        if self.plan.net is True or self.plan.hosts() or not where.startswith("/"):
+            return None
+        from .core import landlock
+
+        if landlock.abi() < 9 or self._writes is True:
+            return None
+        real = os.path.realpath(where)
+        if any(under(real, os.path.realpath(item)) for item in self._writes or ()):
+            return None  # granted, so something else refused it
+        if os.path.exists(real) and not os.access(real, os.W_OK):
+            return None  # its own permissions refuse this process too
+        folder = os.path.dirname(real) or "/"
+        note = "a local socket needs write access to its folder"
+        log = where in LOGS or real in LOGS
+        if log:
+            # syslog() in nearly every program: it carries on without it.
+            note = "the system log; programs carry on without it"
+        elif _refused(where):
+            note = ("the program behind it acts for you, on the network or the machine; "
+                    "allowing its folder hands that over")
+        return Entry("net", f"local socket {safe(tilde(where))}", flag("--write", tilde(folder)), note,
+                     quiet=log, source=denial.source)
 
     def verify(self, kind: str, path: str, op: str) -> bool:
         """Whether a refusal of `path` can have come from this policy.

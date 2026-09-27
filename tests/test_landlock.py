@@ -28,11 +28,6 @@ if sys.platform == "linux":
 else:
     _ABI = 0
 
-_NEED_V9 = pytest.mark.skipif(
-    _ABI < 9,
-    reason=f"needs Landlock ABI 9 (Linux 7.1+); this machine speaks ABI {_ABI}",
-)
-
 
 @pytest.fixture
 def box(tmp_path):
@@ -734,54 +729,76 @@ def test_every_shim_failure_raises_and_says_which(shim, code, why):
 
 
 # ---------------------------------------------------------------------------
-# phase 6: ResolveUnix (Landlock ABI 9, Linux 7.1+)
+# socket files: Landlock ResolveUnix (ABI 9, Linux 7.1+; DESIGN 5.3, phase 6)
 # ---------------------------------------------------------------------------
 #
-# DESIGN-host-allowlisting.md 5.3: a write grant closes the unix-socket race
-# in the kernel itself, on a kernel new enough. Measured directly on this
-# machine (ABI 7, native/tests/downgrade.rs): asking `handle_access` for a
-# right the real kernel does not have downgrades `restrict_self` to
-# `PartiallyEnforced`, even under `BestEffort` -- so the shim only adds
-# `ResolveUnix` once it has separately probed that the running kernel is V9
-# or newer (native/src/lib.rs, `bonus`). What is testable here, on any
-# kernel, is that this stays true: a write grant seals FULL exactly as before
-# phase 6. What needs a 7.1 kernel is testable nowhere yet.
+# From ABI 9 the shim limits connecting (and sending with an address) to a
+# socket file to the write-granted folders, whenever Landlock handles the
+# network (net is not True). Below ABI 9 nothing here governs socket files.
+# These run on every kernel: below 9 they pin today's behaviour, from 9 they
+# require the refusal. Rows 22 and 23 of the design's matrix, at the kernel.
+
+SOCKETS = """
+import errno, socket
+def attempt(name, fn):
+    try:
+        fn()
+        print(name, "=>", "OK", flush=True)
+    except OSError as exc:
+        print(name, "=>", errno.errorcode.get(exc.errno, exc.errno), flush=True)
+def stream(path):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.connect(path)
+def sendto(path):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+        s.sendto(b"x", path)
+def sendmsg(path):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+        s.sendmsg([b"x"], [], 0, path)
+"""
 
 
-def test_a_write_grant_still_seals_full_below_the_resolveunix_floor(box):
-    # The regression phase 6 could have introduced: requesting ResolveUnix
-    # unconditionally (rather than gated on the real running ABI) reports
-    # PartiallyEnforced on every kernel below ABI 9 -- which `load` treats as
-    # a failed seal, so a write grant that worked yesterday would refuse
-    # outright today. This is that seal, run for real.
-    inside, _ = box
+@pytest.fixture
+def listening(tmp_path):
+    """A stream and a datagram socket in a folder the policy grants, and the
+    same pair in one it does not. Nothing accepts: a listening socket's
+    backlog and a datagram socket's queue take what is sent."""
+    made = []
+    for folder in ("granted", "outside"):
+        (tmp_path / folder).mkdir()
+        for name, kind in (("s.sock", socket.SOCK_STREAM), ("d.sock", socket.SOCK_DGRAM)):
+            sock = socket.socket(socket.AF_UNIX, kind)
+            sock.bind(str(tmp_path / folder / name))
+            if kind == socket.SOCK_STREAM:
+                sock.listen(16)
+            made.append(sock)
+    yield tmp_path / "granted", tmp_path / "outside"
+    for sock in made:
+        sock.close()
+
+
+@pytest.mark.parametrize("net", ["False", "[443]", "True"])
+def test_socket_files_need_a_write_grant_from_abi_9(listening, net):
+    granted, outside = listening
     done = jail(
-        f"""
-        open({str(inside / 'new.txt')!r}, "w").write("hello")
-        """,
-        policy=f"Policy(write=[{str(inside)!r}])",
+        SOCKETS + "\n".join(
+            f"attempt({label!r}, lambda: {call}({str(folder / name)!r}))"
+            for folder, where in ((granted, "granted"), (outside, "outside"))
+            for label, call, name in (
+                (f"{where} connect", "stream", "s.sock"),
+                (f"{where} sendto", "sendto", "d.sock"),
+                (f"{where} sendmsg", "sendmsg", "d.sock"),
+            )
+        ),
+        policy=f"Policy(net={net}, write=[{str(granted)!r}])",
         seal=SEAL,
     )
-    assert done.returncode == 0, (
-        f"a write grant no longer seals fully on this ABI-{_ABI} kernel:\n{done.stderr}"
-    )
-
-
-@_NEED_V9
-def test_row_3_the_unix_socket_race_is_closed_by_the_kernel_on_7_1(box):
-    # The residual this whole phase exists to close (FINDINGS.md, "Linux: the
-    # unix-socket race is easy to win": 762 of 3000 tries won it without this
-    # bit). On a 7.1+ kernel, a write grant should make the race harness in
-    # test_guard.py come back at 0 of however many it tries, the same way TCP
-    # already does -- run that harness's unix case here once such a kernel is
-    # available, and delete this placeholder for the real thing.
-    pytest.skip("no ABI 9 kernel was available to write this test against")
-
-
-@_NEED_V9
-def test_row_23_unix_datagram_sendmsg_is_refused_by_the_kernel_on_7_1(box):
-    # RESEARCH-host-allowlisting.md open question 4: ResolveUnix covers
-    # sendmsg with a msg_name as well as connect, confirmed from the kernel's
-    # own source (unix_dgram_sendmsg reaches security_unix_find through
-    # unix_find_bsd) but never run against a real 7.1 kernel.
-    pytest.skip("no ABI 9 kernel was available to write this test against")
+    print(f"Landlock ABI {_ABI}, net={net}:\n{done.stdout}{done.stderr}")
+    # The seal itself is FULL on every kernel: asking for ResolveUnix where
+    # the kernel lacks it would have made it partial, and refused (FINDINGS.md).
+    assert done.returncode == 0, done.stderr
+    got = dict(line.split(" => ") for line in done.stdout.splitlines())
+    closed = _ABI >= 9 and net != "True"
+    for call in ("connect", "sendto", "sendmsg"):
+        assert got[f"granted {call}"] == "OK"
+        assert got[f"outside {call}"] == ("EACCES" if closed else "OK"), call

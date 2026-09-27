@@ -291,7 +291,9 @@ def load(policy: Policy) -> int:
     if policy.net is not True:
         # Anything other than "wide open" means Landlock handles the network.
         # With net=False that leaves no port rules at all, which denies every
-        # TCP bind and connect here as well as in the syscall filter.
+        # TCP bind and connect here as well as in the syscall filter. On
+        # Landlock ABI 9 (Linux 7.1+) it also limits connecting to a unix
+        # socket file to the write-granted folders (the shim's `bonus`).
         flags |= NET
         # Host entries (DESIGN-host-allowlisting.md 5.3, layer 1) allow no
         # port at all: every TCP connect the kernel actually runs is refused,

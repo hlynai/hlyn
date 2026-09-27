@@ -387,14 +387,24 @@ def test_row_3_racing_the_address_never_connects_tcp_anywhere_but_the_proxy(prox
 
 @pytest.mark.skipif(not any(os.access(os.path.join(p, "cc"), os.X_OK)
                             for p in os.environ.get("PATH", "").split(":")), reason="needs cc")
-def test_row_3_unix_race_is_measured_as_the_documented_residual(proxy):
+@pytest.mark.parametrize("where", ["inside", "outside"])
+def test_row_3_unix_race(proxy, where):
     """The gate lets an allowed unix connect run, so a racing thread can turn
-    it into a refused path after the check (5.3's residual; Landlock
-    RESOLVE_UNIX closes it on 7.1+). Measured, not asserted zero: this test
-    records how often the race is won, and checks the check itself works."""
+    it into a refused path after the check (5.3's residual).
+
+    `inside`: the refused socket (docker.sock) sits in the write-granted
+    folder. Landlock allows that whole folder, so no kernel closes this;
+    measured, not asserted zero. `outside`: it sits in a folder no grant
+    covers, the usual case (the resolver, D-Bus, the container runtime).
+    From Landlock ABI 9 (Linux 7.1+) the kernel refuses it after the gate's
+    check, so the race must be won zero times there (phase 6); before that
+    it is measured. Both check that the check itself works."""
+    from hlyn.core import landlock
+
     library = _race_library()
     box = tempfile.mkdtemp(prefix="hlyn-race-")
-    allowed, refused = f"{box}/ok.sock", f"{box}/docker.sock"
+    other = box if where == "inside" else tempfile.mkdtemp(prefix="hlyn-race-other-")
+    allowed, refused = f"{box}/ok.sock", f"{other}/docker.sock"
     servers = []
     for path in (allowed, refused):
         server = socket.socket(socket.AF_UNIX)
@@ -415,9 +425,11 @@ def test_row_3_unix_race_is_measured_as_the_documented_residual(proxy):
             won += 1
         except OSError:
             break
-    print(f"races won against the unix check: {won} of 3000 (reached {refused})")
-    if sys.platform == "linux" and os.uname().release.split(".")[0].isdigit():
-        major, minor = (int(part) for part in os.uname().release.split(".")[:2])
-        print(f"kernel {major}.{minor}: RESOLVE_UNIX would close this from 7.1")
+    abi = landlock.abi()
+    closed = where == "outside" and abi >= 9
+    print(f"Landlock ABI {abi}, refused socket {where} the grant: races won {won} of 3000 "
+          f"(reached {refused}); {'must be 0' if closed else 'measured'}")
     counts = out.split()
     assert int(counts[1]) > 0 and int(counts[3]) > 0
+    if closed:
+        assert won == 0

@@ -144,8 +144,65 @@ def test_an_abstract_socket_outside_the_agent_gets_no_flag(tmp_path):
     assert "outside this agent" in entry.note
 
 
-def test_a_socket_file_refusal_from_inside_the_program_is_not_believed(tmp_path):
+def test_a_socket_file_refusal_from_inside_the_program_is_not_believed(tmp_path, monkeypatch):
+    # Before Landlock ABI 9 nothing in hlyn refuses a socket file outside host
+    # mode, so the refusal is the file's own permissions.
+    from hlyn.core import landlock
+
+    monkeypatch.setattr(landlock, "abi", lambda: 7)
     assert one(book(tmp_path), kind="net", target="unix:/run/app.sock", op="connect") is None
+
+
+@pytest.fixture
+def abi9(monkeypatch):
+    """Landlock ABI 9 (Linux 7.1+), where the shim limits socket files."""
+    from hlyn.core import landlock
+
+    monkeypatch.setattr(landlock, "abi", lambda: 9)
+
+
+def test_on_7_1_a_refused_socket_file_suggests_its_folder(tmp_path, abi9):
+    server = tmp_path / "srv" / "app.sock"
+    server.parent.mkdir()
+    server.touch()
+    entry = one(book(tmp_path, net=False), kind="net", target=f"unix:{server}", op="connect", by="psql")
+    print(entry.target, "|", entry.allow, "|", entry.note)
+    assert entry.target == f"local socket {server}"
+    assert entry.allow == f"--write {server.parent}"
+    assert entry.note == "a local socket needs write access to its folder" and not entry.quiet
+    ported = one(book(tmp_path, net=[443]), kind="net", target=f"unix:{server}", op="sendto")
+    assert ported.allow == f"--write {server.parent}"
+
+
+def test_on_7_1_socket_files_the_policy_does_not_refuse_are_dropped(tmp_path, abi9):
+    granted = tmp_path / "granted"
+    granted.mkdir()
+    cases = {
+        "net=True leaves socket files open": (book(tmp_path, net=True), "/run/app.sock"),
+        "host mode: the gate reports its own": (book(tmp_path, net=["pypi.org"]), "/run/app.sock"),
+        "under a write grant": (book(tmp_path, write=[str(granted)]), f"{granted}/app.sock"),
+        "write=True grants every folder": (book(tmp_path, write=True), "/run/app.sock"),
+        "relative: whose folder is unknown": (book(tmp_path), "app.sock"),
+    }
+    for name, (report, where) in cases.items():
+        got = one(report, kind="net", target=f"unix:{where}", op="connect")
+        print(f"{name:40} {where:40} -> {got}")
+        assert got is None, name
+
+
+def test_on_7_1_the_log_socket_is_quiet_and_a_runtime_socket_warns(tmp_path, abi9):
+    report = book(tmp_path)
+    log = one(report, kind="net", target="unix:/dev/log", op="connect", by="python3")
+    docker = one(report, kind="net", target="unix:/var/run/docker.sock", op="connect")
+    for entry in (log, docker):
+        print(entry.target, "|", entry.allow, "|", entry.note, "| quiet" if entry.quiet else "")
+    assert log.quiet and log.note == "the system log; programs carry on without it"
+    assert not docker.quiet and "hands that over" in docker.note
+    # Landlock checks where the socket really is: /var/run is usually /run.
+    assert docker.allow == f"--write {os.path.dirname(os.path.realpath('/var/run/docker.sock'))}"
+    shown = report.text(0, ["agent"])
+    print(shown)
+    assert "/dev/log" not in shown and "docker.sock" in shown
 
 
 def test_os_plumbing_is_counted_not_listed(tmp_path):
