@@ -185,6 +185,7 @@ def start(
     source: Mapping[str, str] | None = None,
     inherit: bool = False,
     wait: bool = True,
+    record: bool = False,
 ) -> Route:
     """Start a proxy for `rules` and return once it is listening and sealed.
 
@@ -208,12 +209,16 @@ def start(
     Not for a shared proxy (`control`), which starts once and waits.
     """
     early = not wait and not control
+    # `record`: `hlyn watch`'s proxy, which lets everything through and says
+    # where each connection went (proxy.Proxy's `record`); `rules` is empty.
     args = ["--json", "--quiet", "--detach", *(x for rule in rules for x in ("--net", str(rule)))]
     args += _upstream(os.environ if source is None else source)
     keep: list[int] = []
     mine: list[int] = []  # descriptors this function opened and must close
     if gate:
         args.append("--gate")
+    if record:
+        args.append("--record")
     if events is not None:
         keep.append(events)
         args += ["--events", str(events)]

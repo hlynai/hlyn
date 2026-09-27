@@ -227,6 +227,13 @@ def _watch(cmd: list[str], as_json: bool) -> int:
     if os.path.isdir(os.path.join(root, "hlyn")):
         where["PYTHONPATH"] = os.pathsep.join([where["PYTHONPATH"], root])
 
+    # Programs that use HTTPS_PROXY -- requests, httpx, curl, git, pip, npm,
+    # Node, Go -- name their real destination only to the proxy they go
+    # through, so they go through hlyn's own, in the mode that lets
+    # everything through and says where each connection went. Chains
+    # through the user's own proxy, as a run would (5.5).
+    heard, recorder = _recorder(where)
+
     print("hlyn watch: running unconfined, recording what it touches", file=sys.stderr)
     # The command's own output goes to stderr, not stdout. Our stdout carries
     # exactly one thing -- the policy -- so `hlyn watch -- ... > policy.toml`
@@ -236,6 +243,8 @@ def _watch(cmd: list[str], as_json: bool) -> int:
     done = subprocess.run(cmd, env=where, stdout=2, check=False)  # noqa: S603
 
     watch._load(seen)
+    if recorder is not None:
+        _recorded(heard, recorder)
     if not watch.seen():
         print(
             "hlyn watch: nothing was recorded. The command may not be Python, or may "
@@ -249,6 +258,57 @@ def _watch(cmd: list[str], as_json: bool) -> int:
     print("# a draft to cut down, not a policy to trust\n", file=sys.stderr)
     sys.stdout.write(spec.dumps(plan) if as_json else _toml(spec.shape(plan)))
     return done.returncode
+
+
+def _recorder(where: dict[str, str]) -> tuple[int, Any]:
+    """Start `hlyn watch`'s recording proxy and point `where` at it. Returns
+    the pipe it reports on and the proxy, or `(-1, None)` if it can't start:
+    then watch records what Python itself sees, as before, and says so."""
+    from . import route
+
+    heard, said = os.pipe()
+    try:
+        way = route.start((), events=said, record=True)
+    except Error as exc:
+        os.close(heard)
+        print(f"hlyn watch: recording hosts through a proxy isn't possible here ({exc}); "
+              f"hosts will be recorded from Python only.", file=sys.stderr)
+        return -1, None
+    finally:
+        os.close(said)
+    where.update(route.env(jail._port(way), base=where))
+    return heard, way
+
+
+def _recorded(heard: int, way: Any) -> None:
+    """Add the hosts `hlyn watch`'s proxy saw, and forget the proxy itself:
+    the program only connected to it because it was told to."""
+    import ipaddress
+
+    from . import watch
+
+    way.close()  # the proxy exits, and its report pipe ends
+    data = b""
+    with os.fdopen(heard, "rb") as fh:
+        data = fh.read()
+    for line in data.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("kind") != "seen":
+            continue
+        host, _, port = str(event.get("target", "")).rpartition(":")
+        if not port.isdigit() or not host:
+            continue
+        try:
+            ipaddress.ip_address(host.strip("[]"))
+            watch._seen.add(("target", f"{host.strip('[]')} {port}"))
+        except ValueError:
+            watch._seen.add(("host", f"{host} {port}"))
+    for local in ("127.0.0.1", "::1"):
+        watch._seen.discard(("addr", f"{local} {way.port}"))
+    watch._seen.discard(("host", f"localhost {way.port}"))
 
 
 def _toml(data: dict[str, object]) -> str:

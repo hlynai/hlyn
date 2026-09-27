@@ -1375,3 +1375,52 @@ def test_event_lines_stay_whole_json_under_the_pipe_limit():
     assert first["why"] == "not-listed" and "detail" not in first
     assert second == {"kind": "net", "target": "short.example:443", "allow": "--net short.example",
                       "why": "dns"}
+
+
+# ---------------------------------------------------------------------------
+# record mode: hlyn watch's proxy, for a program running unconfined
+# ---------------------------------------------------------------------------
+
+
+def test_record_mode_lets_every_host_through_and_reports_each_once():
+    async def scenario():
+        far = await Far(reply=b"pong").start()
+        events: list = []
+        net = Net({"api.example.com": [PUBLIC], "db.corp": ["10.0.0.5"]}, {PUBLIC: far.port, "10.0.0.5": far.port})
+        served = await start((), net, events, record=True)
+        answers = []
+        for target in ("api.example.com:443", "api.example.com:443", "db.corp:5432", "203.0.113.9:8443"):
+            answers.append(status(await talk(served.ports[0], connect(target) + b"ping", wait=0.5)))
+        await served.close()
+        await far.stop()
+        return answers, events, net
+
+    answers, events, net = run(scenario())
+    print(answers, events, net.dialled, sep="\n")
+    # Unconfined, so nothing is refused: not an unlisted host, not a name that
+    # resolves privately (a watched program must behave as without hlyn).
+    assert answers[:3] == ["HTTP/1.1 200 Connection established"] * 3
+    assert "10.0.0.5" in net.dialled
+    seen = [event["target"] for event in events if event.get("kind") == "seen"]
+    assert seen == ["api.example.com:443", "db.corp:5432", "203.0.113.9:8443"]  # once each
+
+
+def test_record_mode_still_refuses_a_name_it_cant_parse():
+    async def scenario():
+        events: list = []
+        served = await start((), Net({}, {}), events, record=True)
+        answer = await talk(served.ports[0], connect("bad_name!.com:443"), wait=0.5)
+        await served.close()
+        return answer, events
+
+    answer, events = run(scenario())
+    print(status(answer), events)
+    assert status(answer).startswith("HTTP/1.1 4")
+    assert not [event for event in events if event.get("kind") == "seen"]
+
+
+def test_record_and_net_do_not_mix():
+    done = subprocess.run([sys.executable, "-m", "hlyn.proxy", "--record", "--net", "a.example.com"],
+                          capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=SRC), check=False)
+    print(done.returncode, done.stderr)
+    assert done.returncode == 2 and "--record lets every host through: leave out --net" in done.stderr

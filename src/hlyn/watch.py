@@ -28,8 +28,9 @@ What it sees, and what it does not, stated plainly because the gap matters:
     proxy tunnels to. When it saw any, the draft names hosts
     (`net = ["api.openai.com"]`, DESIGN-host-allowlisting.md 4.7), so the
     enforced run can check every name; otherwise it names ports, as before.
-    A client that tunnels through a proxy without `http.client` (requests,
-    httpx) shows only the proxy: watch it with the proxy variables unset.
+    Every client that honours `HTTPS_PROXY`, Python or not (requests, httpx,
+    curl, git, npm), goes through hlyn's own proxy in record mode, which lets
+    everything through and reports where each connection went (`cli._watch`).
   * It does not see a C extension that calls `open(2)` directly without going
     through Python, and it does not see inside a child process unless that
     child is also watched. `hlyn watch` arranges the latter for child Pythons;
@@ -118,6 +119,30 @@ def _path(kind: str, value: object) -> None:
         _seen.add((kind, os.path.abspath(text)))
 
 
+def _program(value: object, env: object = None) -> None:
+    """Record a program started by name or path. A bare name (`"curl"`) is
+    found on PATH, as the system finds it; one that isn't there is dropped,
+    since starting it failed anyway. Resolving it against the working folder
+    instead drafted a grant for a file that doesn't exist."""
+    if isinstance(value, bytes):
+        value = os.fsdecode(value)
+    if not isinstance(value, (str, os.PathLike)):
+        return
+    text = os.fspath(value)
+    if not text or os.sep in text:
+        _path("exec", text)
+        return
+    import shutil
+
+    where = None
+    if isinstance(env, dict):
+        found = env.get("PATH", env.get(b"PATH"))
+        where = os.fsdecode(found) if isinstance(found, (str, bytes)) else None
+    full = shutil.which(text, path=where)
+    if full:
+        _path("exec", full)
+
+
 def _port(value: object) -> None:
     """Record a port observation."""
     if isinstance(value, int) and not isinstance(value, bool) and 0 < value < 65536:
@@ -178,7 +203,11 @@ def _hook(event: str, args: tuple[Any, ...]) -> None:
             else:
                 _name(args[1] if len(args) > 1 else None, args[2] if len(args) > 2 else None)
         elif event in ("subprocess.Popen", "os.exec"):
-            _path("exec", args[0] if args else None)
+            # (executable, args, cwd, env) and (path, args, env): the child's
+            # own environment, when given, is where its PATH comes from.
+            env = args[3] if event == "subprocess.Popen" and len(args) > 3 else (
+                args[2] if event == "os.exec" and len(args) > 2 else None)
+            _program(args[0] if args else None, env)
         elif event == "os.system":
             # The command is a shell line, not a path, so the shell itself is
             # what has to be runnable. Recording the line would produce a grant
@@ -305,6 +334,12 @@ def _hosts() -> tuple[str, ...]:
     loopback, `ADDRESS:PORT` otherwise -- but not the environment's own
     proxy, which hlyn's proxy chains through (5.5). Names the grammar
     refuses (non-ASCII, a malformed label) are left out.
+
+    With no names at all, Python's connections alone don't make host
+    entries: an address with no lookup behind it may be one of many a CDN
+    rotates through, so the draft names ports, as it always has. A target a
+    program asked `hlyn watch`'s proxy for by address (`"target"`) is
+    different -- it is exactly what was dialled -- so it always does.
     """
     import ipaddress
 
@@ -323,10 +358,12 @@ def _hosts() -> tuple[str, ...]:
             names.setdefault(host, set())
             if text.isdigit() and int(text):
                 names[host].add(int(text))
-    if not names:
+    asked = {(host, int(port)) for kind, value in _seen if kind == "target"
+             for host, _, port in [value.rpartition(" ")]}
+    if not names and not asked:
         return ()
-    dialled = {(host, int(port)) for kind, value in _seen if kind == "addr"
-               for host, _, port in [value.rpartition(" ")]}
+    dialled = asked | {(host, int(port)) for kind, value in _seen if kind == "addr"
+                       for host, _, port in [value.rpartition(" ")]}
     ports = {port for _, port in dialled}
     named_ports = {port for found in names.values() for port in found}
     skip = _proxies()

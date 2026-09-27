@@ -399,7 +399,7 @@ tmp = true
 log = true
 ```
 
-`net` lists the hosts the program looked up and connected to. Through a proxy, requests and httpx show only the proxy, so watch with `HTTPS_PROXY` and friends unset.
+`net` lists the hosts the program reached. Python's own lookups and connections are recorded directly; anything that uses `HTTPS_PROXY` (requests, httpx, curl, git, pip, npm, Node, Go), in Python or not, goes through hlyn's proxy in a recording mode that lets everything through and notes where each connection went. It chains through your own proxy if you have one.
 
 **2. Read it and cut it down.** Anything your agent doesn't strictly need should go.
 

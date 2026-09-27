@@ -160,6 +160,10 @@ def verdict(code: int) -> bytes:
 
 HEAD_MAX = 8192
 
+# Most distinct targets `record` mode reports (`hlyn watch`); past this, it
+# still lets them through, it only stops listing.
+RECORDED = 10000
+
 # RFC 9110 token characters, for methods and header names.
 _TOKEN = frozenset(b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 # Header values: visible ASCII, space and tab. Bytes over 0x7f are refused
@@ -572,7 +576,10 @@ class Proxy:
         await proxy.close()
 
     `gate=True` expects the Linux gate's PROXY v2 header on every connection
-    and closes any without one. `report` is called with one dict per denial.
+    and closes any without one. `record=True` is `hlyn watch`'s mode, for a
+    program running unconfined: every well-formed target is let through
+    unchecked, as without hlyn, and reported once as `{"kind": "seen"}`.
+    `report` is called with one dict per denial.
     `resolve`, `dial` and `mine` replace name lookup, connecting out and this
     machine's own addresses; tests use them to stand in for the internet.
     """
@@ -585,7 +592,9 @@ class Proxy:
     resolve: Resolve | None = None
     dial: Dial | None = None
     mine: Callable[[], Sequence[hosts.IPAddress]] | None = None
+    record: bool = False
     ports: tuple[int, ...] = field(default=(), init=False)
+    _recorded: set[str] = field(default_factory=set, init=False, repr=False)
     _servers: dict[int, list[asyncio.Server]] = field(default_factory=dict, init=False, repr=False)
     # Each connection being served, and the port it arrived on.
     _active: dict[asyncio.Task[None], int] = field(default_factory=dict, init=False, repr=False)
@@ -814,8 +823,8 @@ class Proxy:
                 return b""  # a server-first protocol: nothing to check
             if not first:
                 return None
-        if first[0] != 22:
-            return first  # not TLS: the host and port are already allowed
+        if first[0] != 22 or self.record:
+            return first  # not TLS (the host and port are already allowed), or only watching
         until = time.monotonic() + self.limits.wait
         try:
             said, first = await self._read(
@@ -858,7 +867,11 @@ class Proxy:
             address = hosts.unwrap(address)
             rule = hosts.match(self.rules, port=port, address=address)
         shown = _named(name, port) if address is None else _shown(address, port)
-        if rule is None:
+        if self.record:
+            if shown not in self._recorded and len(self._recorded) < RECORDED:
+                self._recorded.add(shown)
+                self._tell({"kind": "seen", "target": shown})
+        elif rule is None:
             raise self._no(shown, port, "dns" if port == 53 else "not-listed")
 
         if address is not None:
@@ -911,6 +924,8 @@ class Proxy:
                 502, f"hlyn: can't resolve {shown}: {exc}", self._event("resolve-failed", shown, None)
             ) from None
         found = list(dict.fromkeys(found))
+        if self.record:
+            return found  # watching an unconfined program: change nothing it does
         mine = self._addresses()
         kept: list[tuple[hosts.IPAddress, str | None]] = []
         dropped: list[tuple[hosts.IPAddress, str | None]] = []
@@ -1285,10 +1300,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--detach", action="store_true",
                         help="leave the parent's process tree first (how hlyn starts it)")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--record", action="store_true",
+                        help="let every host through unchecked and report each once (hlyn watch)")
     args = parser.parse_args(argv)
 
     try:
-        if not args.net:
+        if args.record and args.net:
+            raise Invalid("--record lets every host through: leave out --net")
+        if not args.net and not args.record:
             raise Invalid("name at least one host: --net api.openai.com")
         rules = tuple(hosts.parse(entry) for entry in args.net)
         chain = None
@@ -1345,7 +1364,7 @@ async def _main(
     sinks: Sinks,
     dumps: Callable[[object], str],
 ) -> int:
-    proxy = Proxy(rules, gate=args.gate, upstream=chain, limits=limits, report=sinks)
+    proxy = Proxy(rules, gate=args.gate, upstream=chain, limits=limits, report=sinks, record=args.record)
     port: int | None = None
     if args.listen_fd:
         port = await proxy.adopt([socket.socket(fileno=fd) for fd in args.listen_fd])

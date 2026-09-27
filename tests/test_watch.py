@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -256,3 +257,47 @@ def test_watch_once_then_enforce_the_draft(tmp_path):
     print(enforced.stdout, enforced.stderr[-800:])
     assert "403 hlyn: evil.example.net:443 is not in --net" in enforced.stdout
     assert "allow with --net evil.example.net" in enforced.stderr
+
+
+@pytest.mark.skipif(not shutil.which("curl"), reason="needs curl")
+def test_watch_sees_where_a_non_python_client_went_through_its_proxy(tmp_path):
+    """curl in a child process is invisible to Python's audit hooks; it
+    names its destination only to the proxy it goes through. hlyn watch
+    sends it through its own, in record mode, and drafts that host -- and
+    not the recording proxy it only reached because it was told to."""
+    import http.server
+    import threading
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.2", 0), http.server.SimpleHTTPRequestHandler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    script = tmp_path / "agent.py"
+    script.write_text(f"import subprocess; subprocess.run(['curl', '-s', '-o', '/dev/null', "
+                      f"'http://127.0.0.2:{port}/'], check=True)\n")
+    env = {k: v for k, v in os.environ.items() if k.lower() not in (
+        "https_proxy", "http_proxy", "all_proxy", "no_proxy")}
+    env["PYTHONPATH"] = SRC
+    done = subprocess.run([sys.executable, "-m", "hlyn.cli", "watch", "--", sys.executable, str(script)],
+                          capture_output=True, text=True, env=env, check=False, timeout=60)
+    server.shutdown()
+    print(done.stdout, done.stderr[-600:])
+    assert done.returncode == 0
+    assert f'"localhost:{port}"' in done.stdout
+    assert done.stdout.count("localhost:") == 1  # the recording proxy isn't drafted
+    # A program started by bare name is granted where PATH found it.
+    assert f'"{os.path.realpath(shutil.which("curl"))}"' in done.stdout or f'"{shutil.which("curl")}"' in done.stdout
+
+
+def test_a_program_started_by_name_is_found_on_path_not_in_the_working_folder(clean, tmp_path):
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    tool = bin_ / "mytool"
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    watch._program("mytool", {"PATH": str(bin_)})
+    watch._program("no-such-tool-anywhere", {"PATH": str(bin_)})
+    watch._program("./relative/tool")
+    print(watch.seen())
+    assert ("exec", str(tool)) in watch.seen()
+    assert not [value for kind, value in watch.seen() if "no-such-tool" in value]
+    assert ("exec", os.path.abspath("./relative/tool")) in watch.seen()
