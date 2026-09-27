@@ -45,6 +45,7 @@ from typing import TypeVar
 
 from . import hosts
 from .error import Invalid
+from .wire import SIGNATURE, header
 
 __all__ = [
     "Bad",
@@ -74,7 +75,7 @@ _TIMEOUT = (TimeoutError, asyncio.TimeoutError)
 # the gate's PROXY v2 header (HAProxy's proxy-protocol.txt, section 2.2)
 # ---------------------------------------------------------------------------
 
-SIGNATURE = b"\r\n\r\n\x00\r\nQUIT\n"
+# The signature and the writer live in wire.py, shared with the gate.
 
 # The header's own length field allows 64 KiB of extensions. The gate writes
 # none, so anything much longer than the IPv6 address block is not the gate.
@@ -91,26 +92,6 @@ class Origin:
 
     address: hosts.IPAddress | None = None
     port: int | None = None
-
-
-def header(address: str | hosts.IPAddress | None = None, port: int | None = None) -> bytes:
-    """The PROXY v2 header naming what the agent dialled, or "unknown".
-
-    Written by the gate as the first bytes of its connection to the proxy.
-    With no address it is a LOCAL header, which the proxy reads as "the
-    destination is unknown". The source fields are zero: the proxy has no use
-    for the agent's own address, and the gate has none to give.
-    """
-    if address is None:
-        return SIGNATURE + bytes((0x20, 0x00)) + struct.pack("!H", 0)
-    ip = ipaddress.ip_address(address)
-    if port is None or not 0 <= port < 65536:
-        raise ValueError(f"a PROXY header needs a port 0-65535, got {port!r}")
-    if ip.version == 4:
-        body = bytes(4) + ip.packed + struct.pack("!HH", 0, port)
-        return SIGNATURE + bytes((0x21, 0x11)) + struct.pack("!H", len(body)) + body
-    body = bytes(16) + ip.packed + struct.pack("!HH", 0, port)
-    return SIGNATURE + bytes((0x21, 0x21)) + struct.pack("!H", len(body)) + body
 
 
 def unheader(data: bytes) -> tuple[Origin, int] | None:

@@ -262,8 +262,10 @@ class Shared:
     process does.
     """
 
-    def __init__(self, rules: Sequence[Rule], source: Mapping[str, str] | None = None) -> None:
-        self.route = start(rules, control=True, source=source)
+    def __init__(
+        self, rules: Sequence[Rule], source: Mapping[str, str] | None = None, gate: bool = False
+    ) -> None:
+        self.route = start(rules, control=True, source=source, gate=gate)
         self.pid = os.getpid()
         self.lock = threading.Lock()
         self.asked = 0
@@ -311,15 +313,16 @@ _shared: dict[tuple[str, ...], Shared] = {}
 _shared_lock = threading.Lock()
 
 
-def shared(rules: Sequence[Rule], source: Mapping[str, str] | None = None) -> Shared:
-    """This process's shared proxy for `rules`, started on first use."""
+def shared(rules: Sequence[Rule], source: Mapping[str, str] | None = None, gate: bool = False) -> Shared:
+    """This process's shared proxy for `rules`, started on first use. `gate`:
+    it expects the Linux gate's header on every connection (see `start`)."""
     upstream = tuple(_upstream(os.environ if source is None else source))
-    key = (*(str(rule) for rule in rules), "|", *upstream)
+    key = (*(str(rule) for rule in rules), "|", *upstream, "|", str(gate))
     with _shared_lock:
         found = _shared.get(key)
         if (found is None or found.pid != os.getpid() or found.route.control is None
                 or not found.route.alive()):
-            found = _shared[key] = Shared(rules, source)
+            found = _shared[key] = Shared(rules, source, gate)
         return found
 
 
@@ -392,11 +395,16 @@ def sockets() -> list[Open]:
     destination. Found by asking each open descriptor its family.
     """
     where = "/dev/fd" if sys.platform == "darwin" else "/proc/self/fd"
+    try:
+        names = [int(name) for name in os.listdir(where) if name.isdigit()]
+    except OSError:
+        # Unlistable, as inside another hlyn seal (no /proc): ask every
+        # descriptor number this process may hold instead.
+        import resource
+
+        names = list(range(min(resource.getrlimit(resource.RLIMIT_NOFILE)[0], 65536)))
     found = []
-    for name in sorted(os.listdir(where), key=lambda item: int(item) if item.isdigit() else -1):
-        if not name.isdigit():
-            continue
-        fd = int(name)
+    for fd in sorted(names):
         try:
             if not stat.S_ISSOCK(os.fstat(fd).st_mode):
                 continue

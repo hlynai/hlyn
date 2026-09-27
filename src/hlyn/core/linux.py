@@ -15,10 +15,10 @@ from __future__ import annotations
 import os
 import platform
 
-from ..error import Unsupported
+from ..error import Invalid, Unsupported
 from ..policy import Policy
 from ..report import Listener
-from . import landlock, preload, seccomp
+from . import guard, landlock, notify, preload, seccomp
 
 __all__ = ["listen", "load", "probe", "ready", "seal"]
 
@@ -33,11 +33,18 @@ def ready() -> bool:
     return landlock.ready() and seccomp.ready()
 
 
-# Whether this backend enforces host entries in `net`. Not yet: the connection
-# gate that makes the proxy the only way out on Linux is design phase 4.
-HOSTS = False
-UNBUILT = ("host names in net aren't enforced on Linux yet: the connection gate that makes the "
-           "proxy the only way out (design phase 4) is still being built")
+# Whether this backend enforces host entries in `net` (DESIGN-host-allowlisting.md
+# 5.3): Landlock allows no TCP port, and the gate answers every connect by
+# swapping in a connection to the proxy, or refusing.
+HOSTS = True
+
+# Whether host mode puts the gate in front of the proxy: every connection
+# reaches it through the gate, which writes a PROXY v2 header first (5.5).
+GATE = True
+
+# The proxy's connect timeout, which bounds a direct connection's wait for
+# its verdict (5.3). Matches proxy.Limits.connect's default.
+CONNECT = 10.0
 
 
 def probe() -> dict[str, object]:
@@ -63,7 +70,8 @@ def probe() -> dict[str, object]:
         "enforce": ok and filter,
         "scope": ok,  # signals and abstract sockets between agents
         "ports": ok,  # network rules at all
-        "hosts": HOSTS and ok,
+        # Host names in `net`: the notify API and no other listener here.
+        "hosts": ok and filter and notify.ready() and not seccomp.busy(),
         # Whether `hlyn run` can list what was blocked: needs the preloaded
         # reporting library. Not part of `enforce` -- the boundary holds
         # either way; only the explanation is missing.
@@ -80,9 +88,32 @@ def probe() -> dict[str, object]:
         )
     if not filter:
         missing.append("libseccomp is not installed, so syscalls cannot be filtered")
+    elif not notify.ready():
+        missing.append("libseccomp is older than 2.5.0, so host names in net can't be enforced; "
+                       "use ports (--net 443) or upgrade libseccomp")
+    elif seccomp.busy():
+        missing.append("host names in net can't be enforced here: " + seccomp.BUSY)
     if missing:
         out["why"] = "; ".join(missing)
+    if out["hosts"]:
+        scope = ptrace()
+        if scope is not None and scope >= 2:
+            out["reduced"] = (
+                f"kernel.yama.ptrace_scope is {scope}, so hlyn's gate can't read connection "
+                f"addresses: only programs that use HTTPS_PROXY reach hosts, and address, "
+                f"localhost and unix-socket entries don't work. Set it to 1 for those"
+            )
     return out
+
+
+def ptrace() -> int | None:
+    """Yama's `ptrace_scope`, or None without Yama. At 0 and 1 the gate may
+    read its descendants' memory (full mode); at 2 and 3 it may not (5.3)."""
+    try:
+        with open("/proc/sys/kernel/yama/ptrace_scope") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
 
 
 # getsockopt(SOL_SOCKET, SO_DOMAIN) reports the address family of an existing
@@ -133,16 +164,50 @@ def wired() -> list[int]:
     return out
 
 
-def load(policy: Policy, tag: str | None = None) -> int:
+# Whether `ready_hosts` found no listener in this process's filter chain.
+# Forked children inherit the chain and this flag with it, so `load` in the
+# child needn't fork to ask again; every entry point asks afresh.
+_checked = False
+
+
+def ready_hosts() -> None:
+    """Refuse host mode here, naming the fix, before any helper starts: the
+    notify API is missing, or this process is inside another listener."""
+    global _checked
+    notify._lib()
+    _checked = False
+    if seccomp.busy():
+        raise Unsupported(seccomp.BUSY + " Nothing was sealed.")
+    _checked = True
+
+
+def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int:
     """Apply `policy` to the calling process. One-way, and irreversible.
 
     `tag` is unused here. On Linux, refusals are reported from inside the
     confined programs rather than by the kernel; see `listen`.
+
+    `port` is the proxy's port, which a policy naming hosts requires. The
+    notification descriptor the filter returns then goes to the gate this
+    process was given (`gate.become` or `gate.detached`) before this
+    returns, so no agent code ever holds it (5.2, step 5).
     """
-    if policy.hosts():
-        # Host entries aren't ports: never let them reach a rule that reads
-        # them as such. jail.unbuilt refuses first, with the user's message.
-        raise Unsupported("host entries in net are not enforced by this backend yet.")
+    from .. import gate
+
+    named = policy.hosts()
+    if named:
+        # Everything that could refuse host mode is asked before the first
+        # rule is applied, so a refusal leaves the process untouched.
+        if port is None:
+            raise Invalid("net names hosts, so sealing needs the proxy's port. Start it with route.start().")
+        notify._lib()  # raises, naming the fix, if libseccomp is too old
+        if not _checked and seccomp.busy():
+            raise Unsupported(seccomp.BUSY + " Nothing was sealed.")
+        if gate._handoff is None:
+            raise Unsupported("net names hosts, but no gate was started to answer this process's "
+                              "connections (hlyn.on, run, spawn and hlyn run start one). Nothing was sealed.")
+        writes = policy.writes()
+        config = guard.Config(port=port, rules=named, writes=writes, connect=CONNECT)
     if policy.net is False:
         open_sockets = wired()
         if open_sockets:
@@ -155,7 +220,9 @@ def load(policy: Policy, tag: str | None = None) -> int:
                 f"through it. Close them before calling hlyn.on(), or use hlyn.run(fn)."
             )
     abi = landlock.load(policy)
-    seccomp.load(policy)
+    fd = seccomp.load(policy)
+    if fd is not None:
+        gate.hand(fd, config)
     return abi
 
 

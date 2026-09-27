@@ -288,7 +288,10 @@ def _machine(out: dict[str, object]) -> str:
         ("isolation between agents on this machine", out.get("scope")),
         ("listing what was blocked, after hlyn run", out.get("report")),
     ]
-    return "\n".join([head, *(f"    {'yes' if yes else 'no':<4}{name}" for name, yes in rows)]) + "\n"
+    lines = [head, *(f"    {'yes' if yes else 'no':<4}{name}" for name, yes in rows)]
+    if out.get("reduced"):
+        lines.append(f"    note: host names work in reduced mode here: {out['reduced']}.")
+    return "\n".join(lines) + "\n"
 
 
 def _gist(plan: Policy) -> str:
@@ -380,7 +383,7 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
         heard, said = os.pipe()
         try:
             with jail._denials(plan) as fd:
-                way = route.start(plan.hosts(), log=fd, events=said, inherit=True)
+                way = route.start(plan.hosts(), log=fd, events=said, inherit=True, gate=jail.gated())
         except BaseException:
             os.close(heard)
             raise
@@ -712,6 +715,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
     if not _exposed(plan) or not _reach(plan):
         return 2
     jail.unbuilt(plan)
+    jail._ready(plan)
     return _launch(cmd, plan, args.no_report, args.json)
 
 

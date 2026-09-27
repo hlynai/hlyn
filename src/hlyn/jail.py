@@ -142,6 +142,7 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
         )
     plan = _plan(policy, edits)
     unbuilt(plan)
+    _ready(plan)
     found = _warn(plan)
     if not plan.hosts():
         return _seal(plan, found=found)
@@ -160,12 +161,40 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
             f"session.close()), or call hlyn.on() before creating network clients."
         )
     with _denials(plan) as fd:
-        way = route.start(plan.hosts(), log=fd, inherit=True)
+        way = route.start(plan.hosts(), log=fd, inherit=True, gate=gated())
     try:
+        if gated():
+            # The calling process can't gain a parent, so its gate runs
+            # detached, and is exempted from Yama's ancestors-only rule so it
+            # may read this process's memory (5.2). Children of this process
+            # aren't covered by the exemption: they get reduced mode where
+            # Yama is at 1 (5.3).
+            from . import gate
+
+            _ptracer(gate.detached())
         return _seal(plan, _proxied(_port(way)), found=found, proxy=(_port(way), way.pid))
     except BaseException:
         way.close()
+        if gated():
+            from . import gate
+
+            gate.drop()
         raise
+
+
+def gated() -> bool:
+    """Whether host mode on this platform puts the gate in front of the proxy
+    (Linux, 5.3): the proxy then expects the gate's header first."""
+    return bool(getattr(back(), "GATE", False))
+
+
+def _ptracer(pid: int) -> None:
+    """`prctl(PR_SET_PTRACER, pid)`: let `pid` read this process's memory
+    under Yama's `ptrace_scope` 1. A no-op without Yama (EINVAL)."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl(0x59616D61, ctypes.c_ulong(pid), 0, 0, 0)
 
 
 def unbuilt(plan: Policy) -> None:
@@ -186,6 +215,15 @@ def unbuilt(plan: Policy) -> None:
             f"net names hosts ({shown}), and {why}. Nothing was sealed. For now use ports "
             f"(--net 443, or net=[443]), which allow every host on them, or net=False."
         )
+
+
+def _ready(plan: Policy) -> None:
+    """Refuse a host policy this machine or this process can't take (Linux:
+    libseccomp too old, or already inside a listener), before any helper
+    starts. The backend asks again when it seals."""
+    check = getattr(back(), "ready_hosts", None)
+    if plan.hosts() and check is not None:
+        check()
 
 
 @contextlib.contextmanager
@@ -331,10 +369,13 @@ def _seal(
 
     more: dict[str, object] = {}
     if proxy is not None:
+        from . import gate
+
         port, pid = proxy
+        helpers = [pid] if gate.pid is None else [gate.pid, pid]
         level = back().load(plan, tag, port)
         # `net` is in the record already, as the rules' text.
-        more = {"proxy": f"127.0.0.1:{port}", "helpers": [pid], "closed": closed}
+        more = {"proxy": f"127.0.0.1:{port}", "helpers": helpers, "closed": closed}
     else:
         level = back().load(plan, tag) if tag else back().load(plan)
 
@@ -365,11 +406,13 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     """
     plan = _plan(policy, edits)
     unbuilt(plan)  # in the parent, so the refusal is an exception, not a dead child
+    _ready(plan)
     # Before the fork, never after: see the note above.
     back().ready()
     named = plan.hosts()
     share = None
     port = 0
+    alone = False
     found: list[str] = []
     if named:
         # Imported here, before the fork: the child must not take the
@@ -377,9 +420,17 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
         from . import gate, route
 
         found = _warn(plan)
-        share = route.shared(named)
+        share = route.shared(named, gate=gated())
         with _denials(plan) as fd:
             port = share.lease(fd)
+        # A caller with one thread can have its gate serve in the forked
+        # child with no interpreter start (gate.become, `fresh`).
+        if sys.platform == "linux":
+            from .core.landlock import crowd
+
+            alone = len(crowd()) <= 1
+            if alone:
+                gate.prepare()
     try:
         read, write = os.pipe()
         kid = os.fork()
@@ -393,7 +444,8 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
                 closed = route.neutralise(route.sockets())
                 _seal(plan, _proxied(port), found=found, proxy=(port, pid), closed=closed)
 
-            gate.become(lambda: _child(fn, sealed, write), forward=False, isolate=False)
+            gate.become(lambda: _child(fn, sealed, write), forward=False, isolate=False,
+                        close=[write], fresh=not alone)
 
         os.close(write)
         with os.fdopen(read, "rb") as fh:
@@ -459,6 +511,7 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
     """
     plan = _plan(policy, edits)
     unbuilt(plan)
+    _ready(plan)
     found = _warn(plan)
     if not plan.hosts():
         _spawn(cmd, plan, found=found)
@@ -468,7 +521,7 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
 
     run, argv, plan = _prepare(cmd, plan)  # in this process, so a bad command is an exception
     with _denials(plan) as fd:
-        way = route.start(plan.hosts(), log=fd, inherit=True)
+        way = route.start(plan.hosts(), log=fd, inherit=True, gate=gated())
     port = _port(way)
 
     def body() -> None:

@@ -49,7 +49,7 @@ from typing import Literal
 
 from .. import hosts
 from ..hosts import Rule
-from ..proxy import header
+from ..wire import header
 from . import notify, seccomp
 
 __all__ = ["REFUSED", "Config", "Guard"]
@@ -159,17 +159,27 @@ class Guard:
 
     # -- the loop ---------------------------------------------------------
 
-    def serve(self, stop: Callable[[], bool] | None = None) -> None:
+    def serve(self, stop: Callable[[], bool] | None = None, wake: int | None = None) -> None:
         """Answer notifications until the descriptor hangs up (no task uses
-        the filter any more: FINDINGS.md, POLLHUP on exit) or `stop()`."""
+        the filter any more: FINDINGS.md, POLLHUP on exit) or `stop()`
+        returns True. `stop` is asked on every pass; `wake` is a descriptor
+        that becomes readable when it is worth asking (a signal's wake-up
+        pipe), drained here."""
         poll = self._poll = select.poll()
         poll.register(self.fd, select.POLLIN)
+        for fd in self.waits:
+            poll.register(fd, select.POLLIN)
+        if wake is not None:
+            poll.register(wake, select.POLLIN)
         try:
             while True:
                 if stop is not None and stop():
                     return
                 for fd, event in poll.poll(self._next()):
-                    if fd != self.fd:
+                    if fd == wake:
+                        with contextlib.suppress(OSError):
+                            os.read(wake, 512)
+                    elif fd != self.fd:
                         self._verdict(fd)
                     elif event & select.POLLIN:
                         self.step()
@@ -177,10 +187,13 @@ class Guard:
                         return
                 self._expire()
         finally:
-            for pending in self.waits.values():
-                pending.sock.close()
-            self.waits.clear()
-            self.notice.close()
+            self._poll = None
+            if stop is None:
+                # Done for good: nothing is left to answer.
+                for pending in self.waits.values():
+                    pending.sock.close()
+                self.waits.clear()
+                self.notice.close()
 
     def _next(self) -> int:
         """Milliseconds until the nearest verdict deadline, or 1 s."""
@@ -271,8 +284,11 @@ class Guard:
             # CONNECT and plain HTTP on this connection.
             self._swap(call, target, socket.AF_INET, header(), wait=False, shown="(unknown address)")
             return
-        if address is None or address.family not in (socket.AF_INET, socket.AF_INET6) or address.ip is None:
-            self._no(call, errno.EAFNOSUPPORT if address is not None else errno.EINVAL)
+        if address is None:
+            self._no(call, errno.EFAULT if not data else errno.EINVAL)
+            return
+        if address.family not in (socket.AF_INET, socket.AF_INET6) or address.ip is None:
+            self._no(call, errno.EAFNOSUPPORT)
             return
 
         ip = hosts.unwrap(address.ip)

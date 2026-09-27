@@ -28,6 +28,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import fcntl
+import functools
 import ipaddress
 import os
 import platform
@@ -167,6 +168,7 @@ def ready() -> bool:
     return True
 
 
+@functools.cache
 def _sizes() -> tuple[int, int]:
     """The kernel's sizes of `struct seccomp_notif` and `seccomp_notif_resp`
     (`SECCOMP_GET_NOTIF_SIZES`), at least the fields this module knows."""
@@ -366,21 +368,24 @@ def cwd(pid: int) -> str | None:
 
 
 def read(pid: int, where: int, size: int) -> bytes | None:
-    """`size` bytes of thread `pid`'s memory at `where`, or `None` if the
-    gate may not read it (Yama; reduced mode, 5.3) or the thread is gone.
+    """`size` bytes of thread `pid`'s memory at `where`.
+
+    `None` if the gate may not read this process's memory at all (Yama:
+    reduced mode, 5.3) or the thread is gone; `b""` if it may, but nothing is
+    there (a bad pointer: the kernel would answer EFAULT).
 
     Needs ptrace-attach access, which the gate has as an ancestor of the
     agent (5.2). Call `valid()` afterwards before acting on the bytes."""
-    if size <= 0:
-        return b""
     try:
         fd = os.open(f"/proc/{pid}/mem", os.O_RDONLY | os.O_CLOEXEC)
     except OSError:
         return None
     try:
+        if size <= 0:
+            return b""
         return os.pread(fd, min(size, MOST), where & UNTAG)
     except OSError:
-        return None
+        return b""
     finally:
         os.close(fd)
 

@@ -40,6 +40,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -506,13 +507,26 @@ class Report:
         if self.plan.hosts():
             # Host mode: a program connected directly rather than through the
             # proxy. On macOS only localhost entries are reachable that way
-            # (5.4), so that is the only flag that could help.
+            # (5.4), so that is the only flag that could help. On Linux the
+            # gate reaches any listed address directly (5.3), so the address
+            # itself is the flag -- except DNS: the proxy resolves names.
             local = rest in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
             if local:
                 return Entry("net", shown, f"--net localhost:{port}", WHY["direct"], source=denial.source)
-            return Entry("net", shown, None,
-                         WHY["direct"] + "; on macOS a program must use the proxy for anything but "
-                         "localhost entries", source=denial.source)
+            if sys.platform == "darwin":
+                return Entry("net", shown, None,
+                             WHY["direct"] + "; on macOS a program must use the proxy for anything but "
+                             "localhost entries", source=denial.source)
+            if port == 53:
+                return Entry("net", shown, None, WHY["dns"], source=denial.source)
+            from .error import Invalid
+            from .hosts import parse
+
+            try:
+                flag = parse(f"[{rest}]:{port}" if ":" in rest else f"{rest}:{port}").flag()
+            except Invalid:
+                flag = None
+            return Entry("net", shown, flag, WHY["direct"], source=denial.source)
         if denial.op in ("sendto", "sendmsg"):
             # TCP Fast Open, which hlyn refuses whenever ports are named: Linux
             # before 7.2 lets it past Landlock's port rules, allowed port or not.

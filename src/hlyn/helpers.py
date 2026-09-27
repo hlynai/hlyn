@@ -49,8 +49,13 @@ def command(name: str, *args: str) -> list[str]:
         raise ValueError(f"no helper called {name!r}")
     if getattr(sys, "frozen", False):
         return [sys.executable, MARKER, name, *args]
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    boot = f"import sys; sys.path.insert(0, {root!r}); from hlyn.helpers import main; main()"
+    # This very package, by path, as a bare module: helpers need only their
+    # own submodules, and skipping the package's __init__ (the whole public
+    # API) halves a helper's start, which a gate pays per run (5.8).
+    here = os.path.dirname(os.path.abspath(__file__))
+    boot = ("import sys, types; package = types.ModuleType('hlyn'); "
+            f"package.__path__ = [{here!r}]; sys.modules['hlyn'] = package; "
+            "from hlyn.helpers import main; main()")
     return [interpreter(), "-I", "-S", "-c", boot, name, *args]
 
 

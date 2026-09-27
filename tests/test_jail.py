@@ -368,14 +368,16 @@ def test_the_backend_is_found_before_the_environment_is_scrubbed():
     assert "load saw None" in done.stdout, done.stdout + done.stderr
 
 
-@pytest.mark.skipif(sys.platform == "darwin", reason="macOS enforces hosts: see test_hostmode.py")
 def test_every_entry_point_refuses_a_host_policy_and_leaves_the_process_unsealed():
-    # Where host mode isn't enforced yet (Linux until design phase 4), naming
-    # a host must stop every entry point before anything is changed: no seal,
-    # no scrubbed environment, no child that ran.
+    # On a backend that doesn't enforce host mode, naming a host must stop
+    # every entry point before anything is changed: no seal, no scrubbed
+    # environment, no child that ran. Linux and macOS both enforce it now
+    # (test_hostmode.py), so this turns enforcement off to reach the path.
     done = boot(
         """
         import os, hlyn
+        from hlyn.jail import back
+        back().HOSTS = False
         os.environ["CANARY"] = "still here"
         for name, call in [
             ("on", lambda: hlyn.on(net=["api.openai.com"])),
