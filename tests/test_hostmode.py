@@ -856,3 +856,71 @@ def test_a_program_that_looks_up_names_itself_is_told_how_to_use_the_proxy():
     assert "a name lookup or QUIC (UDP)" in done.stderr
     assert "ignoring HTTPS_PROXY" in done.stderr and "aiohttp: trust_env=True" in done.stderr
     assert "nscd" not in done.stderr
+
+
+FLOOD = """
+import os, socket, statistics, sys, time
+def timed(n=200):
+    port = int(os.environ["HTTPS_PROXY"].rsplit(":", 1)[1])
+    took = []
+    for _ in range(n):
+        s = socket.socket()
+        began = time.perf_counter()
+        s.connect(("127.0.0.1", port))
+        took.append(time.perf_counter() - began)
+        s.close()
+    return statistics.median(took) * 1e6
+print("gate", os.getppid(), flush=True)
+sys.stdin.readline()
+before = timed()
+refused = other = 0
+for i in range(COUNT):
+    s = socket.socket()
+    try:
+        s.connect(("10.%d.%d.%d" % (i >> 16 & 255, i >> 8 & 255, i & 255), 443))
+        other += 1
+    except PermissionError:
+        refused += 1
+    except OSError:
+        other += 1
+    s.close()
+after = timed()
+print(f"flood: {refused} refused, {other} other; connect median {before:.0f} us before, {after:.0f} us after",
+      flush=True)
+sys.stdin.readline()
+raise SystemExit(3)
+"""
+
+
+def rss(pid: int) -> int:
+    with open(f"/proc/{pid}/status") as fh:
+        return next(int(line.split()[1]) for line in fh if line.startswith("VmRSS:"))
+
+
+@linux
+def test_row_28_a_flood_of_distinct_addresses_is_refused_in_fixed_memory():
+    count = int(os.environ.get("HLYN_FLOOD", "20000"))
+    process = subprocess.Popen(
+        [*HLYN, "run", "--no-log", "--json", "--net", "pypi.org", "--", sys.executable, "-c",
+         FLOOD.replace("COUNT", str(count))],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV, cwd="/",
+    )
+    gate = int(process.stdout.readline().split()[1])
+    start = rss(gate)
+    process.stdin.write("go\n")
+    process.stdin.flush()
+    line = process.stdout.readline()
+    peak = rss(gate)
+    _, err = process.communicate("done\n", timeout=600)
+    report = json.loads(next(row for row in err.splitlines() if row.startswith('{"exit"')))
+    listed = [row for row in report["blocked"] if row.get("source") == "gate"]
+    print(line.strip())
+    print(f"gate {gate}: {start} kB before the flood, {peak} kB after {count} distinct refusals")
+    print(f"report: {len(listed)} listed, {report['more']} more counted, exit {report['exit']}")
+    refused = int(line.split()[1])
+    before, after = (float(part.split()[0]) for part in line.split("median ")[1].split(" before, "))
+    assert refused == count
+    assert peak - start < 8 * 1024, "the gate's memory grew with the number of refusals"
+    # The report keeps 1000 lines of any kind; the rest are counted, not lost.
+    assert len(listed) >= 990 and len(listed) + report["more"] == count
+    assert after < max(2000.0, 3 * before), "connects slowed down after the flood"

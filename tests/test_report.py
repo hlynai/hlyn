@@ -704,3 +704,25 @@ def test_a_refused_udp_socket_in_host_mode_explains_the_lookup(tmp_path):
     print(entry.target, "|", entry.note)
     assert entry.target == "a name lookup or QUIC (UDP)" and entry.allow is None
     assert "ignoring HTTPS_PROXY" in entry.note
+
+
+def test_many_similar_refusals_read_well(tmp_path):
+    """Addresses in numeric order, a reason said once for a run of lines
+    that share it, and no forty-flag "allow all" line."""
+    report = gated(tmp_path)
+    for last in (10, 2, 1, 30, 3, 20, 4, 5, 6, 7):
+        one(report, kind="net", target=f"10.0.0.{last}:443", op="direct", source="gate",
+            allow=f"--net 10.0.0.{last}")
+    text = report.text(1, ["agent"])
+    print(text)
+    rows = [line for line in text.splitlines() if line.startswith("  net")]
+    assert [row.split()[1] for row in rows] == [f"10.0.0.{n}:443" for n in (1, 2, 3, 4, 5, 6, 7, 10, 20, 30)]
+    assert rows[0].endswith("(connected directly instead of through HTTPS_PROXY)")
+    assert not any("HTTPS_PROXY" in row for row in rows[1:])
+    assert "to allow all of these" not in text
+    assert "  10 different flags would allow these. Add --json to see each" in text
+    few = gated(tmp_path)
+    for last in (1, 2):
+        one(few, kind="net", target=f"10.0.0.{last}:443", op="direct", source="gate",
+            allow=f"--net 10.0.0.{last}")
+    assert "  to allow all of these: --net 10.0.0.1 --net 10.0.0.2" in few.text(1, ["agent"])

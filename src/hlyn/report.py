@@ -338,6 +338,16 @@ LIMIT = 1000
 # How many lines the human report shows before pointing at --json.
 ROWS = 20
 
+# How many flags the "to allow all of these" line lists before summing up.
+ALL = 8
+
+
+def _natural(text: str) -> list[object]:
+    """A sort key that orders numbers by value: 10.0.0.2 before 10.0.0.10."""
+    import re
+
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", text)]
+
 
 class Report:
     """Everything refused during one run, grouped, checked and explained.
@@ -682,7 +692,7 @@ class Report:
     def items(self) -> list[Entry]:
         return sorted(
             self.entries.values(),
-            key=lambda e: (not e.credential, e.quiet, ORDER.get(e.kind, 9), e.target),
+            key=lambda e: (not e.credential, e.quiet, ORDER.get(e.kind, 9), _natural(e.target)),
         )
 
     def json(self, code: int | None = None) -> dict[str, Any]:
@@ -731,8 +741,11 @@ class Report:
                 out.append(f"  and {self.more} more refusals past the first {LIMIT}, not listed.")
             combined = [e.allow for e in items if e.allow and not e.quiet]
             unique = list(dict.fromkeys(combined))
-            if len(unique) > 1:
+            if 1 < len(unique) <= ALL:
                 out.append(f"  to allow all of these: {' '.join(unique)}")
+            elif len(unique) > ALL:
+                out.append(f"  {len(unique)} different flags would allow these. Add --json to see each, "
+                           f"and allow only what the command should reach.")
             if any(e.kind == "net" and e.allow and e.allow.startswith("--net ") and not e.allow[6:].isdigit()
                    for e in items):
                 # 4.6: the agent picks where it tries to go.
@@ -795,7 +808,8 @@ class Report:
                 merged.by |= e.by
                 merged.count += e.count
             out.append(merged)
-        return sorted(out, key=lambda e: (not e.credential, e.quiet, ORDER.get(e.kind, 9), e.target))
+        return sorted(out, key=lambda e: (not e.credential, e.quiet, ORDER.get(e.kind, 9),
+                                          _natural(e.target)))
 
     def _rows(self, items: list[Entry], cmd: list[str]) -> list[str]:
         items = self._group(items)
@@ -804,10 +818,15 @@ class Report:
         width = min(max(len(e.target) for e in items), 44)
         mine = self._names(cmd)
         rows = []
+        last = None
         for e in items:
-            said = f"allow with {e.allow}" if e.allow else e.note
-            if e.allow and e.note:
-                said += f" ({e.note})"
+            # A reason said on the line above isn't said again: thirty
+            # addresses dialled directly need the explanation once.
+            note = "" if e.note == last else e.note
+            last = e.note
+            said = f"allow with {e.allow}" if e.allow else (note or "same as above")
+            if e.allow and note:
+                said += f" ({note})"
             extra = []
             # Only processes other than the command itself are named: saying
             # "by python" on every line of a Python agent's report is noise.
