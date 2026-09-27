@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Watching an agent to find out what it needs.
 
 Watching confines nothing, so nothing here is an escape test. What matters is

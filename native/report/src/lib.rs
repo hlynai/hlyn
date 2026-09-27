@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Tells `hlyn run` which calls the boundary refused.
 //!
 //! When Landlock or seccomp refuses a call, the program gets `EACCES` or

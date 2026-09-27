@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Secrets a policy would let out.
 
 A folder grant cannot exclude the `.env` inside it, so the danger is the pair:

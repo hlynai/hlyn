@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The local proxy that makes `net=["api.openai.com"]` mean one host.
 
 DESIGN-host-allowlisting.md 5.5. Standard library only. The rules, the name

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Runtime containment layer for AI agents.
 
 Confinement is applied by the kernel, is scoped to the calling process, and

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Finding the C library's own definition of each wrapped function.
 //!
 //! `dlsym(RTLD_NEXT, name)` returns the next definition after this library in

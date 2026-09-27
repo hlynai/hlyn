@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The command line.
 
     hlyn run -- python agent.py          confine, then run it

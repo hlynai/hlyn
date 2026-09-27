@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """What an agent may read, write, run, and reach.
 
 Deny by default: an empty policy grants nothing except the interpreter's own

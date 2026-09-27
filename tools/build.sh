@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Build the distributable, and prove the result actually confines.
 #
 # Building a wheel is not the interesting part. The interesting part is that an

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Allowing the network has to mean the network works.
 
 `net=[443]` used to confine a program so tightly it could not make an HTTPS

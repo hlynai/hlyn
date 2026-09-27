@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A policy written down, rather than passed as keyword arguments.
 
 Keywords and command-line flags are fine for the engineer who wrote them and

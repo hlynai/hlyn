@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The gate: the sealed program's parent (DESIGN-host-allowlisting.md 5.2).
 
 `gate.become` forks; the child runs the command, the parent turns into the

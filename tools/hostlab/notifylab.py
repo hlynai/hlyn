@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Phase 4 groundwork: what the Linux gate's kernel primitives actually do here.
 
 Each question runs a child that loads a seccomp filter with notify rules

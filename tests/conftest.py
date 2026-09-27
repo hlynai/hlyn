@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Shared machinery for tests that actually apply confinement.
 
 Confinement is one-way, so nothing may be applied in the test process itself:

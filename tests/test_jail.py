@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The public entry points.
 
 These are what a user actually types, so they are tested the way a user would

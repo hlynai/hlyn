@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # What is actually in the thing you are about to trust.
 #
 #   tools/sbom.sh            an SBOM for what ships, into dist/

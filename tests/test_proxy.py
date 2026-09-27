@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The allowlisting proxy (DESIGN-host-allowlisting.md 5.5).
 
 Matrix rows 9-14 of section 9 against local servers, the gate's PROXY header

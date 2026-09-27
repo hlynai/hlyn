@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The Linux gate's decisions (DESIGN-host-allowlisting.md 5.3, layer 3).
 
 A child seals itself for hosts and hands its notification descriptor to this

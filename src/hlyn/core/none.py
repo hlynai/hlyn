@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The backend for machines that cannot enforce anything.
 
 It refuses. That is the entire feature.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The record.
 
 Logging must never be the thing that breaks an agent, so the strongest

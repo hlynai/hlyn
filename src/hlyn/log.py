@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """A structured record of what the boundary did.
 
 One JSON object per line, to stderr by default so nothing needs a writable

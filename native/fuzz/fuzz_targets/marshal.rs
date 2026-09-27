@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Fuzz the pointer marshalling.
 //!
 //! This is the code that reads memory the caller describes rather than memory

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Host entries for `net`: grammar, normalisation, matching and address classes.
 
 DESIGN-host-allowlisting.md 4.2 (what an entry can be), 4.3 (matching rules),

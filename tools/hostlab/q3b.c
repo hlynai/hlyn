@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Q3: can libseccomp express the host-mode socket rules, and how?
 #define _GNU_SOURCE
 #include <seccomp.h>

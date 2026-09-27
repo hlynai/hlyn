@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Routing a sealed program's network through hlyn's proxy (host mode).
 
 DESIGN-host-allowlisting.md 5.2, 5.7 and 5.8. When `net` names hosts, the

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The policy layer decides what the kernel will later be told to enforce.
 
 A mistake here is not a crash, it is a boundary that is quietly wider than the

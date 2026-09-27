@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The Linux gate's decisions: every trapped connect, answered without the race.
 
 DESIGN-host-allowlisting.md 5.3, layer 3. In host mode the seccomp filter

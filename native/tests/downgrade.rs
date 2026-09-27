@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Proof that partial enforcement is real, and that we do not produce it.
 //!
 //! On a kernel older than the rules being applied, `BestEffort` applies what

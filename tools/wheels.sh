@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Build the wheels PyPI accepts, and prove each one works after installing.
 #
 #   tools/wheels.sh            both Linux architectures, plus the sdist

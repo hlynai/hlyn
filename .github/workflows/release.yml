@@ -1,0 +1,210 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build, check, attest and publish hlyn's wheels.
+#
+#   - Linux: built in PyPA's manylinux_2_28 image (glibc 2.28, the floor the
+#     README states), then `auditwheel repair`, for x86_64 and aarch64 on
+#     native runners. One `py3-none` wheel per platform: the native libraries
+#     are loaded with ctypes and link against nothing in libpython.
+#   - macOS: pure Python behind a macOS tag (see hatch_build.py).
+#   - Build provenance for every file (SLSA, actions/attest-build-provenance),
+#     and PyPI trusted publishing, which signs each file with Sigstore
+#     (PEP 740 attestations) -- no API token is stored anywhere.
+#
+# Every action is pinned to a commit, not a tag: a moved tag can't change
+# what runs here.
+#
+# Hosted Linux runners have kernels older than hlyn's floor (Landlock ABI 6,
+# Linux 6.12), so the Linux jobs check what a runner can check -- the wheel
+# carries both libraries, installs, imports, and `hlyn probe` answers -- and
+# a real seal is tried only where `hlyn probe` says the machine can enforce.
+# The escape suite itself runs on a kernel that can (tools/linuxtest.sh).
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: clippy
+      - name: ruff and mypy
+        run: |
+          python -m pip install ruff mypy
+          ruff check .
+          mypy
+      - name: clippy and the native unit tests
+        # `--lib` for the shim: tests/downgrade.rs applies a real Landlock
+        # ruleset and needs a kernel at hlyn's floor.
+        run: |
+          (cd native && cargo clippy --release -- -D warnings && cargo test --lib)
+          (cd native/report && cargo clippy --release -- -D warnings && cargo test)
+
+  linux:
+    needs: check
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    container: quay.io/pypa/manylinux_2_28_${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: build
+        run: |
+          /opt/python/cp313-cp313/bin/python -m pip install build
+          /opt/python/cp313-cp313/bin/python -m build --wheel --outdir raw
+      - name: repair (manylinux_2_28)
+        run: auditwheel repair raw/*.whl --plat "manylinux_2_28_${{ matrix.arch }}" --wheel-dir dist
+      - name: the wheel carries both libraries
+        run: |
+          unzip -l dist/*.whl | grep -q 'hlyn/core/libhlyn.so'
+          unzip -l dist/*.whl | grep -q 'hlyn/core/libhlyn_report.so'
+      - name: install and probe, on the oldest and newest Python
+        run: |
+          yum install -y -q libseccomp
+          for py in cp310-cp310 cp313-cp313; do
+            /opt/python/$py/bin/python -m venv "/tmp/$py"
+            "/tmp/$py/bin/pip" install -q dist/*.whl
+            cd /
+            "/tmp/$py/bin/python" -c "import hlyn; print(hlyn.probe())"
+            "/tmp/$py/bin/hlyn" probe || true  # exits non-zero where the kernel is below the floor
+            if "/tmp/$py/bin/hlyn" probe >/dev/null 2>&1; then
+              "/tmp/$py/bin/python" -c "
+          import hlyn
+          hlyn.on(read=['/etc/hostname'])
+          try:
+              open('/etc/shadow', 'rb').read()
+              raise SystemExit('the installed wheel did not confine')
+          except (PermissionError, FileNotFoundError):
+              print('the installed wheel confines')
+          "
+            fi
+            cd "$GITHUB_WORKSPACE"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-linux-${{ matrix.arch }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  macos:
+    needs: check
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: build
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir dist
+      - name: the installed wheel confines
+        # Seatbelt is on every Mac, so the real seal runs here. The canary is
+        # readable by this user, so only the seal can refuse it.
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q dist/*.whl
+          echo secret > "$HOME/hlyn-canary"
+          cd /
+          /tmp/venv/bin/hlyn probe
+          /tmp/venv/bin/python -c "
+          import os, hlyn
+          canary = os.path.expanduser('~/hlyn-canary')
+          assert open(canary).read()
+          hlyn.on(read=['/etc/hosts'])
+          try:
+              open(canary).read()
+              raise SystemExit('the installed wheel did not confine')
+          except PermissionError:
+              print('the installed wheel confines')
+          "
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-macos
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    needs: check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: |
+          python -m pip install build
+          python -m build --sdist --outdir dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  attest:
+    needs: [linux, macos, sdist]
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    # Only a pushed tag publishes; a manual run stops after attesting.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: attest
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/hlyn
+    permissions:
+      id-token: write # trusted publishing, and the Sigstore signatures
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          attestations: true

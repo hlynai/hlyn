@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /* Matrix row 3 (DESIGN-host-allowlisting.md section 9): the race harness.
  *
  * One thread loops connect() on fresh sockets while other threads keep

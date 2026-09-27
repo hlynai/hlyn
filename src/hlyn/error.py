@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Every failure this package can raise.
 
 One base class so callers can catch everything with a single `except`, and

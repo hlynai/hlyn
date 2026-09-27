@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Host mode's kernel layers on Linux (DESIGN-host-allowlisting.md 5.3, layers 1 and 2).
 
 A child seals itself with a policy that names hosts -- Landlock with no TCP

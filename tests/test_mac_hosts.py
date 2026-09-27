@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """macOS host mode at the Seatbelt level (DESIGN-host-allowlisting.md 5.4).
 
 The profile a policy naming hosts produces, and what a process sealed with it

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The command line.
 
 `hlyn run -- python agent.py` is the onboarding path for anyone who would

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The threat model is stated in three places, in the same words.
 
 DESIGN-host-allowlisting.md section 6 is the source. The README and

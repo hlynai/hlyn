@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Policy files.
 
 The dangerous failure here is not a crash, it is a file that parses into a

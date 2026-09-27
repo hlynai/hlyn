@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Fuzz everything `seal` does before the point of no return.
 //!
 //! Reads the caller's arrays, opens every path, assembles the ruleset, and

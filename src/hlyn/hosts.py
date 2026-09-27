@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Host entries for `net`: grammar, normalisation, matching, and reports.
 
 This is the pure half of design phase 1 (DESIGN-host-allowlisting.md 4.1-4.3,

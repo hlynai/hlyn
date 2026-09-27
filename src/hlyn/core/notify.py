@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The kernel side of the Linux gate: seccomp notifications, read and answered.
 
 DESIGN-host-allowlisting.md 5.3. In host mode the seccomp filter sends every

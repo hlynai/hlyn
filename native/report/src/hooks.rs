@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! The wrapped calls.
 //!
 //! Each wrapper forwards to the C library's own function, returns exactly what

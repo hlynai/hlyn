@@ -676,6 +676,8 @@ docker build -t hlyn-test tools/ && docker run --rm -v "$PWD":/work -w /work hly
 
 The Linux tests need a real Linux kernel, which is why they run in Docker. Most of the suite consists of escape attempts, each of which fails the build if the escape succeeds.
 
+Releases are built by `.github/workflows/release.yml` on a `v*` tag: manylinux_2_28 wheels for x86_64 and aarch64 (built in PyPA's image, checked with `auditwheel`), a macOS wheel and the sdist, each with build provenance, published to PyPI by trusted publishing, which signs every file with Sigstore. Every action is pinned to a commit.
+
 ## License
 
 Apache-2.0

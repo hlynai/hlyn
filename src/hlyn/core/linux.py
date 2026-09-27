@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The Linux backend: Landlock for the filesystem, seccomp for the syscalls.
 
 Neither half is sufficient alone. Landlock decides which paths, ports, and

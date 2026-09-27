@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # A leaf whose issuer URLs point at listen.py on 127.0.0.1:47010. Checking it
 # makes trustd fetch those URLs, which is how FINDINGS.md's trustd route was shown.
 set -e; cd "$(dirname "$0")"; O=${OPENSSL:-openssl}

@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Fuzz the native shim.
 #
 # The shim reads memory that the caller describes rather than memory it owns:

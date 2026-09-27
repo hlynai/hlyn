@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Syscall filtering, exercised against a real kernel.
 
 Every test here that attempts an escape must fail the build if the escape

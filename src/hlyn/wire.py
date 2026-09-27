@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The gate's PROXY v2 header (HAProxy's proxy-protocol.txt, section 2.2).
 
 The one piece of wire format the gate and the proxy share: the gate writes

@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Everything that can be checked without running anything.
 #
 #   tools/check.sh          all of it

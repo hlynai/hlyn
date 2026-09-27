@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Host mode through every entry point (DESIGN-host-allowlisting.md 5.2-5.8).
 
 `hlyn.on`, `hlyn.run(fn)`, `hlyn.spawn` and `hlyn run` with `net` naming

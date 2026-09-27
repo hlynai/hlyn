@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Q2: when does a seccomp notification fd report POLLHUP?
 #define _GNU_SOURCE
 #include <seccomp.h>

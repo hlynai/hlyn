@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The gate: the sealed program's unconfined parent (DESIGN-host-allowlisting.md 5.2).
 
 Wherever hlyn forks anyway, the process about to be sealed forks once more:

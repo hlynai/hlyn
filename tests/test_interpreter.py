@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Running a Python other than hlyn's own.
 
 The command's interpreter is asked where its files are, confined, and its

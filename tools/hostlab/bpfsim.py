@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Run a classic-BPF seccomp program (from seccomp_export_bpf) against made-up
 syscalls, so a filter built for x86_64 can be checked on any machine.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import socket
 l = socket.socket(); l.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 l.setsockopt(socket.IPPROTO_TCP, socket.TCP_FASTOPEN, 16)

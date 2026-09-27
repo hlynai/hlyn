@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Run the test suite, or any command, on a real Linux kernel with both native
 # crates built from this tree.
 #

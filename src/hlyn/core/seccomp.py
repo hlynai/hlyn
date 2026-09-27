@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Syscall filtering, via libseccomp.
 
 We call into `libseccomp.so`, the audited C library maintained alongside the

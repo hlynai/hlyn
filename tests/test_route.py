@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The unconfined side of host mode (DESIGN-host-allowlisting.md 5.1, 5.2, 5.7, 5.8).
 
 `route.start` launches the proxy helper and refuses unless it says it is

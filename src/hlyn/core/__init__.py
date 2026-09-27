@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Enforcement backends.
 
 One module per platform. Each exposes the same small surface, so the

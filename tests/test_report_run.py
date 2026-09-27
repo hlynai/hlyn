@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`hlyn run` says what it blocked: end to end, against the real kernel.
 
 Every test here runs the real command line, which confines a real child, and

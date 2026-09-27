@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Filesystem and inter-agent confinement, exercised against a real kernel.
 
 These are escape attempts. Each one must fail the build if the escape works.

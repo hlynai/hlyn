@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Hearing refusals on Linux: a preloaded library and a named pipe.
 
 Landlock's own records go to kernel audit, which needs root and is usually

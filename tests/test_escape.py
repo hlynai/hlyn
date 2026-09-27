@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Escapes that worked, and must never work again.
 
 Every test here corresponds to a hole that was real: written against a green

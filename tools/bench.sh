@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Measure what confinement costs, on a kernel that has Landlock.
 #
 #   tools/bench.sh          both halves

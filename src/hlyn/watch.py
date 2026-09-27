@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Watch an agent run, then write down what it actually touched.
 
 The hardest part of adopting deny-by-default is not the enforcement. It is

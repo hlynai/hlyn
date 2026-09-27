@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """What the boundary refused, in words someone can act on.
 
 When the kernel refuses a call, the program gets `Operation not permitted` and

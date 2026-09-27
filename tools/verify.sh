@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Check that hlyn really confines on this machine, and write a report to send back.
 #
 # Put this script in a folder together with the two files you were given:

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Measure what confinement costs, since the claim is that it costs nothing.
 
 The claim is architectural: nothing sits between the agent and the kernel, so

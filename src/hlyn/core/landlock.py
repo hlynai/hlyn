@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Filesystem, network-port, and inter-agent confinement, via Landlock.
 
 The kernel enforces this. The struct layouts, ABI detection, and access-bit

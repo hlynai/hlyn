@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Property-based tests for the policy layer.
 
 The hand-written tests in test_policy.py check specific, chosen inputs. These

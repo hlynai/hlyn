@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Where the proxy listens: 127.0.0.1 and [::1] on one free port.
 
 Apart from `proxy.py` so the caller can bind the proxy's sockets itself and

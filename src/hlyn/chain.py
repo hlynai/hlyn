@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Chaining through the user's own proxy (DESIGN-host-allowlisting.md 5.5).
 
 Behind a corporate proxy, hlyn's proxy forwards through it. Apart from

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Q5: does Landlock's TCP connect rule (ABI 4+) stop TCP Fast Open?
 #define _GNU_SOURCE
 #include <linux/landlock.h>

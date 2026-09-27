@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Which Mach services does each client need? Run it under hlyn's own profile
 with the blanket mach-lookup replaced by an allowlist, grow the allowlist from
 the Sandbox denials until the client succeeds, and report the minimum."""

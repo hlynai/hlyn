@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Running a Python other than the one hlyn runs on.
 
 `policy.runtime()` grants the files *hlyn's own* interpreter needs. `hlyn run

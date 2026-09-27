@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Applying a policy to a process.
 
 Confinement here is one-way. Landlock and seccomp cannot be lifted once set,

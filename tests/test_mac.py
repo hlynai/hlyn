@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Seatbelt confinement, exercised on a real macOS kernel.
 
 `sandbox_init` is deprecated API on a very new OS, so the first thing these

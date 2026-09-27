@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # A socket() domain with garbage in the upper 32 bits. The seccomp filter
 # compares the whole register; the kernel reads only the low 32 bits. Run as
 # `python3 hibits.py` on Linux with hlyn importable (tools/linuxtest.sh --sh).

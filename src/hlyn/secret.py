@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Where secrets live, and whether a policy lets them leave.
 
 A grant is a whole tree. `read=["."]` in a project hands over its `.env`, its

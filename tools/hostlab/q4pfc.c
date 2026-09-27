@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Q4 (design gap 8.4): does hlyn's x86_64 filter kill a syscall that arrives
 // through a foreign ABI (ia32 `int 0x80`, or any architecture other than
 // x86_64/x32)?

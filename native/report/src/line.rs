@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! One record, built in a fixed buffer.
 //!
 //! ```text

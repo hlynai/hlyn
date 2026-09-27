@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Put the native libraries inside the wheel.
 
 The Linux backend reaches Landlock through a small Rust shim, and `landlock.py`

@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Mutation testing: change the code in small ways and check the suite notices.
 #
 # A passing suite says the code does what the tests ask. This says something

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Filesystem, execution, and network confinement on macOS, via Seatbelt.
 
 `sandbox_init` is the only real option here. Apple deprecated it in 10.8 and

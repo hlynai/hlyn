@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Confirm that the suite actually catches a specific set of mistakes.
 
 mutmut generates mutation candidates well, but its report cannot be taken at

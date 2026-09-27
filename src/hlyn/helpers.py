@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Starting hlyn's helper processes (DESIGN-host-allowlisting.md 5.1).
 
 A policy that names hosts runs two small helpers beside the agent: the proxy

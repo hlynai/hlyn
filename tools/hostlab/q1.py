@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Q1: does /proc/<pid>/net/unix list unbound unix sockets, read from another process?
 import os, socket, subprocess, sys
 socks = {

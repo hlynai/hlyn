@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! A thin C ABI over the upstream Landlock crate.
 //!
 //! Deliberately dumb. Every decision that could be got wrong -- which ABI the

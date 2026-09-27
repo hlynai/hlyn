@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Hearing refusals on macOS: the sandbox's own reports, from the system log.
 
 Seatbelt writes every refusal to the unified log, from the kernel, naming the

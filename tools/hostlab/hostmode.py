@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Phase 3 groundwork: what a macOS host-mode profile must and must not grant.
 
 A prototype of the host-mode Seatbelt profile (design 5.4): hlyn's base

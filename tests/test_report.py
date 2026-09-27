@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Turning refusals into advice: the platform-neutral half.
 
 Nothing here confines anything. These pin down what a refusal becomes -- which

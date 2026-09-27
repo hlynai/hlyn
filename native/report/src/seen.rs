@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! Counting repeats, so a retry loop is one record rather than a million.
 //!
 //! A refusal is sent on its 1st, 2nd, 4th, 8th ... occurrence and counted in

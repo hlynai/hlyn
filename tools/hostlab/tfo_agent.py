@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import socket
 dst = ("127.0.0.1", 47002)
 s = socket.socket()
