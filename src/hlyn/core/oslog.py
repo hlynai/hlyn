@@ -51,7 +51,7 @@ READY = 3.0  # seconds to wait for the stream to prove it is connected
 CAUGHT = 2.0  # seconds to wait for it to catch up after the command exits
 
 LINE = re.compile(
-    r"^(?:(?P<times>\d+) duplicate reports for )?Sandbox: (?P<name>.+)\((?P<pid>\d+)\) "
+    r"^(?:(?P<times>\d+) duplicate reports? for )?Sandbox: (?P<name>.+)\((?P<pid>\d+)\) "
     r"deny\(\d+\) (?P<op>\S+)(?: (?P<target>.*))?$"
 )
 ADDRESS = re.compile(r"^(?:remote|local):(?P<host>.*):(?P<port>\d+)$")
@@ -160,11 +160,16 @@ class Listener:
             f'OR eventMessage CONTAINS "{self._mark}"'
         )
         try:
+            # In a session of its own: Ctrl-C and Ctrl-Z at a terminal go to
+            # the whole foreground job, and would otherwise end or stop the
+            # stream along with the command, losing the report of what it was
+            # refused (tests/test_terminal.py). It is ended by `finish`.
             self._stream = subprocess.Popen(  # noqa: S603 - fixed program, fixed arguments
                 [LOG, "stream", "--style", "ndjson", "--predicate", predicate],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
         except OSError as exc:
             self._fail(f"the system log could not be read ({exc.strerror})")

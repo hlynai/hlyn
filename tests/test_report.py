@@ -199,8 +199,10 @@ def test_on_7_1_the_log_socket_is_quiet_and_a_runtime_socket_warns(tmp_path, abi
         print(entry.target, "|", entry.allow, "|", entry.note, "| quiet" if entry.quiet else "")
     assert log.quiet and log.note == "the system log; programs carry on without it"
     assert not docker.quiet and "hands that over" in docker.note
-    # Landlock checks where the socket really is: /var/run is usually /run.
-    assert docker.allow == f"--write {os.path.dirname(os.path.realpath('/var/run/docker.sock'))}"
+    # Landlock checks where the socket really is: /var/run is usually /run
+    # (and on a Mac with Docker Desktop, a link into the home folder, shown
+    # as ~ the way every flag in the report is).
+    assert docker.allow == flag("--write", os.path.dirname(os.path.realpath("/var/run/docker.sock")))
     shown = report.text(0, ["agent"])
     print(shown)
     assert "/dev/log" not in shown and "docker.sock" in shown
@@ -611,11 +613,17 @@ def test_resolved_system_paths_are_shown_as_typed():
     assert found.target == "/etc/hosts"
 
 
-def test_batched_reports_carry_their_count():
-    found = oslog.parse(
-        event(f"12 duplicate reports for Sandbox: Python(7) deny(1) file-write-create /tmp/x\n{TAG}"), TAG
-    )
-    assert (found.kind, found.count) == ("write", 12)
+@pytest.mark.parametrize(("head", "count"), [
+    ("12 duplicate reports for ", 12), ("1 duplicate report for ", 1),
+])
+def test_batched_reports_carry_their_count(head, count):
+    """Seatbelt reports the first of a run of identical refusals at once and
+    the rest a moment later in one line, "N duplicate reports for ...", or
+    "1 duplicate report for ..." for one. That line can be all that arrives
+    when the log is busy, so both spellings are read."""
+    found = oslog.parse(event(f"{head}Sandbox: Python(7) deny(1) file-write-create /tmp/x\n{TAG}"), TAG)
+    print(repr(head), "->", found)
+    assert found is not None and (found.kind, found.target, found.count) == ("write", "/tmp/x", count)
 
 
 @pytest.mark.parametrize(

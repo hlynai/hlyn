@@ -272,16 +272,20 @@ def test_watch_sees_where_a_non_python_client_went_through_its_proxy(tmp_path):
     """curl in a child process is invisible to Python's audit hooks; it
     names its destination only to the proxy it goes through. hlyn watch
     sends it through its own, in record mode, and drafts that host -- and
-    not the recording proxy it only reached because it was told to."""
+    not the recording proxy it only reached because it was told to.
+
+    The server is on loopback, which NO_PROXY exempts; curl's `--noproxy ''`
+    clears that list, so it still takes the proxy it was given. (127.0.0.2,
+    which NO_PROXY doesn't name, isn't configured on macOS.)"""
     import http.server
     import threading
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.2", 0), http.server.SimpleHTTPRequestHandler)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     script = tmp_path / "agent.py"
-    script.write_text(f"import subprocess; subprocess.run(['curl', '-s', '-o', '/dev/null', "
-                      f"'http://127.0.0.2:{port}/'], check=True)\n")
+    script.write_text(f"import subprocess; subprocess.run(['curl', '-s', '--noproxy', '', '-o', '/dev/null', "
+                      f"'http://127.0.0.1:{port}/'], check=True)\n")
     env = {k: v for k, v in os.environ.items() if k.lower() not in (
         "https_proxy", "http_proxy", "all_proxy", "no_proxy")}
     env["PYTHONPATH"] = SRC

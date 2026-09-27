@@ -4,8 +4,11 @@
 Every test here runs the real command line, which confines a real child, and
 reads the report it prints. On macOS the refusals come from the sandbox's own
 reports in the system log, which drops a few percent of them (see
-`core/oslog.py`), so a macOS test that needs one particular refusal repeats the
-attempt rather than trusting a single report to arrive.
+`core/oslog.py`), so a macOS test that needs one particular refusal runs the
+command again, up to three times, rather than trusting one report to arrive.
+Repeating the attempt inside one run is no second chance: Seatbelt reports
+the first of a process's identical refusals at once and the rest as one
+"N duplicate reports" line a moment later, usually after the run has ended.
 
 The Linux half also attacks the reporter: the confined program owns the
 writing end of the pipe, so it gets to send whatever it likes down it.
@@ -20,6 +23,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import Callable
 
 import pytest
 from conftest import SRC, TOO_OLD, skip_if_too_old
@@ -42,9 +46,10 @@ def _ready() -> bool:
 here = pytest.mark.skipif(not _ready(), reason="no enforcement backend or no reporter on this platform")
 linux = pytest.mark.skipif(not (LINUX and _ready()), reason="the Linux reporter")
 
-# macOS drops a few percent of reports, so anything a test must see is tried
-# this many times. Each attempt that is heard is enough.
+# Attempts inside one run: a refusal repeated TRIES times, for the counts.
 TRIES = 5 if MAC else 1
+# Whole runs of a command whose one refusal a test must see (module docstring).
+RUNS = 3 if MAC else 1
 
 
 def hlyn(*args: str, env: dict[str, str] | None = None, cwd: str | None = None,
@@ -58,6 +63,8 @@ def hlyn(*args: str, env: dict[str, str] | None = None, cwd: str | None = None,
         [sys.executable, "-m", "hlyn.cli", *args],
         capture_output=True, text=True, timeout=timeout, env=base, cwd=cwd, check=False,
     )
+    # What the run showed, so the log has the report and not just a verdict.
+    print(f"$ hlyn {' '.join(args)}\nexit {done.returncode}\nstdout:\n{done.stdout}stderr:\n{done.stderr}")
     skip_if_too_old(done)
     return done
 
@@ -115,9 +122,25 @@ def allows(done: subprocess.CompletedProcess) -> set[str]:
     return out
 
 
-def run(tmp_path, body: str, *flags: str, **kw) -> subprocess.CompletedProcess:
+def run(tmp_path, body: str, *flags: str, until: Callable[[subprocess.CompletedProcess], bool] | None = None,
+        **kw) -> subprocess.CompletedProcess:
     script = agent(tmp_path, body)
-    return hlyn("run", "--no-log", "--json", "--read", script, *flags, "--", sys.executable, script, **kw)
+    argv = ["run", "--no-log", "--json", "--read", script, *flags, "--", sys.executable, script]
+    return heard(lambda: hlyn(*argv, **kw), until)
+
+
+def heard(attempt: Callable[[], subprocess.CompletedProcess],
+          until: Callable[[subprocess.CompletedProcess], bool] | None) -> subprocess.CompletedProcess:
+    """`attempt()`, run again (RUNS in all) until `until` holds of it. Each run
+    is a new process, so a report the log lost isn't lost again for that
+    reason; every run's output is printed, the lost ones included."""
+    done = attempt()
+    for number in range(1, RUNS):
+        if until is None or until(done):
+            break
+        print(f"run {number}: the refusal the test needs wasn't reported; running it again")
+        done = attempt()
+    return done
 
 
 @pytest.fixture
@@ -141,7 +164,7 @@ def test_a_refused_read_is_listed_with_its_flag(tmp_path, outside):
             try: open({str(target)!r})
             except PermissionError: pass
         raise SystemExit(1)
-    """)
+    """, until=lambda done: real(str(target)) in blocked(done))
     item = blocked(done)[real(str(target))]
     assert item["kind"] == "read"
     assert f"--read {real(str(target))}" in allows(done)
@@ -153,7 +176,7 @@ def test_a_refused_new_file_suggests_its_folder(tmp_path, outside):
         for i in range({TRIES}):
             try: open({str(outside)!r} + f"/new{{i}}.txt", "w")
             except PermissionError: pass
-    """)
+    """, until=lambda done: f"--write {real(str(outside))}" in allows(done))
     assert f"--write {real(str(outside))}" in allows(done)
 
 
@@ -164,7 +187,7 @@ def test_a_refused_program_run_by_a_child_is_listed(tmp_path):
         for _ in range({TRIES}):
             try: subprocess.run(["/bin/ls"], capture_output=True)
             except PermissionError: pass
-    """)
+    """, until=lambda done: any(item["kind"] == "exec" for item in report(done)["blocked"]))
     execs = [item for item in report(done)["blocked"] if item["kind"] == "exec"]
     assert execs, done.stderr
     assert execs[0]["allow"].startswith("--exec ")
@@ -199,7 +222,7 @@ def test_a_refused_port_is_listed_with_its_flag(tmp_path):
             try: socket.create_connection(("127.0.0.1", 5432), timeout=1)
             except PermissionError: pass
             except OSError: pass
-    """, "--net", "443")
+    """, "--net", "443", until=lambda done: "--net 5432" in allows(done))
     assert "--net 5432" in allows(done), done.stderr
 
 
@@ -228,7 +251,8 @@ def test_a_credential_is_named_and_never_suggested(tmp_path):
         for _ in range({TRIES}):
             try: open({str(key)!r})
             except PermissionError: pass
-    """, env={"HOME": str(home)})
+    """, env={"HOME": str(home)},
+       until=lambda done: any(i["target"].endswith(".ssh/id_ed25519") for i in report(done)["blocked"]))
     # Found by name: the report writes the key relative to the run's HOME,
     # which is not this test process's.
     item = next(i for i in report(done)["blocked"] if i["target"].endswith(".ssh/id_ed25519"))
@@ -245,7 +269,8 @@ def test_the_human_report_says_what_to_do(tmp_path, outside):
             except PermissionError: pass
         raise SystemExit(4)
     """)
-    done = hlyn("run", "--no-log", "--read", script, "--", sys.executable, script)
+    done = heard(lambda: hlyn("run", "--no-log", "--read", script, "--", sys.executable, script),
+                 lambda done: target.name in done.stderr)
     assert done.returncode == 4
     assert "hlyn: the command exited with code 4. hlyn blocked" in done.stderr
     assert "allow with --read " in done.stderr
@@ -260,7 +285,8 @@ def test_a_success_that_worked_around_a_refusal_still_says_so(tmp_path, outside)
             try: open({str(target)!r})
             except PermissionError: pass
     """)
-    done = hlyn("run", "--no-log", "--read", script, "--", sys.executable, script)
+    done = heard(lambda: hlyn("run", "--no-log", "--read", script, "--", sys.executable, script),
+                 lambda done: target.name in done.stderr)
     assert done.returncode == 0
     assert "the command finished, but hlyn blocked" in done.stderr
 
@@ -283,10 +309,15 @@ def test_refusals_reach_the_log_as_they_happen(tmp_path, outside):
             try: open({str(target)!r})
             except PermissionError: pass
     """)
-    hlyn("run", "--log", str(record), "--read", script, "--", sys.executable, script)
-    rows = [json.loads(line) for line in record.read_text().splitlines()]
-    denials = [row for row in rows if row["kind"] == "deny"]
-    assert any(real(row["target"]) == real(str(target)) for row in denials), rows
+
+    def denials() -> list[dict]:
+        rows = [json.loads(line) for line in record.read_text().splitlines()] if record.exists() else []
+        return [row for row in rows if row["kind"] == "deny"]
+
+    heard(lambda: hlyn("run", "--log", str(record), "--read", script, "--", sys.executable, script),
+          lambda _: any(real(row["target"]) == real(str(target)) for row in denials()))
+    print(record.read_text())
+    assert any(real(row["target"]) == real(str(target)) for row in denials())
 
 
 @here
