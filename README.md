@@ -28,6 +28,7 @@ hlyn run --read ./data --write ./out --net api.openai.com -- python agent.py
 ## Contents
 
 - [Why hlyn](#why-hlyn)
+- [Features](#features)
 - [Install](#install)
 - [Quick start](#quick-start)
 - [The policy](#the-policy)
@@ -69,6 +70,31 @@ With hlyn, the answer is "only what you wrote down."
 - **No daemon, no container.** With ports, nothing sits between the agent and the kernel, so it adds almost no latency. Naming hosts adds two helper processes for the run: a local proxy that checks each host, and on Linux a gate that makes the proxy the only way out (see [Performance](#performance)). It works inside Docker too.
 - **Refuses rather than pretends.** If the machine cannot enforce your whole policy, hlyn raises an error instead of quietly enforcing part of it.
 - **Zero runtime dependencies.**
+
+---
+
+## Features
+
+| Feature | What it does, simply | How to use it |
+|---|---|---|
+| **File access** | The agent can read and write only the files and folders you name. Everything else, like your SSH keys or `.env`, is off limits. | `read=[...]`, `write=[...]` / `--read`, `--write` |
+| **Program control** | The agent can start only the programs you allow, so it can't run `curl`, `bash` or anything it downloaded. | `exec=[...]` / `--exec` |
+| **Network off by default** | No network at all unless you ask for it. | the default |
+| **Allow only certain websites** | Name the hosts the agent may reach (`api.openai.com`); every other host, and DNS, UDP and direct IP tricks, is blocked. | `net=["api.openai.com"]` / `--net api.openai.com` |
+| **Allow by port** | A simpler, looser option: allow a port (like 443) on any host. | `net=[443]` / `--net 443` |
+| **Secrets removed** | API keys and other secret environment variables are deleted before the agent starts, unless you keep one on purpose. | `env=[...]` / `--env NAME` |
+| **Secret-file warning** | Warns you before the run if the agent could read a secret file (like `.env`) *and* reach the network. | automatic |
+| **Private scratch folder** | The agent gets its own fresh, empty temp folder for the run. | automatic (`--no-tmp` to turn off) |
+| **Blocked-list report** | After `hlyn run`, lists what was blocked and the exact flag that would allow each one. | automatic with `hlyn run` (`--json` for machines) |
+| **Watch mode** | Runs your agent once, unconfined, and writes a starter policy from what it actually used. | `hlyn watch -- cmd > policy.toml` |
+| **Policy files** | Keep the rules in a TOML, JSON or YAML file next to your code and review them like code. | `hlyn run -f policy.toml` / `hlyn.on("policy.toml")` |
+| **Presets** | Ready-made policies for common jobs: `strict`, `data`, `coder`, `web`, `debug`. | `hlyn.on("coder")` / `-p coder` |
+| **Four ways in** | Lock the current process, run one function in a locked child, replace the process with a locked command, or wrap any command from the terminal. | `hlyn.on()`, `hlyn.run(fn)`, `hlyn.spawn(cmd)`, `hlyn run -- cmd` |
+| **Agent isolation** | On Linux, one agent can't signal or connect to another agent on the same machine. | automatic (Linux) |
+| **Dangerous system calls blocked** | Kernel tricks like `io_uring`, `ptrace`, mounting and loading kernel modules are always refused. | automatic (Linux) |
+| **Machine check** | Tells you what this computer can enforce, and why not when it can't. | `hlyn probe` |
+| **Log** | A JSON record of what was sealed and what was blocked, for audits and CI. | stderr by default, `--log FILE` |
+| **No off switch** | Once applied, the lock lasts for the life of the process and everything it starts. Nothing, hlyn included, can remove it. | automatic |
 
 ---
 
