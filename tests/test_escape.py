@@ -461,3 +461,86 @@ def test_mptcp_falls_back_to_tcp_with_named_ports():
         """
     )
     assert "refused EPROTONOSUPPORT" in done.stdout, done.stdout + done.stderr
+
+
+HIGH_BITS = """
+    import ctypes, os, socket, hlyn
+    from hlyn.core import seccomp
+    libc = ctypes.CDLL(None, use_errno=True); libc.syscall.restype = ctypes.c_long
+    r, w = os.pipe()
+    if os.fork() == 0:
+        # A UDP listener outside the sandbox: it reports whether anything arrived.
+        lst = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        lst.bind(("127.0.0.1", 0))
+        os.write(w, str(lst.getsockname()[1]).encode()); os.close(w)
+        lst.settimeout(3)
+        try:
+            print("LISTENER GOT", lst.recv(64), flush=True)
+        except OSError:
+            print("listener got nothing", flush=True)
+        os._exit(0)
+    os.close(w); port = int(os.read(r, 16)); os.close(r)
+    nr = seccomp._nr("socket")
+    hlyn.on(log=False)  # net=False
+    fd = libc.syscall(ctypes.c_long(nr), ctypes.c_long((1 << 32) | socket.AF_INET),
+                      ctypes.c_long(socket.SOCK_DGRAM), ctypes.c_long(0))
+    if fd < 0:
+        print("refused", os.strerror(ctypes.get_errno()), flush=True)
+    else:
+        print("CREATED fd", fd, flush=True)
+        socket.socket(fileno=fd).sendto(b"leak", ("127.0.0.1", port))
+    os.wait()
+"""
+
+
+def test_a_socket_family_with_high_bits_set_cannot_open_the_network():
+    """The kernel reads socket()'s family as an int; the filter compared the whole
+    register, so (1 << 32) | AF_INET made a UDP socket under net=False and sent
+    from it (Landlock doesn't cover UDP on 6.12). Found 2026-09-27."""
+    done = boot(HIGH_BITS)
+    print(done.stdout, done.stderr[-500:])
+    assert "refused Operation not permitted" in done.stdout, done.stdout + done.stderr
+    assert "listener got nothing" in done.stdout, done.stdout + done.stderr
+    assert "LISTENER GOT" not in done.stdout
+
+
+FOREIGN = """
+    import ctypes, mmap, os, platform, signal, hlyn
+    hlyn.on(log=False)
+    pid = os.fork()
+    if pid == 0:
+        CALL
+        os._exit(0)
+    _, status = os.waitpid(pid, 0)
+    if os.WIFSIGNALED(status):
+        print("KILLED by", signal.Signals(os.WTERMSIG(status)).name, flush=True)
+    else:
+        print("RAN, exit", os.WEXITSTATUS(status), flush=True)
+"""
+
+# mov eax, 26 (ia32 ptrace); xor ebx, ebx (PTRACE_TRACEME); int 0x80; ret
+IA32 = """
+buf = mmap.mmap(-1, 4096, prot=mmap.PROT_READ | mmap.PROT_WRITE | mmap.PROT_EXEC)
+buf.write(bytes.fromhex("b81a00000031dbcd80c3"))
+addr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
+ctypes.CFUNCTYPE(ctypes.c_long)(addr)()
+"""
+X32 = """
+libc = ctypes.CDLL(None, use_errno=True); libc.syscall.restype = ctypes.c_long
+libc.syscall(ctypes.c_long(0x40000000 | 521), ctypes.c_long(0))  # x32 ptrace(PTRACE_TRACEME)
+"""
+x86_64 = pytest.mark.skipif(
+    __import__("platform").machine() not in ("x86_64", "amd64"),
+    reason="ia32 and x32 are x86_64 syscall ABIs; run on real x86_64 (gap 8.4)",
+)
+
+
+@x86_64
+@pytest.mark.parametrize("call", [IA32, X32], ids=["ia32 int 0x80", "x32"])
+def test_a_refused_syscall_through_a_foreign_abi_never_runs(call):
+    """Gap 8.4: nono GHSA-vhq2-h2q7-8mmc was an ia32 bypass. The filter is built for
+    x86_64 (plus x32), so an int 0x80 call must hit the bad-architecture kill and an
+    x32 ptrace the x32 copy of the rule. Simulated in tools/hostlab/bpfsim.py."""
+    done = boot(FOREIGN.replace("CALL", call.replace("\n", "\n        ")))
+    print(done.stdout, done.stderr[-500:])
+    assert "KILLED by SIGSYS" in done.stdout, done.stdout + done.stderr

@@ -38,23 +38,31 @@ NNP = 3  # SCMP_FLTATR_CTL_NNP
 TSYNC = 4  # SCMP_FLTATR_CTL_TSYNC
 
 NE = 1  # SCMP_CMP_NE
+GE = 5  # SCMP_CMP_GE
 EQ = 4  # SCMP_CMP_EQ
 MASKED = 7  # SCMP_CMP_MASKED_EQ
+LOW = 0xFFFFFFFF  # an int argument: the only bits the kernel reads
 
 BAD = -1  # __NR_SCMP_ERROR: syscall unknown on this architecture
 
-# socket(2) domains we refuse when the network is closed. AF_UNIX is left
-# alone: it never leaves the machine, and Landlock scoping already confines it.
+# socket(2) domains, as an allowlist. `net` describes reach over IP, so only
+# the families it describes are allowed at all: unix (never leaves the
+# machine; Landlock scoping confines it), IPv4 and IPv6 (refused too when the
+# network is closed), and netlink (route only, below). Every other family --
+# packet, RDS, TIPC, CAN, XDP, ALG, PF_KEY, VSOCK, Bluetooth and the rest --
+# crosses a boundary `net` does not describe, and some carry traffic off the
+# machine (RDS over TCP, VSOCK to the hypervisor). Refused whatever `net` says.
+UNIX = 1
 INET = 2
 INET6 = 10
-PACKET = 17
-
-# Domains refused whatever the network policy says. `net` describes reach over
-# IP; these cross boundaries it does not describe, and no agent has a reason to
-# use either. VSOCK in particular talks to the hypervisor, so on a virtualised
-# host it points at the one place outside the machine entirely.
-VSOCK = 40
-BLUETOOTH = 31
+ALLOWED = (UNIX, INET, INET6, 16)  # 16 is NETLINK
+# One past the highest family Linux defines (AF_MAX is 46 from 5.15 through
+# 7.x). libseccomp can't put two comparisons on one argument (FINDINGS.md,
+# "Host allowlisting groundwork"), so there is no range rule: one rule per
+# refused value below this, and one for everything at or above it -- which
+# also catches a value with garbage in the upper 32 bits, since the filter
+# compares the whole register while the kernel reads only the low half.
+FAMILIES = 46
 
 # Netlink talks to kernel subsystems rather than to the network. Protocol 0 is
 # NETLINK_ROUTE, which `getifaddrs(3)` needs -- Python, Node, Go and most HTTP
@@ -359,13 +367,15 @@ def load(policy: Policy) -> None:
         # memory is not the dangerous step, and shared-memory users need it.
         _rule(ctx, KILL, "execveat", [Arg(4, MASKED, EMPTY, EMPTY)])
 
-        # Kernel subsystems reachable through a socket, whatever `net` says.
-        for domain in (VSOCK, BLUETOOTH):
-            _rule(ctx, ERROR | EPERM, "socket", [Arg(0, EQ, domain, 0)])
+        # Socket families outside what `net` describes, whatever `net` says.
+        for domain in range(FAMILIES):
+            if domain not in ALLOWED:
+                _rule(ctx, ERROR | EPERM, "socket", [Arg(0, EQ, domain, 0)])
+        _rule(ctx, ERROR | EPERM, "socket", [Arg(0, GE, FAMILIES, 0)])
         _rule(ctx, ERROR | EPERM, "socket", [Arg(0, EQ, NETLINK, 0), Arg(2, NE, ROUTE, 0)])
 
         if policy.net is False:
-            for domain in (INET, INET6, PACKET):
+            for domain in (INET, INET6):
                 _rule(ctx, ERROR | EPERM, "socket", [Arg(0, EQ, domain, 0)])
             for name in WIRE:
                 _rule(ctx, ERROR | EPERM, name)
@@ -378,9 +388,11 @@ def load(policy: Policy) -> None:
             # checks.
             for name, arg in SENDS.items():
                 _rule(ctx, ERROR | EPERM, name, [Arg(arg, MASKED, FASTOPEN, FASTOPEN)])
+            # The protocol is an int, so only its low 32 bits reach the
+            # kernel: compare those, or (1 << 32) | MPTCP walks past an EQ.
             for domain in (INET, INET6):
                 _rule(ctx, ERROR | EPROTONOSUPPORT, "socket",
-                      [Arg(0, EQ, domain, 0), Arg(2, EQ, MPTCP, 0)])
+                      [Arg(0, EQ, domain, 0), Arg(2, MASKED, LOW, MPTCP)])
 
         if policy.exec is False:
             for name in BIRTH:

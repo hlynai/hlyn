@@ -405,6 +405,70 @@ except OSError:
     assert "REFUSED" in done.stdout, f"{what} was reachable: {done.stdout}"
 
 
+# Every family `net` doesn't describe, plus values past the last one Linux
+# defines and a valid family hidden under garbage in the upper 32 bits (the
+# filter compares the whole register; the kernel reads only the low half).
+FAMILIES = """
+import ctypes, errno, socket
+ours = []
+for domain in [d for d in range(46) if d not in (1, 2, 10, 16)] + [46, 255, (1 << 32) | 2, (1 << 32) | 29]:
+    for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM, socket.SOCK_SEQPACKET, socket.SOCK_RAW):
+        fd = call(NR, domain, kind, 0)
+        err = ctypes.get_errno()
+        if fd >= 0:
+            import os; os.close(fd)
+            print(f"family {domain:#x} type {kind}: CREATED")
+            break
+        if err != errno.EPERM:
+            print(f"family {domain:#x} type {kind}: {errno.errorcode[err]}")
+            break
+    else:
+        ours.append(domain)
+print("EPERM from the filter for", len(ours), "families:", [hex(d) for d in ours])
+"""
+
+
+@pytest.mark.parametrize("net", ["False", "[443]", "True"])
+def test_every_family_net_does_not_describe_is_refused(net):
+    # Gap 8.7: a denylist refused IP, packet, VSOCK and Bluetooth and left RDS,
+    # TIPC, XDP, ALG, CAN, PF_KEY and the rest to the kernel. EPERM for every
+    # type is the filter's answer; a kernel without the family says
+    # EAFNOSUPPORT instead, so this can't pass by the family simply being
+    # absent. The line printed for each escape shows what the kernel said.
+    done = jail(
+        RAW + FAMILIES,
+        before="NR = seccomp._nr('socket')",
+        policy=f"Policy(net={net})",
+    )
+    print(done.stdout, done.stderr[-500:])
+    escaped = [line for line in done.stdout.splitlines() if line.startswith("family ")]
+    assert "EPERM from the filter for 46 families" in done.stdout, (
+        f"families the filter left to the kernel under net={net}: {escaped}"
+    )
+
+
+@pytest.mark.parametrize("net", ["False", "[443]"])
+def test_the_allowed_families_still_work(net):
+    # Unix sockets and route netlink (getifaddrs) must survive every mode;
+    # socketpair is how multiprocessing and asyncio talk to themselves.
+    done = jail(
+        """
+        import socket
+        a, b = socket.socketpair()
+        a.sendall(b"ping"); print("socketpair:", b.recv(4))
+        socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).close(); print("unix dgram: ok")
+        print("interfaces:", [name for _, name in socket.if_nameindex()])
+        socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0).close(); print("route netlink: ok")
+        """,
+        policy=f"Policy(net={net})",
+    )
+    print(done.stdout, done.stderr[-500:])
+    assert "socketpair: b'ping'" in done.stdout
+    assert "unix dgram: ok" in done.stdout
+    assert "route netlink: ok" in done.stdout
+    assert "lo" in done.stdout
+
+
 def test_kernel_subsystems_over_netlink_are_shut():
     # Netlink reaches kernel subsystems rather than the network. Protocol 0 is
     # the exception and has its own test below.
