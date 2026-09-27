@@ -15,13 +15,17 @@ namespaces, module loading).
 from __future__ import annotations
 
 import ctypes
-import ctypes.util
-import platform
+import os
 from collections.abc import Iterable
 
 from ..error import Failed, Unsupported
-from ..policy import Policy
 from . import notify  # at import time: after the seal nothing more may be loaded
+
+# `typing` itself costs a helper's start ~5 ms, and every use here is an
+# annotation; mypy reads this flag as it reads typing's.
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from ..policy import Policy
 
 __all__ = ["SHUT", "busy", "load", "ready", "why"]
 
@@ -252,7 +256,9 @@ def lib() -> ctypes.CDLL:
         except OSError:
             continue
     if _lib is None:
-        found = ctypes.util.find_library("seccomp")
+        from ctypes.util import find_library  # slow (it may run a compiler): only as a fallback
+
+        found = find_library("seccomp")
         if found:
             try:
                 _lib = ctypes.CDLL(found, use_errno=True)
@@ -406,7 +412,7 @@ def load(policy: Policy) -> int | None:
         # On x86_64 a syscall number can carry the x32 bit. Adding the x32
         # architecture makes libseccomp emit each rule for that convention too,
         # instead of letting x32 numbers fall through to the default action.
-        if platform.machine() in ("x86_64", "amd64"):
+        if os.uname().machine in ("x86_64", "amd64"):
             x32 = api.seccomp_arch_resolve_name(b"x32")
             if x32:
                 api.seccomp_arch_add(ctx, x32)

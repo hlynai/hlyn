@@ -45,9 +45,13 @@ import signal
 import socket
 import sys
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, NoReturn
 
+# `typing` itself costs a helper's start ~5 ms, and every use here is an
+# annotation; mypy reads this flag as it reads typing's.
+TYPE_CHECKING = False
 if TYPE_CHECKING:
+    from typing import NoReturn
+
     from .core.guard import Config, Guard
 
 __all__ = ["become", "detached", "drop", "hand", "main", "prepare", "relay"]

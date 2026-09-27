@@ -31,7 +31,6 @@ import fcntl
 import functools
 import ipaddress
 import os
-import platform
 import socket
 import struct
 from dataclasses import dataclass
@@ -70,7 +69,7 @@ ADDFD = (1 << 30) | (24 << 16) | (ord("!") << 8) | 3
 
 # Pointers on aarch64 may carry a tag in the top byte (MTE, HWASan); the
 # kernel ignores it, so the gate must too before seeking /proc/PID/mem.
-UNTAG = (1 << 56) - 1 if platform.machine() in ("aarch64", "arm64") else (1 << 64) - 1
+UNTAG = (1 << 56) - 1 if os.uname().machine in ("aarch64", "arm64") else (1 << 64) - 1
 
 # Largest sockaddr the gate reads: sockaddr_storage.
 MOST = 128

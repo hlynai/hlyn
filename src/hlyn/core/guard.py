@@ -48,13 +48,17 @@ import stat
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Literal
 
 from .. import hosts
 from ..hosts import Rule
-from ..policy import under
 from ..wire import header
 from . import notify, seccomp
+
+# `typing` itself costs a helper's start ~5 ms, and every use here is an
+# annotation; mypy reads this flag as it reads typing's.
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from typing import Literal
 
 __all__ = ["REFUSED", "Config", "Guard"]
 
@@ -121,7 +125,8 @@ def granted(writes: tuple[str, ...] | bool) -> list[str]:
                 continue  # gone since the glob
             if not any(pattern.search(item) for pattern in _REFUSED for item in (found, real)):
                 continue
-            if roots is None or any(under(real, root) for root in roots):
+            if roots is None or any(real == root or real.startswith(root.rstrip("/") + "/")
+                                    for root in roots):
                 out.append(real)
     return sorted(set(out))
 

@@ -147,3 +147,25 @@ def test_a_signal_sent_while_the_gate_starts_never_orphans_the_command():
         # 9: the trap ran. -SIGTERM: the TERM reached the shell before it set
         # the trap, so it died of it and the gate reproduced that.
         assert got in (9, -signal.SIGTERM) and not alive
+
+
+def test_the_gate_helper_loads_nothing_slow():
+    """A gate starts per hlyn.run(fn) call, from a fresh interpreter when the
+    caller has threads (target: under 50 ms a call, design section 9). Each
+    of these cost it milliseconds and it needs none of them; an innocent
+    import elsewhere brought each back once (FINDINGS.md)."""
+    import subprocess
+
+    from conftest import SRC
+
+    probe = (
+        "import sys, types; package = types.ModuleType('hlyn'); "
+        f"package.__path__ = [{SRC + '/hlyn'!r}]; sys.modules['hlyn'] = package; "
+        "import hlyn.gate, hlyn.core.guard, hlyn.core.notify; "
+        "print(' '.join(sorted(sys.modules)))"
+    )
+    done = subprocess.run([sys.executable, "-I", "-S", "-c", probe], capture_output=True, text=True, check=True)
+    loaded = set(done.stdout.split())
+    slow = {"asyncio", "typing", "ctypes.util", "hlyn.policy", "hlyn.proxy", "subprocess", "platform", "argparse"}
+    print(f"{len(loaded)} modules loaded; slow ones among them: {sorted(loaded & slow)}")
+    assert not loaded & slow
