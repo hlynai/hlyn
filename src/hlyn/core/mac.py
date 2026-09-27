@@ -160,6 +160,10 @@ def probe() -> dict[str, object]:
         # Host names in `net`: the proxy (5.5) behind a profile that allows
         # only its port (5.4).
         "hosts": ready(),
+        # Socket files: the profile allows them only in write-granted folders
+        # (host mode) or with the whole network, and Seatbelt checks the path
+        # the kernel uses, so there is no race to win.
+        "sockets": ready(),
         # Whether `hlyn run` can list what was blocked. Read from the system
         # log, so it needs nothing built or installed.
         "report": os.access("/usr/bin/log", os.X_OK),

@@ -23,6 +23,10 @@ Anything that lets a confined process reach past its policy:
 
 - reading, writing, or executing a path the policy did not grant,
 - reaching a TCP port the policy did not name,
+- reaching a host `net` does not list, or reaching anything at all except
+  through hlyn's proxy when `net` names hosts (a direct connection, UDP, DNS,
+  another socket family, another run's proxy, or hlyn's helpers themselves),
+- anything in the "It stops" list below that you can make happen,
 - reaching another agent's process, memory, signals, or descriptors when the
   policy did not allow it,
 - removing, weakening, or escaping the confinement after it has been applied,
@@ -37,10 +41,11 @@ downgrade is a vulnerability even if nothing escaped.
 These are documented limits, not defects. They are in the README, in the API
 docstrings, and in the error messages:
 
-- **Host names are not enforced.** `net=["example.com"]` is refused rather than
-  accepted. Landlock filters ports; seccomp cannot read the `sockaddr`.
-- **Named ports restrict TCP only.** `net=[443]` leaves UDP reachable. Use
-  `net=False` to close the network entirely.
+- **Named ports restrict TCP only, and reach every host on them.**
+  `net=[443]` leaves UDP reachable. Name hosts instead, or use `net=False` to
+  close the network entirely.
+- **What naming hosts does not stop**, listed below: data sent to a host you
+  allowed, domain fronting, the unix-socket race on Linux, and the rest.
 - **macOS has no isolation between agents.** Seatbelt has no equivalent of
   Landlock's scoping. `hlyn probe` reports this.
 - **A kernel below Landlock ABI 6 cannot be used.** hlyn refuses to seal rather
@@ -52,9 +57,44 @@ docstrings, and in the error messages:
 If you think one of these limits is worse than we have described, that is worth
 an email too.
 
+## Threat model for host names in `net`
+
+From [DESIGN-host-allowlisting.md](DESIGN-host-allowlisting.md), section 6, in
+the same words; section numbers refer to that document. The README carries the
+same text.
+
+**It stops**, for code running inside the sandbox, including code that deliberately races threads:
+
+- Opening a TCP connection to any host and port not on the list, whether through the proxy, directly, by IP address, or by exploiting a shared port. On Linux the kernel never runs such a connect.
+- Reaching private, loopback, link-local or cloud-metadata addresses through a public name, whether by DNS rebinding or by a name that resolves privately.
+- UDP of any kind (DNS, QUIC, anything tunnelled over it), raw IP, SCTP, packet sockets, and every socket family other than unix, TCP and route netlink.
+- DNS lookups, whether over UDP, over TCP, through the resolver daemons or D-Bus, or through DoH to hosts not on the list, whatever folders are granted. See residual 3 below.
+- Reaching a container runtime's socket (`docker.sock` and the like), whatever folders are granted. See residual 3 below.
+- Connections opened before the seal: the sealed child closes them, or `hlyn.on()` refuses.
+- Tricks with how names and addresses are written: case, trailing dots, Unicode confusables, octal, hex or decimal IPv4, IPv4-mapped IPv6, zone IDs, NUL bytes, CRLF.
+- A mismatch between the CONNECT target and the TLS SNI.
+- Using another sandbox's proxy, killing or tracing hlyn's own helpers, or answering its own connection checks.
+- On macOS, system services that resolve names or fetch URLs on the agent's behalf (`com.apple.dnssd.service`, `trustd`): refused (5.4).
+
+**It does not stop.**
+
+1. **Sending data to an allowed host.** A gist on `github.com`, an object in a bucket under `*.s3.amazonaws.com`, or a prompt sent to `api.openai.com` all look like normal traffic. This is the third leg of the lethal trifecta (private data, untrusted content, a way out). Host allowlisting narrows that way out; it can't close it for a host the agent needs. The mitigation is still hlyn's first rule: don't let the agent read what it shouldn't send. The secret warning stays on. This point is inferred from how network filtering works; the research found no direct citation for it.
+2. **Domain fronting, shared TLS endpoints, HTTP/2 connection coalescing, and ECH on connections that are already open.** Without looking inside TLS, the proxy sees the SNI but not the HTTP `Host`. A 2024 study found fronting still works on 22 of 30 CDNs, Akamai and Fastly among them. Claude Code's own documentation carries the same warning.
+3. **Unix sockets, on Linux.** A deliberately multi-threaded agent can race a unix-socket `connect()` or `sendto()` past the gate's check, and `sendmsg` to a unix datagram path isn't checked at all (5.3); in a test, 611 of 3,000 raced connects reached a refused socket. On Linux 7.1 and newer the kernel itself refuses every socket outside the write-granted folders (built, not yet run on a 7.1 kernel), so the race reaches only a refused socket inside one (`--write /run` holds the resolver and D-Bus sockets). Before 7.1 it can reach the host's DNS resolver, D-Bus and container-runtime sockets, and `net=False` has the same gaps with no check at all. TCP is unaffected.
+4. **Other programs on the same Mac.** On macOS, `localhost:P` also matches the machine's own network addresses. A process outside the sandbox that listens on P at the Mac's LAN address could receive agent traffic.
+5. **Behind a corporate proxy.** The address checks are skipped when chaining to a corporate proxy (5.5).
+6. **Kernel bugs, side channels, and denial of service against the machine.** These are the same as for the rest of hlyn. For tenants who may be hostile to each other, use a microVM outer boundary; nono and Sandlock both say the same.
+7. **Services you allow on this machine.** An address or `localhost:PORT` entry makes that service part of the boundary. A local HTTP or SOCKS proxy, Tor (9050), Docker's API (2375, 2376), the Kubernetes API (6443) or a kubelet (10250) each give full onward reach. hlyn warns when an entry names one of those ports:
+   ```
+   hlyn: localhost:2375 is Docker's API port. An agent that reaches it controls this
+     machine. Remove --net localhost:2375 unless you mean it.
+   ```
+8. **Other processes on the machine.** Processes outside the sandbox can connect to the proxy's port like any local port, and can write a PROXY header themselves. They reach only the allowlist, which they could reach anyway. Blocks they cause show up in this run's report.
+9. **Mach services on the macOS allowlist.** Each one is measured before it goes on the list (5.4), but a service that acts for its caller in a way no test covers would be a route out. The list starts empty and stays short.
+
 ## Scope
 
-The library, the CLI, the native shim, and the framework adapters in this
-repository. The kernel facilities underneath — Landlock, seccomp, Seatbelt —
-belong to their own projects; report kernel bugs upstream, though we would like
-to know so we can work around them.
+The library, the CLI, the native shim, the proxy and gate helpers, and the
+framework adapters in this repository. The kernel facilities underneath —
+Landlock, seccomp, Seatbelt — belong to their own projects; report kernel bugs
+upstream, though we would like to know so we can work around them.

@@ -129,11 +129,18 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
 
         import hlyn; hlyn.on()                     # deny all but the runtime
         hlyn.on("coder")                           # a preset
-        hlyn.on(read=["/src"], net=[443])          # named grants
+        hlyn.on(read=["/src"], net=["api.openai.com"])  # named grants
 
     Returns what was applied. Raises rather than return if the kernel could
     not apply it, because a caller that believes it is confined and is not is
     the worst outcome this package has.
+
+    No child processes, unless `net` names hosts (DESIGN-host-allowlisting.md
+    5.8): then two detached helpers start before the seal and live as long as
+    this process -- a local proxy, and on Linux a gate that makes it the only
+    way out. The seal record names them (`"helpers"`), and the proxy
+    variables (`HTTPS_PROXY` and the rest) are set in `os.environ`, so a
+    client created before this call misses them: create it after.
     """
     if _sealed:
         raise Sealed(
@@ -202,22 +209,21 @@ def _ptracer(pid: int) -> None:
 
 
 def unbuilt(plan: Policy) -> None:
-    """Refuse to seal a policy that names hosts where host mode isn't enforced.
+    """Refuse to seal a policy that names hosts on a backend that can't
+    enforce them, before any helper starts.
 
-    macOS enforces it (the proxy behind a Seatbelt profile that allows only
-    the proxy's port, DESIGN-host-allowlisting.md 5.4). Linux doesn't yet:
-    the connection gate that makes the proxy the only way out there is
-    phase 4. Sealing with hosts quietly treated as ports, or as open, would
-    be the one thing a containment layer must never do, so every entry point
-    refuses here first, before anything is changed.
+    Linux and macOS both enforce host names; the backend for every other
+    platform (`core/none.py`) enforces nothing. Sealing with hosts quietly
+    treated as ports, or as open, would be the one thing a containment layer
+    must never do, so every entry point refuses here first, before anything
+    is changed -- including the proxy it would otherwise start.
     """
     named = plan.hosts()
     if named and not getattr(back(), "HOSTS", False):
         shown = ", ".join(str(rule) for rule in named[:3]) + (" ..." if len(named) > 3 else "")
-        why = getattr(back(), "UNBUILT", "this platform doesn't enforce host names in net")
         raise Unsupported(
-            f"net names hosts ({shown}), and {why}. Nothing was sealed. For now use ports "
-            f"(--net 443, or net=[443]), which allow every host on them, or net=False."
+            f"net names hosts ({shown}), and this platform can't enforce them. Nothing was "
+            f"sealed. hlyn enforces host names on Linux and macOS."
         )
 
 

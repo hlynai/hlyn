@@ -111,6 +111,39 @@ def test_probe_speaks_to_a_person_by_default():
         json.loads(out)
 
 
+def test_probe_says_why_a_no_is_a_no_and_what_to_do():
+    # A "no" on a machine that otherwise enforces names its reason and fix,
+    # never just "no" (CLAUDE.md: every message says what to do next).
+    from hlyn.cli import _machine
+
+    old = _machine({
+        "platform": "linux", "kernel": "6.12", "enforce": True, "ports": True, "hosts": False,
+        "scope": True, "sockets": False, "report": True,
+        "why": "libseccomp is older than 2.5.0, so host names in net can't be enforced; "
+               "use ports (--net 443) or upgrade libseccomp",
+    })
+    new = _machine({
+        "platform": "linux", "kernel": "7.1", "enforce": True, "ports": True, "hosts": True,
+        "scope": True, "sockets": True, "report": True,
+    })
+    print(old, new, sep="\n")
+    assert "no  host names in net (api.openai.com): libseccomp is older than 2.5.0" in old
+    assert "or upgrade libseccomp" in old
+    sockets = "local sockets only in write-granted folders, checked by the kernel"
+    assert f"no  {sockets} (Linux 7.1 or newer;" in old
+    assert "yes local sockets only in write-granted folders, checked by the kernel\n" in new
+    assert "7.1 or newer" not in new
+
+
+def test_probe_tells_whether_this_kernel_checks_socket_files():
+    out = json.loads(hlyn("probe", "--json").stdout)
+    print(out)
+    if sys.platform == "linux":
+        from hlyn.core import landlock
+
+        assert out["sockets"] == (out["enforce"] and landlock.abi() >= 9)
+
+
 @here
 def test_probe_exits_zero_when_the_machine_can_enforce():
     # Usable as a preflight gate in a pipeline, not just something to read.
@@ -243,9 +276,8 @@ def test_a_host_is_shown_in_canonical_form():
 
 
 def test_running_with_a_host_runs_where_hosts_are_enforced_and_is_refused_elsewhere():
-    # macOS enforces hosts (the proxy behind Seatbelt); Linux does from design
-    # phase 4. Until then a Linux run must be refused, never quietly treated
-    # as ports. The macOS run itself is tested in test_hostmode.py.
+    # Linux and macOS enforce hosts (test_hostmode.py runs them for real);
+    # anywhere else the run must be refused, never quietly treated as ports.
     from hlyn.jail import back
 
     done = hlyn("run", "--no-report", "--net", "api.openai.com", "--", sys.executable, "-c", "print('RAN')")
@@ -256,8 +288,7 @@ def test_running_with_a_host_runs_where_hosts_are_enforced_and_is_refused_elsewh
         return
     assert done.returncode == 2
     assert "RAN" not in done.stdout
-    assert "aren't enforced on Linux yet" in done.stderr or "doesn't enforce host names" in done.stderr
-    assert "--net 443" in done.stderr
+    assert "can't enforce them" in done.stderr
 
 
 def test_a_malformed_host_names_the_fix():

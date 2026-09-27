@@ -97,10 +97,11 @@ def ports(value: object, field: str = "net") -> tuple[int, ...] | tuple[Rule, ..
     Named ports are **TCP only**, and this is worth reading twice, because it
     is the one place where naming a port grants more than it appears to.
     Landlock's network rules cover TCP bind and connect; UDP is outside them,
-    so `net=[443]` leaves UDP open. Traffic can still leave over DNS or QUIC.
-    `net=False` blocks the lot. Host entries close UDP too (design section 5),
-    but are not enforced yet: sealing a policy that names hosts is refused
-    until they are (`jail.unbuilt`).
+    so `net=[443]` leaves UDP open. Traffic can still leave over DNS or QUIC,
+    and a port reaches every host on it. `net=False` blocks the lot. Host
+    entries close UDP and every host not listed: the connections go through
+    a local proxy, and on Linux a gate process checks each one
+    (DESIGN-host-allowlisting.md, section 5).
     """
     if isinstance(value, bool):
         return value
@@ -517,16 +518,16 @@ class Policy:
 
         Policy()                                    # nothing but the runtime
         Policy(read=["/src"], write=["/out"])       # named directories
-        Policy(net=[443], exec=False)               # ports, no new programs
-        Policy(net=["api.openai.com"])              # hosts (refused at seal until built)
+        Policy(net=["api.openai.com"])              # one host, over HTTPS
+        Policy(net=[443], exec=False)               # a port: every host on it
 
     Frozen on purpose. A policy that can be edited after it has been checked
     is a policy that can be edited by whatever compromised the agent.
 
     One caveat, stated here because it is the only field that grants more than
-    it reads: naming ports in `net` restricts **TCP only**. UDP stays open, so
-    traffic can still leave over DNS or QUIC. `net=False` closes everything.
-    See `ports` for why it cannot currently be narrower than that.
+    it reads: naming *ports* in `net` restricts **TCP only**, and reaches every
+    host on them. UDP stays open, so traffic can still leave over DNS or QUIC.
+    Naming hosts closes both; `net=False` closes everything. See `ports`.
     """
 
     read: tuple[str, ...] | bool = ()

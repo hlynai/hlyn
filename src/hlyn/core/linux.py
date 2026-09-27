@@ -72,6 +72,10 @@ def probe() -> dict[str, object]:
         "ports": ok,  # network rules at all
         # Host names in `net`: the notify API and no other listener here.
         "hosts": ok and filter and notify.ready() and not seccomp.busy(),
+        # Socket files outside the write grants refused by the kernel itself
+        # (Landlock ABI 9, the shim's `bonus`); before that only host mode's
+        # gate checks them, and a racing agent can get past it (5.3).
+        "sockets": ok and abi >= 9,
         # Whether `hlyn run` can list what was blocked: needs the preloaded
         # reporting library. Not part of `enforce` -- the boundary holds
         # either way; only the explanation is missing.

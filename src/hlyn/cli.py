@@ -47,9 +47,10 @@ def build() -> argparse.ArgumentParser:
                        help="runnable program (repeatable)")
         p.add_argument("--exec-any", action="store_true", help="allow running any program")
         # No `type=int`: a host is as valid here as a port.
-        p.add_argument("--net", action="append", metavar="PORT|HOST", default=[],
-                       help="reachable TCP port (UDP stays open), or host such as "
-                            "api.openai.com (macOS; Linux soon); repeatable")
+        p.add_argument("--net", action="append", metavar="HOST|PORT", default=[],
+                       help="reachable host (api.openai.com, *.example.com, localhost:5432, "
+                            "10.0.0.5:5432) or TCP port (443: every host on it, UDP stays open); "
+                            "hosts or ports, not both; repeatable")
         p.add_argument("--net-any", action="store_true", help="allow all network access")
         p.add_argument("--env", action="append", metavar="NAME", default=[],
                        help="environment variable to keep (repeatable)")
@@ -152,7 +153,7 @@ def _add(base: tuple[object, ...] | bool, extra: list[str]) -> object:
 
 
 def _narrow_net(base: tuple[object, ...] | bool, extra: list[str], source: str | None) -> object:
-    """`--net` widens a list of ports (and, once hosts exist, hosts), but
+    """`--net` widens a list of ports or hosts, but
     *replaces* a base that already allows any network.
 
     This is the opposite of `_add`, on purpose (design 4.1, gap 8.6): naming a
@@ -281,14 +282,19 @@ def _machine(out: dict[str, object]) -> str:
     else:
         why = out.get("why", "unknown reason")
         head = f"NO  hlyn cannot confine programs on this machine ({where}): {why}"
+    linux = out.get("platform") == "linux"
     rows = [
-        ("files and programs", out.get("enforce")),
-        ("network ports", out.get("ports")),
-        ("host names in net (api.openai.com)", out.get("hosts")),
-        ("isolation between agents on this machine", out.get("scope")),
-        ("listing what was blocked, after hlyn run", out.get("report")),
+        ("files and programs", out.get("enforce"), ""),
+        ("network ports", out.get("ports"), ""),
+        ("host names in net (api.openai.com)", out.get("hosts"),
+         f": {out['why']}" if out.get("enforce") and out.get("why") else ""),
+        ("isolation between agents on this machine", out.get("scope"), ""),
+        ("local sockets only in write-granted folders, checked by the kernel", out.get("sockets"),
+         " (Linux 7.1 or newer; until then host mode's gate checks them, and a racing agent "
+         "can get past it)" if linux else ""),
+        ("listing what was blocked, after hlyn run", out.get("report"), ""),
     ]
-    lines = [head, *(f"    {'yes' if yes else 'no':<4}{name}" for name, yes in rows)]
+    lines = [head, *(f"    {'yes' if yes else 'no':<4}{name}{'' if yes else why}" for name, yes, why in rows)]
     if out.get("reduced"):
         lines.append(f"    note: host names work in reduced mode here: {out['reduced']}.")
     return "\n".join(lines) + "\n"

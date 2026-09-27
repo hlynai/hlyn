@@ -10,17 +10,17 @@
 ```python
 import hlyn
 
-hlyn.on(read=["./data"], write=["./out"], net=[443])
+hlyn.on(read=["./data"], write=["./out"], net=["api.openai.com"])
 
-# From here on, this process can read ./data, write ./out, and open TCP
-# connections on port 443. Nothing else. Not ~/.ssh, not your .env, not
-# port 22. This cannot be undone for the life of the process.
+# From here on, this process can read ./data, write ./out, and reach
+# api.openai.com over HTTPS. Nothing else: not ~/.ssh, not your .env, not
+# any other host. This cannot be undone for the life of the process.
 ```
 
 Or leave your code alone and wrap the command:
 
 ```bash
-hlyn run --read ./data --write ./out --net 443 -- python agent.py
+hlyn run --read ./data --write ./out --net api.openai.com -- python agent.py
 ```
 
 ---
@@ -53,20 +53,20 @@ With hlyn, the answer is "only what you wrote down."
 | | Without hlyn | With hlyn |
 |---|---|---|
 | Agent reads `~/.ssh/id_ed25519` | Works | `PermissionError`, unless you granted it |
-| Agent sends data to a server | Works | Refused while the network is off (the default). Once you open a port, see the note below. |
+| Agent sends data to a server | Works | Refused unless it is a host you listed. The network is off by default. |
 | Agent runs `curl … \| sh` | Works | Refused unless you allowed that program |
 | Agent reads `OPENAI_API_KEY` from its environment | Works | Removed before it starts, unless you kept it |
 | You grant a folder that holds a `.env`, with the network open | Nothing tells you | hlyn warns before it starts, and says how to fix it |
 | Agent tries to turn the sandbox off | No sandbox to turn off | There is no off switch, not even for hlyn itself |
 
-> **The honest caveat.** `net` filters **ports, not hosts**. If you open port 443 so the agent can call an API, a compromised agent can use port 443 to reach *any* host. So the rule that matters most is: **don't let the agent read what it shouldn't send.** Grant narrow folders, pass API keys with `--env` rather than a readable `.env`, and let hlyn's [secret warning](#secrets-in-granted-folders) catch the rest. Host allowlists are on the roadmap.
+> **The honest caveat.** Naming hosts stops the agent reaching any other host. It can't stop the agent sending data *to* a host you listed: a prompt to `api.openai.com` or a gist on `github.com` looks like normal traffic. So the rule that matters most is still: **don't let the agent read what it shouldn't send.** Grant narrow folders, pass API keys with `--env` rather than a readable `.env`, and let hlyn's [secret warning](#secrets-in-granted-folders) catch the rest. A bare port (`net=[443]`) is weaker again: it reaches every host on that port. [What naming hosts does not stop](#what-naming-hosts-does-not-stop) lists the rest.
 
 **What makes it different:**
 
 - **Enforced by the kernel.** Linux uses Landlock and seccomp; macOS uses Seatbelt. The rules are not a Python wrapper the agent could monkey-patch or talk its way around.
 - **Deny by default.** An empty policy grants nothing except the files Python itself needs to run.
 - **One line to start.** `hlyn.on()` or `hlyn run -- cmd`. Every extra permission is one more obvious argument.
-- **No proxy, no daemon, no container.** Nothing sits between the agent and the kernel, so it adds almost no latency (see [Performance](#performance)). It works inside Docker too.
+- **No daemon, no container.** With ports, nothing sits between the agent and the kernel, so it adds almost no latency. Naming hosts adds two helper processes for the run: a local proxy that checks each host, and on Linux a gate that makes the proxy the only way out (see [Performance](#performance)). It works inside Docker too.
 - **Refuses rather than pretends.** If the machine cannot enforce your whole policy, hlyn raises an error instead of quietly enforcing part of it.
 - **Zero runtime dependencies.**
 
@@ -85,10 +85,12 @@ hlyn probe
 ```
 
 ```
-ok  hlyn can confine programs on this machine (Linux 6.12.76-linuxkit)
+ok  hlyn can confine programs on this machine (Linux 6.18.44)
     yes files and programs
     yes network ports
+    yes host names in net (api.openai.com)
     yes isolation between agents on this machine
+    no  local sockets only in write-granted folders, checked by the kernel (Linux 7.1 or newer; until then host mode's gate checks them, and a racing agent can get past it)
     yes listing what was blocked, after hlyn run
 ```
 
@@ -96,12 +98,14 @@ ok  hlyn can confine programs on this machine (Linux 6.12.76-linuxkit)
 
 | Platform | Needs | Notes |
 |---|---|---|
-| **Linux** | Kernel **6.12+** with Landlock enabled, plus `libseccomp` | x86_64 and aarch64, any glibc 2.28+ distribution (Debian 10+, Ubuntu 20.04+, RHEL 8+). Works inside Docker. Alpine (musl) is not supported. |
+| **Linux** | Kernel **6.12+** with Landlock enabled, plus `libseccomp` (**2.5.0+** to name hosts in `net`) | x86_64 and aarch64, any glibc 2.28+ distribution (Debian 10+, Ubuntu 20.04+, RHEL 8+). Works inside Docker. Alpine (musl) is not supported. |
 | **macOS** | Any current macOS | Nothing to build or install beyond Python. |
 | **Python** | 3.10 or newer | Reading TOML policies on 3.10 needs `tomli`; YAML needs `pyyaml`. JSON always works. |
 | Anything else | Not supported | hlyn refuses to run rather than pretend to protect you. |
 
 > **Why such a new kernel?** Linux 6.12 is the first with Landlock ABI 6, which is what stops one agent signalling or connecting to another. Rather than enforce a weaker boundary than you asked for, hlyn refuses to run on older kernels. `hlyn probe` tells you exactly where a given machine stands.
+
+> **Naming hosts on Linux** also needs hlyn's gate to read the address each connection dials. With `kernel.yama.ptrace_scope` at 0 or 1 (the usual setting) that works, except for programs started by a process that called `hlyn.on()`, which need 0. At 2 or 3, hlyn runs in *reduced mode*: programs that use `HTTPS_PROXY` still reach listed hosts, but address, `localhost` and local-socket entries don't. `hlyn probe` says which applies.
 
 ---
 
@@ -173,7 +177,7 @@ A policy has seven fields. Each one answers a single question.
 | `read` | Which paths can it read? | Nothing but Python's own files |
 | `write` | Which paths can it write? | Nothing |
 | `exec` | Which programs can it start? | None |
-| `net` | Which TCP ports can it connect to? | None, and no network at all |
+| `net` | Which hosts (or TCP ports) can it connect to? | None, and no network at all |
 | `env` | Which environment variables survive? | Only a safe list (`PATH`, `HOME`, `LANG`, `TZ`, …) |
 | `tmp` | Does it get a private scratch folder? | Yes, a fresh empty one |
 | `log` | Where does the record of what happened go? | stderr |
@@ -191,8 +195,44 @@ A few rules worth knowing:
 - **A folder grant covers everything inside it.** `read=["./src"]` includes `./src/app/main.py`.
 - **Writing implies reading what you wrote.** A path in `write` can also be read back.
 - **Paths must exist.** A typo such as `read=["./scr"]` is an error, not a grant that silently matches nothing.
-- **`net` enforces ports, not host names, today.** `net=["api.openai.com"]` is accepted by `Policy`, `hlyn show` and policy files, but every entry point refuses to seal it until host allowlisting is built ([design](DESIGN-host-allowlisting.md)). Use `net=[443]` for now.
-- **Allowing any network also allows what the network needs.** DNS configuration and TLS certificate stores become readable automatically, so `net=[443]` really can make HTTPS requests. Private key folders such as `/etc/ssl/private` are never included.
+- **`net` holds hosts or ports, never both.** A port reaches every host on it, so mixing them would make the hosts meaningless; hlyn refuses and names both fixes. See [Hosts in `net`](#hosts-in-net).
+- **Allowing any network also allows what the network needs.** DNS configuration and TLS certificate stores become readable automatically, so `net=["api.openai.com"]` really can make HTTPS requests. Private key folders such as `/etc/ssl/private` are never included.
+
+### Hosts in `net`
+
+Name hosts, and the agent reaches those hosts and no others: no other host on the same port, no UDP, no DNS of its own.
+
+| Entry | Means |
+|---|---|
+| `api.openai.com` | That host, port 443 |
+| `api.openai.com:8443` | That host, that port. Repeat the entry for more ports. |
+| `*.example.com` | Any subdomain at any depth, port 443. **Not** `example.com` itself: list it separately. |
+| `localhost:5432` | A service on this machine (127.0.0.1 and ::1) |
+| `10.0.0.5:5432`, `[2001:db8::10]:8443` | That address and port |
+| `10.20.0.0/16:8080` | An address range and port |
+
+Anything hlyn couldn't enforce exactly is refused, with the fix:
+
+```
+$ hlyn run --net https://api.openai.com/v1 -- python agent.py
+hlyn: net: 'https://api.openai.com/v1' is a URL. Give the host name: --net api.openai.com
+```
+
+The same goes for `*` alone or `*.com`, a name that isn't ASCII (write its `xn--` form), IPv4 in octal or hex, and port ranges.
+
+**How it works.** hlyn starts a small proxy for the run and points the agent at it with `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and friends (plus the settings npm, Node and the JVM read). The proxy checks each host and makes the connection itself. Nothing else can leave: on Linux a gate process answers every `connect()` by handing over a connection to the proxy, or refusing; on macOS the sandbox allows only the proxy's port.
+
+Worth knowing:
+
+- **Names are looked up by the proxy, on every connection**, and the connection uses the address that was checked. A name that resolves to a private, loopback or cloud-metadata address is refused (DNS rebinding). Reach private services by address (`--net 10.0.0.5:5432`) or as `localhost:PORT`.
+- **A program that ignores `HTTPS_PROXY`** can't look names up. The report says so, and names the client setting that fixes it (aiohttp: `trust_env=True`; urllib3: `ProxyManager`). Address and `localhost` entries are also reachable directly (on macOS, only `localhost` entries).
+- **The TLS name must match the host.** A connection that asks the proxy for one host and then names another in TLS is closed.
+- **Local sockets need `--write` on their folder.** The resolver, D-Bus and container-runtime sockets (`docker.sock` and the like) are refused whatever you grant, though on Linux a deliberately racing agent can get past that check ([residual 3](#what-naming-hosts-does-not-stop)).
+- **Naming hosts narrows an open network.** `--preset web --net api.openai.com` means that host only, and hlyn says so.
+- **Behind a corporate proxy** (`HTTPS_PROXY` set when hlyn starts), hlyn's proxy forwards through it. The private-address check is then skipped, because the corporate proxy resolves the names.
+- **`hlyn.on()` with hosts** sets the proxy variables in `os.environ`. A client created before the call (`httpx.Client`, an aiohttp session) misses them: create it after.
+
+When a host is blocked, the agent gets `403 hlyn: evil.com:443 is not in --net (allow with --net evil.com)` from the proxy; a direct connection to an address not listed gets `Permission denied`.
 
 ### Secrets in granted folders
 
@@ -226,7 +266,7 @@ Keep the policy next to your agent and review it like code. TOML, JSON and YAML 
 read  = ["src", "prompts"]   # relative paths resolve next to this file
 write = ["out"]
 exec  = false
-net   = [443]
+net   = ["api.openai.com", "localhost:5432"]
 env   = ["OPENAI_API_KEY"]
 ```
 
@@ -239,7 +279,7 @@ hlyn.on("policy.toml")
 ```
 
 - **An unknown field is an error.** `reed = [...]` is refused, never ignored.
-- **Flags add to a file; they never replace it.** `hlyn run -f policy.toml --net 5432` keeps the file's 443 and adds 5432.
+- **Flags add to a file; they never replace it.** `hlyn run -f policy.toml --net pypi.org` keeps the file's hosts and adds pypi.org. The one exception is an open network: naming a host or port narrows it, and hlyn says so.
 
 ---
 
@@ -250,7 +290,7 @@ hlyn.on("policy.toml")
 | `strict` | Nothing beyond the Python runtime, and no scratch folder | Pure computation on inputs you pass in |
 | `data` | Read and write the current folder | Data processing, notebooks |
 | `coder` | Read and write the current folder, run any program | Coding agents |
-| `web` | Any network | Agents that only browse or call APIs |
+| `web` | Any network | Agents that only browse. To call one API, name it instead: `--net api.openai.com` (with a preset, it narrows the preset's open network to that host) |
 | `debug` | Everything | Finding out what your agent touches. **This is not protection.** |
 
 ```bash
@@ -291,9 +331,24 @@ hlyn: removed 12 environment variables (including OPENAI_API_KEY, GITHUB_TOKEN).
 | Creating, deleting or renaming a file | `--write FOLDER` (the folder that holds it) |
 | Running a program, even from a child process | `--exec /full/path/to/program` |
 | Connecting to a TCP port | `--net PORT` |
+| Reaching a host that isn't listed | `--net HOST` |
+| Connecting directly to an address, ignoring the proxy | `--net ADDRESS` (the report also names the client setting that makes it use the proxy) |
+| Looking up a name itself, ignoring the proxy | None: a client setting (the report names it) |
+| A local socket (with hosts; on Linux 7.1+ whenever the network isn't open) | `--write FOLDER` (the folder that holds it) |
 | Any network while the network is off | `--net-any`, or `--net PORT` for just the port it needs |
 | Listening on a port | `--net-any` |
 | A credential (`~/.ssh`, `~/.aws`, `.env`, `*.pem`, …) | **None.** It is named, never suggested. |
+
+With hosts, a run that tried somewhere else looks like this:
+
+```
+$ hlyn run --read agent.py --net pypi.org -- python agent.py
+https://pypi.org/simple/ -> 200
+https://api.github.com/ -> <urlopen error Tunnel connection failed: 403 hlyn: api.github.com:443 is not in --net (allow with --net api.github.com)>
+hlyn: the command finished, but hlyn blocked 1 thing it may have worked around:
+  net    api.github.com:443  allow with --net api.github.com
+  Only allow hosts you recognise: an injected agent chooses where it tries to go.
+```
 
 Some details:
 
@@ -311,6 +366,7 @@ How it hears the refusals, and what it can miss:
 | Source | A tiny library preloaded into the command and its children | The sandbox's own reports, from the system log |
 | Cost | Nothing measurable on calls that succeed | About 50 ms per run |
 | Misses | Statically linked programs (most Go binaries; hlyn says so), and programs started through `system()` / `popen()` | A few percent of reports under heavy system load |
+| With hosts | The proxy and the gate report network refusals from outside the sandbox, whatever the program, static binaries included. Past 1,000 different ones, the rest are counted, not listed | The proxy's refusals, as on Linux; direct connections come from the system log as above |
 
 ---
 
@@ -335,12 +391,15 @@ write = [
 ]
 exec = false
 net = [
-  443,
+  "api.openai.com:443",
+  "pypi.org:443",
 ]
 env = false
 tmp = true
 log = true
 ```
+
+`net` lists the hosts the program looked up and connected to. Through a proxy, requests and httpx show only the proxy, so watch with `HTTPS_PROXY` and friends unset.
 
 **2. Read it and cut it down.** Anything your agent doesn't strictly need should go.
 
@@ -364,7 +423,7 @@ hlyn show --intent --read ./src --net 443 > policy.toml
 |---|---|
 | `hlyn run [flags] -- CMD` | Runs `CMD` confined, passes on its exit code, and lists what was blocked |
 | `hlyn watch -- CMD` | Runs a Python program **unconfined** and prints the policy it would need |
-| `hlyn show [flags]` | Prints the full list of paths and ports a set of flags would grant |
+| `hlyn show [flags]` | Prints the full list of paths, hosts and ports a set of flags would grant |
 | `hlyn show --intent [flags]` | Prints the flags as a policy file you can check in |
 | `hlyn presets` | Lists the presets and what each grants |
 | `hlyn probe` | Says what this machine can enforce; exits non-zero if it can't |
@@ -380,7 +439,8 @@ Flags for `run` and `show`:
 | `--write PATH` | Write a path (repeatable) |
 | `--exec PATH` | Run a program (repeatable) |
 | `--exec-any` | Run any program |
-| `--net PORT` | Connect to a TCP port (repeatable) |
+| `--net HOST` | Reach a host: `api.openai.com`, `*.example.com`, `localhost:5432`, `10.0.0.5:5432` (repeatable) |
+| `--net PORT` | Connect to a TCP port on any host (repeatable; not together with hosts) |
 | `--net-any` | Use any network |
 | `--env NAME` | Keep an environment variable (repeatable) |
 | `--env-any` | Keep the whole environment, secrets included |
@@ -404,12 +464,13 @@ Every command that prints data prints plain text by default, and JSON with `--js
 |---|---|
 | `hlyn.on(policy=None, **fields)` | Confines **this process**, permanently. Returns what was applied. |
 | `hlyn.run(fn, policy=None, **fields)` | Runs `fn()` in a confined child process and returns its result (or re-raises its exception). The caller stays unconfined. |
-| `hlyn.spawn(cmd, policy=None, **fields)` | Confines this process, then replaces it with `cmd`. Does not return. |
+| `hlyn.spawn(cmd, policy=None, **fields)` | Confines this process, then replaces it with `cmd`. Does not return. With hosts, this process stays as `cmd`'s gate instead: same PID, signals passed on, `cmd`'s exit status. |
 | `hlyn.probe()` | Reports what this machine can enforce, as a dict. Changes nothing. |
 | `hlyn.exposed(policy)` | Lists secret files the policy lets the agent read while the network is open. |
 | `hlyn.sealed()` | `True` once this process is confined. |
 | `hlyn.load(path)` | Reads a policy file into a `Policy`. |
 | `hlyn.Policy(...)` | An immutable policy object with the seven fields above. |
+| `hlyn.helper()` | In a frozen app (PyInstaller and the like), call it first, like `multiprocessing.freeze_support()`: it lets hlyn start its helpers when `net` names hosts. |
 | `hlyn.preset(name)` / `hlyn.presets` / `hlyn.register(name, make)` | Look up, list and add presets. |
 
 Anywhere a policy is expected, you can pass any of these:
@@ -419,15 +480,15 @@ hlyn.on()                                      # nothing: the strictest default
 hlyn.on("coder")                               # a preset name
 hlyn.on("policy.toml")                         # a policy file
 hlyn.on(hlyn.Policy(read=["./src"]))           # a Policy object
-hlyn.on(read=["./src"], net=[443])             # keyword arguments
-hlyn.on("coder", net=[443])                    # a preset, plus changes
+hlyn.on(read=["./src"], net=["api.openai.com"])  # keyword arguments
+hlyn.on("coder", net=["api.openai.com"])         # a preset, plus changes
 ```
 
 `hlyn.Policy` is frozen. Use `.with_(...)` to derive a new one:
 
 ```python
 base = hlyn.Policy(read=["./src"])
-wider = base.with_(net=[443])
+wider = base.with_(net=["api.openai.com"])
 ```
 
 ### Errors
@@ -437,7 +498,7 @@ Every error inherits from `hlyn.Error`, so one `except` catches them all. `hlyn.
 | Error | Raised when | The process is |
 |---|---|---|
 | `hlyn.Invalid` | The policy is malformed: a typo, a missing path, a malformed host in `net`, ports and hosts mixed | Untouched |
-| `hlyn.Unsupported` | This machine can't enforce the policy (old kernel, unsupported OS), or `net` names hosts, which aren't enforced yet | Untouched |
+| `hlyn.Unsupported` | This machine can't enforce the policy (old kernel, unsupported OS), or can't enforce host names here (libseccomp older than 2.5.0, or already inside another sandbox that filters connections) | Untouched |
 | `hlyn.Failed` | The kernel refused to apply the boundary | **Not** confined, so don't continue |
 | `hlyn.Sealed` | You called `on()` twice. The boundary can't be changed once applied. | Already confined |
 
@@ -447,6 +508,8 @@ Messages say what to do next, naming the field or flag that would change the out
 
 - **`on()` is one-way.** There is no `off()` and no context manager that pretends to restore anything, because the kernel can't undo it.
 - **Call `on()` before starting threads.** On Linux, a thread that is already running would keep its old access, so hlyn refuses to seal a process with more than one thread. Put `on()` at the top of your program, or use `hlyn.run(fn)`, which forks a clean child.
+- **With hosts, `on()` starts two helpers** before it seals: the proxy, and on Linux the gate. They live as long as your process, and the seal record names them. With ports only, `on()` starts nothing.
+- **With hosts, `hlyn.run(fn)` shares one proxy** between every call with the same hosts, for the life of the caller. Each call still gets its own gate.
 
 ---
 
@@ -458,6 +521,9 @@ Messages say what to do next, naming the field or flag that would change the out
 | Files: read, write, create, delete | ✅ | ✅ |
 | Starting programs | ✅ | ✅ |
 | TCP ports | ✅ | ✅ |
+| Host names in `net` | ✅ Proxy, plus a gate that answers every `connect()` | ✅ Proxy, plus a profile that allows only its port |
+| Direct connections to address entries (`10.0.0.5:5432`) | ✅ | ❌ Only through the proxy. `localhost:PORT` entries work directly |
+| Local sockets only in write-granted folders | With hosts: checked by the gate (racy before 7.1; see [limits](#what-naming-hosts-does-not-stop)). From Linux 7.1, by the kernel whenever the network isn't open | ✅ |
 | All network off (TCP and UDP) | ✅ | ✅ |
 | Isolation between agents (signals, abstract sockets) | ✅ | ❌ No equivalent exists |
 | Dangerous syscalls blocked (`io_uring`, `ptrace`, `mount`, namespaces, kernel modules, `bpf`, …) | ✅ | n/a |
@@ -470,7 +536,7 @@ Messages say what to do next, naming the field or flag that would change the out
 
 ## Performance
 
-Nothing sits between the agent and the kernel, so there's nothing in the path to slow it down. Measured on Linux 6.12 (aarch64) inside Docker on an Apple Silicon laptop. That's one virtualised machine, so treat the numbers as indicative rather than a benchmark:
+With ports, nothing sits between the agent and the kernel, so there's nothing in the path to slow it down. Measured on Linux 6.12 (aarch64) inside Docker on an Apple Silicon laptop. That's one virtualised machine, so treat the numbers as indicative rather than a benchmark:
 
 **Once, at startup:**
 
@@ -488,7 +554,16 @@ Nothing sits between the agent and the kernel, so there's nothing in the path to
 | `connect` | Lost in its own variance (a few hundred ns at most) |
 | `read`, `write`, `stat` on files already open | Nothing measurable |
 
-Files and connections that are already open are never re-checked, so throughput is unaffected. A proxy-based sandbox, by contrast, adds a TCP handshake and often a TLS round-trip **per connection**.
+Files and connections that are already open are never re-checked, so throughput is unaffected.
+
+**With hosts**, connections go through the proxy, so each new one costs a loopback hop and the proxy's own connect. Measured on an x86_64 cloud VM (Linux 6.18):
+
+| Measure | Without hosts | With hosts |
+|---|---|---|
+| `hlyn run -- true` | 96 ms (102 ms with `--net 443`) | 304 ms: +208 ms, mostly starting the proxy |
+| `connect()` to the proxy (Linux), median / p99 | 18-21 µs / 68-77 µs, unconfined | 234-239 µs / 565-619 µs, through the gate |
+| One connection's throughput (512 MB over loopback) | 2,717 MB/s, unconfined | 502 MB/s |
+| `hlyn.run(fn)` per call, after the first | — | +1-6 ms (+60-66 ms if the caller has threads) |
 
 **Reporting under `hlyn run`:** nothing measurable on successful calls and under 0.1 µs per refused call on Linux; about 50 ms per run on macOS.
 
@@ -506,9 +581,15 @@ hlyn writes one JSON object per line, to stderr by default (or `--log FILE` / `l
 | Record | Written when |
 |---|---|
 | `seal` | The boundary was applied, with exactly what it grants |
-| `deny` | Under `hlyn run`: something was refused, written as it happens |
+| `deny` | Under `hlyn run`: something was refused, written as it happens. With hosts, network refusals are written from every entry point, by the proxy and the gate |
 
-Repeats are collapsed. The same refusal is written on its 1st, 2nd, 4th, 8th… occurrence with a running count, so a retry loop can't bury the lines that matter. `deny` records are written by `hlyn run`'s own unconfined process, never by the agent.
+With hosts, the seal record also names them, the proxy's address and the helpers' process IDs:
+
+```json
+{"t": 1790529261.533, "kind": "seal", "pid": 4703, "backend": "linux", "level": 7, "read": [], "write": [], "exec": ["/usr/bin/true"], "net": ["api.openai.com:443", "localhost:5432"], "env": false, "tmp": "/tmp/hlyn-cga5azni", "proxy": "127.0.0.1:38483", "helpers": [4702, 4700], "closed": 0}
+```
+
+Repeats are collapsed. The same refusal is written on its 1st, 2nd, 4th, 8th… occurrence with a running count, so a retry loop can't bury the lines that matter. `deny` records are written from outside the sandbox (by `hlyn run`'s own process, or by the proxy and the gate), never by the agent.
 
 ---
 
@@ -518,8 +599,9 @@ A sandbox that oversells itself is worse than one that doesn't, so here is exact
 
 | Limit | What it means | What to do |
 |---|---|---|
-| **No host names** | `net` filters ports, not domains, so an open port reaches any host. | Keep secrets unreadable (see [Secrets in granted folders](#secrets-in-granted-folders)). Host allowlists are planned. |
-| **Named ports are TCP only** | `net=[443]` leaves UDP open, so DNS and QUIC can still leave. | Use `net=False` when nothing may leave. |
+| **Data sent to a host you allowed** | A listed host can receive anything the agent can read. | Keep secrets unreadable (see [Secrets in granted folders](#secrets-in-granted-folders)). |
+| **Named ports are TCP only, and reach every host** | `net=[443]` leaves UDP open, so DNS and QUIC can still leave, and reaches any host on 443. | Name hosts instead, which closes both, or use `net=False` when nothing may leave. |
+| **Host names on Linux are new** | Tested on x86_64 without Yama so far. aarch64, and kernels with Yama, are designed for but not yet run. | `hlyn probe` says what this machine can do. |
 | **Seal before threads** | A thread started before `on()` would keep its access, so hlyn refuses to seal. | Call `on()` first, or use `hlyn.run(fn)`. |
 | **A granted socket grants its service** | The service behind a socket you allow (e.g. `docker.sock`) can hand the agent anything it can open. | Treat a socket grant like `exec` on that service. |
 | **Writable folders others execute** | Writing into a folder that cron, git hooks or CI later runs is running code outside the sandbox. | Don't grant write to folders something else executes from. |
@@ -527,6 +609,39 @@ A sandbox that oversells itself is worse than one that doesn't, so here is exact
 | **GPU workloads** | CUDA writes under `/proc`, which is closed by default because it exposes the environment. | Grant `write=["/proc"]` and remove secrets at the source. |
 | **macOS isolation between agents** | Seatbelt has no way to stop one agent signalling another. | Use Linux where cross-agent isolation matters. |
 | **Reports are not complete** | Linux can't see inside static binaries; macOS drops a few percent of reports. | Neither affects enforcement, only the explanation. |
+
+### What naming hosts stops, and what it doesn't
+
+This is the threat model from the [design](DESIGN-host-allowlisting.md), in the same words; section numbers refer to it. [SECURITY.md](SECURITY.md) has it too.
+
+**It stops**, for code running inside the sandbox, including code that deliberately races threads:
+
+- Opening a TCP connection to any host and port not on the list, whether through the proxy, directly, by IP address, or by exploiting a shared port. On Linux the kernel never runs such a connect.
+- Reaching private, loopback, link-local or cloud-metadata addresses through a public name, whether by DNS rebinding or by a name that resolves privately.
+- UDP of any kind (DNS, QUIC, anything tunnelled over it), raw IP, SCTP, packet sockets, and every socket family other than unix, TCP and route netlink.
+- DNS lookups, whether over UDP, over TCP, through the resolver daemons or D-Bus, or through DoH to hosts not on the list, whatever folders are granted. See residual 3 below.
+- Reaching a container runtime's socket (`docker.sock` and the like), whatever folders are granted. See residual 3 below.
+- Connections opened before the seal: the sealed child closes them, or `hlyn.on()` refuses.
+- Tricks with how names and addresses are written: case, trailing dots, Unicode confusables, octal, hex or decimal IPv4, IPv4-mapped IPv6, zone IDs, NUL bytes, CRLF.
+- A mismatch between the CONNECT target and the TLS SNI.
+- Using another sandbox's proxy, killing or tracing hlyn's own helpers, or answering its own connection checks.
+- On macOS, system services that resolve names or fetch URLs on the agent's behalf (`com.apple.dnssd.service`, `trustd`): refused (5.4).
+
+#### What naming hosts does not stop
+
+1. **Sending data to an allowed host.** A gist on `github.com`, an object in a bucket under `*.s3.amazonaws.com`, or a prompt sent to `api.openai.com` all look like normal traffic. This is the third leg of the lethal trifecta (private data, untrusted content, a way out). Host allowlisting narrows that way out; it can't close it for a host the agent needs. The mitigation is still hlyn's first rule: don't let the agent read what it shouldn't send. The secret warning stays on. This point is inferred from how network filtering works; the research found no direct citation for it.
+2. **Domain fronting, shared TLS endpoints, HTTP/2 connection coalescing, and ECH on connections that are already open.** Without looking inside TLS, the proxy sees the SNI but not the HTTP `Host`. A 2024 study found fronting still works on 22 of 30 CDNs, Akamai and Fastly among them. Claude Code's own documentation carries the same warning.
+3. **Unix sockets, on Linux.** A deliberately multi-threaded agent can race a unix-socket `connect()` or `sendto()` past the gate's check, and `sendmsg` to a unix datagram path isn't checked at all (5.3); in a test, 611 of 3,000 raced connects reached a refused socket. On Linux 7.1 and newer the kernel itself refuses every socket outside the write-granted folders (built, not yet run on a 7.1 kernel), so the race reaches only a refused socket inside one (`--write /run` holds the resolver and D-Bus sockets). Before 7.1 it can reach the host's DNS resolver, D-Bus and container-runtime sockets, and `net=False` has the same gaps with no check at all. TCP is unaffected.
+4. **Other programs on the same Mac.** On macOS, `localhost:P` also matches the machine's own network addresses. A process outside the sandbox that listens on P at the Mac's LAN address could receive agent traffic.
+5. **Behind a corporate proxy.** The address checks are skipped when chaining to a corporate proxy (5.5).
+6. **Kernel bugs, side channels, and denial of service against the machine.** These are the same as for the rest of hlyn. For tenants who may be hostile to each other, use a microVM outer boundary; nono and Sandlock both say the same.
+7. **Services you allow on this machine.** An address or `localhost:PORT` entry makes that service part of the boundary. A local HTTP or SOCKS proxy, Tor (9050), Docker's API (2375, 2376), the Kubernetes API (6443) or a kubelet (10250) each give full onward reach. hlyn warns when an entry names one of those ports:
+   ```
+   hlyn: localhost:2375 is Docker's API port. An agent that reaches it controls this
+     machine. Remove --net localhost:2375 unless you mean it.
+   ```
+8. **Other processes on the machine.** Processes outside the sandbox can connect to the proxy's port like any local port, and can write a PROXY header themselves. They reach only the allowlist, which they could reach anyway. Blocks they cause show up in this run's report.
+9. **Mach services on the macOS allowlist.** Each one is measured before it goes on the list (5.4), but a service that acts for its caller in a way no test covers would be a route out. The list starts empty and stays short.
 
 ---
 
@@ -539,7 +654,7 @@ Docker packages and deploys software; it wasn't built to contain a compromised p
 No. The boundary lives in the kernel, not in Python. Once applied, it lasts for the life of the process and is inherited by everything it starts. hlyn has no off switch either.
 
 **Does it slow the agent down?**
-Not measurably. See [Performance](#performance).
+Not measurably with ports. Naming hosts adds about 0.2 ms to each new connection and 0.2 s to starting `hlyn run`. See [Performance](#performance).
 
 **Does it work with LangChain / CrewAI / AutoGen / my own framework?**
 Yes. hlyn confines a process, not a framework. Call `hlyn.on()` at startup, wrap the command with `hlyn run`, or put a single risky tool call inside `hlyn.run(fn)`.
