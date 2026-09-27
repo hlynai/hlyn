@@ -32,6 +32,7 @@ ALLOW = 0x7FFF0000  # SCMP_ACT_ALLOW
 ERROR = 0x00050000  # SCMP_ACT_ERRNO(x), errno in the low 16 bits
 EPERM = 1
 ENOSYS = 38
+EPROTONOSUPPORT = 93
 
 NNP = 3  # SCMP_FLTATR_CTL_NNP
 TSYNC = 4  # SCMP_FLTATR_CTL_TSYNC
@@ -61,6 +62,18 @@ BLUETOOTH = 31
 # runs. Writing through it still needs CAP_NET_ADMIN, which nothing here has.
 NETLINK = 16
 ROUTE = 0
+
+# Two ways to open a TCP connection that Landlock's port rules do not see.
+# Landlock checks connect(). TCP Fast Open connects from a send call instead,
+# and Landlock only covers it from Linux 7.2 and 6.18.54 (commit 33cb713db016,
+# "landlock: Fix TCP Fast Open connection bypass"); no 6.12 release has the
+# fix. Measured on 6.12: with only port 443 allowed, a Fast Open send reached
+# port 47002 and delivered its data. The same fix says MPTCP shares the flaw.
+FASTOPEN = 0x20000000  # MSG_FASTOPEN
+MPTCP = 262  # IPPROTO_MPTCP
+# Where each send call keeps its flags: sendto(fd, buf, len, flags, ...),
+# sendmsg(fd, msg, flags), sendmmsg(fd, vec, vlen, flags).
+SENDS = {"sendto": 3, "sendmsg": 2, "sendmmsg": 3}
 
 # execveat(2) flag. With it, the pathname may be empty and the program is taken
 # from the descriptor alone -- so a program written into anonymous memory can be
@@ -356,6 +369,18 @@ def load(policy: Policy) -> None:
                 _rule(ctx, ERROR | EPERM, "socket", [Arg(0, EQ, domain, 0)])
             for name in WIRE:
                 _rule(ctx, ERROR | EPERM, name)
+        elif isinstance(policy.net, tuple):
+            # Named ports: close the two routes around Landlock (see FASTOPEN).
+            # Fast Open is refused outright. It is an optimisation every client
+            # can do without, and its flag is a plain register, so the refusal
+            # cannot be raced. An MPTCP socket gets the answer a kernel without
+            # MPTCP gives, so clients fall back to plain TCP, which Landlock
+            # checks.
+            for name, arg in SENDS.items():
+                _rule(ctx, ERROR | EPERM, name, [Arg(arg, MASKED, FASTOPEN, FASTOPEN)])
+            for domain in (INET, INET6):
+                _rule(ctx, ERROR | EPROTONOSUPPORT, "socket",
+                      [Arg(0, EQ, domain, 0), Arg(2, EQ, MPTCP, 0)])
 
         if policy.exec is False:
             for name in BIRTH:

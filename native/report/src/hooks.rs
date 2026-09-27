@@ -15,7 +15,8 @@ use core::ffi::{c_char, c_int, c_long, c_void};
 use core::mem::transmute;
 
 use libc::{
-    mode_t, off64_t, off_t, pid_t, posix_spawn_file_actions_t, posix_spawnattr_t, sockaddr, socklen_t,
+    mode_t, msghdr, off64_t, off_t, pid_t, posix_spawn_file_actions_t, posix_spawnattr_t, size_t, sockaddr,
+    socklen_t, ssize_t,
     AT_FDCWD, DIR, EACCES, ENOSYS, EPERM, FILE,
 };
 
@@ -750,6 +751,35 @@ pub unsafe extern "C" fn connect(fd: c_int, addr: *const sockaddr, len: socklen_
     let rc = real(fd, addr, len);
     if rc < 0 {
         refused(NET, b"connect", Target::Addr(addr, len));
+    }
+    rc
+}
+
+// Only a send that opens a connection (TCP Fast Open) can be a policy refusal.
+// Every other send is left alone, errors included: its errno is the network's.
+#[no_mangle]
+pub unsafe extern "C" fn sendto(
+    fd: c_int,
+    buf: *const c_void,
+    len: size_t,
+    flags: c_int,
+    addr: *const sockaddr,
+    alen: socklen_t,
+) -> ssize_t {
+    let real = next!(SENDTO, fn(c_int, *const c_void, size_t, c_int, *const sockaddr, socklen_t) -> ssize_t, -1);
+    let rc = real(fd, buf, len, flags, addr, alen);
+    if rc < 0 && flags & libc::MSG_FASTOPEN != 0 {
+        refused(NET, b"sendto", Target::Addr(addr, alen));
+    }
+    rc
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sendmsg(fd: c_int, msg: *const msghdr, flags: c_int) -> ssize_t {
+    let real = next!(SENDMSG, fn(c_int, *const msghdr, c_int) -> ssize_t, -1);
+    let rc = real(fd, msg, flags);
+    if rc < 0 && flags & libc::MSG_FASTOPEN != 0 && !msg.is_null() {
+        refused(NET, b"sendmsg", Target::Addr((*msg).msg_name as *const sockaddr, (*msg).msg_namelen));
     }
     rc
 }

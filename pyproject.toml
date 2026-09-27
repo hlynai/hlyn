@@ -72,6 +72,9 @@ path = "hatch_build.py"
 # more readable than the same flag wrapped across three.
 line-length = 110
 target-version = "py310"
+# One-off kernel and Seatbelt experiments (see its README), written to be read
+# next to their FINDINGS.md entries rather than maintained as product code.
+extend-exclude = ["tools/hostlab"]
 
 [tool.ruff.lint]
 select = [

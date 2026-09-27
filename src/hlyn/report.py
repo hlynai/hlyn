@@ -417,6 +417,15 @@ class Report:
         net = self.plan.net
         anywhere = rest in ("", "*", "0.0.0.0", "::")  # noqa: S104 - read from a report, not bound
         shown = f"TCP {port}" + ("" if anywhere else f" ({safe(rest)})")
+        if denial.op in ("sendto", "sendmsg"):
+            # TCP Fast Open, which hlyn refuses whenever ports are named: Linux
+            # before 7.2 lets it past Landlock's port rules, allowed port or not.
+            if net is True:
+                return None
+            return Entry("net", f"TCP Fast Open to port {port}" + ("" if anywhere else f" ({safe(rest)})"),
+                         "--net-any",
+                         "Fast Open gets past port rules, so only the whole network allows it; "
+                         "without it the program can connect normally", source=denial.source)
         if denial.kind == "bind":
             if net is True:
                 return None

@@ -183,6 +183,21 @@ def test_a_refused_port_is_listed_with_its_flag(tmp_path):
 
 
 @here
+@pytest.mark.skipif(sys.platform != "linux", reason="TCP Fast Open is refused by the Linux backend")
+def test_a_refused_fast_open_send_is_listed(tmp_path):
+    done = run(tmp_path, f"""
+        import socket
+        for _ in range({TRIES}):
+            try: socket.socket().sendto(b"x", socket.MSG_FASTOPEN, ("127.0.0.1", 5432))
+            except OSError: pass
+    """, "--net", "443")
+    item = next((i for i in report(done)["blocked"] if i["target"].startswith("TCP Fast Open")), None)
+    assert item is not None, done.stderr
+    assert item["allow"] == "--net-any"
+    assert item["target"] == "TCP Fast Open to port 5432 (127.0.0.1)"
+
+
+@here
 def test_a_credential_is_named_and_never_suggested(tmp_path):
     home = tmp_path / "home"
     key = home / ".ssh" / "id_ed25519"

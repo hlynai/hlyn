@@ -377,3 +377,87 @@ def test_a_child_cannot_shed_the_boundary():
     )
     assert "ESCAPED" not in done.stdout, done.stdout + done.stderr
     assert done.stdout.count("refused") == 2, done.stdout + done.stderr
+
+
+# ---------------------------------------------------------------------------
+# TCP Fast Open got past named ports
+# ---------------------------------------------------------------------------
+#
+# Landlock's port rules check connect(). A send with MSG_FASTOPEN opens the
+# connection itself, and Landlock only sees that from Linux 7.2 and 6.18.54
+# (commit 33cb713db016). With `--net 443`, a Fast Open send reached a port the
+# policy never named and delivered its data, while the report said the port
+# was blocked. The test that only ever called connect() could not see it.
+
+FAST_OPEN = """
+    import os, socket, sys, hlyn
+    r, w = os.pipe()
+    if os.fork() == 0:
+        # The listener, outside the sandbox: it reports whether anything arrived.
+        lst = socket.socket(); lst.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        lst.setsockopt(socket.IPPROTO_TCP, socket.TCP_FASTOPEN, 16)
+        lst.bind(("127.0.0.1", 0)); lst.listen(4)
+        os.write(w, str(lst.getsockname()[1]).encode()); os.close(w)
+        lst.settimeout(3)
+        try:
+            conn, _ = lst.accept(); conn.settimeout(1)
+            print("LISTENER GOT", conn.recv(64), flush=True)
+        except OSError:
+            print("listener got nothing", flush=True)
+        os._exit(0)
+    os.close(w); port = int(os.read(r, 16)); os.close(r)
+    hlyn.on(read=["/tmp"], net=[443], log=False)
+    dst = ("127.0.0.1", port)
+    try:
+        SEND
+        print("SENT", flush=True)
+    except PermissionError:
+        print("refused", flush=True)
+    except OSError as exc:
+        print("INCONCLUSIVE", type(exc).__name__, exc, flush=True)
+    os.wait()
+"""
+
+
+@pytest.mark.parametrize("send", [
+    'socket.socket().sendto(b"leak", socket.MSG_FASTOPEN, dst)',
+    'socket.socket().sendmsg([b"leak"], [], socket.MSG_FASTOPEN, dst)',
+])
+def test_tcp_fast_open_cannot_reach_a_port_the_policy_does_not_name(send):
+    done = boot(FAST_OPEN.replace("SEND", send))
+    assert "refused" in done.stdout, done.stdout + done.stderr
+    assert "listener got nothing" in done.stdout, done.stdout + done.stderr
+    assert "LISTENER GOT" not in done.stdout
+
+
+def test_ordinary_sends_still_work_with_named_ports():
+    """The refusal is on the Fast Open flag, not on sending: UDP and TCP sends are untouched."""
+    done = boot(
+        """
+        import socket, hlyn
+        hlyn.on(read=["/tmp"], net=[443], log=False)
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print("udp", u.sendto(b"x", ("127.0.0.1", 9)), flush=True)
+        a, b = socket.socketpair()
+        print("stream", a.send(b"x"), b.recv(1), flush=True)
+        """
+    )
+    assert "udp 1" in done.stdout, done.stdout + done.stderr
+    assert "stream 1 b'x'" in done.stdout, done.stdout + done.stderr
+
+
+def test_mptcp_falls_back_to_tcp_with_named_ports():
+    """MPTCP shares the Fast Open flaw. It is answered as a kernel without MPTCP would,
+    so clients fall back to plain TCP, which Landlock checks."""
+    done = boot(
+        """
+        import errno, socket, hlyn
+        hlyn.on(read=["/tmp"], net=[443], log=False)
+        try:
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM, 262)
+            print("CREATED")
+        except OSError as exc:
+            print("refused", errno.errorcode.get(exc.errno))
+        """
+    )
+    assert "refused EPROTONOSUPPORT" in done.stdout, done.stdout + done.stderr

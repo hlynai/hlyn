@@ -102,6 +102,14 @@ def test_a_port_the_policy_allows_is_not_hlyns_refusal(tmp_path):
     assert one(book(tmp_path, net=[5432]), kind="net", target="5432 127.0.0.1", op="connect") is None
 
 
+def test_a_fast_open_send_suggests_the_whole_network(tmp_path):
+    # Refused even on a named port: Fast Open gets past Landlock's port rules,
+    # so naming the port would not allow it and must not be suggested.
+    entry = one(book(tmp_path, net=[443]), kind="net", target="443 127.0.0.1", op="sendto")
+    assert entry.allow == "--net-any"
+    assert entry.target == "TCP Fast Open to port 443 (127.0.0.1)"
+
+
 def test_on_macos_an_allowed_port_refused_means_udp(tmp_path):
     entry = one(book(tmp_path, net=[53]), kind="net", target="53", op="network-outbound", source="kernel")
     assert entry.allow == "--net-any"

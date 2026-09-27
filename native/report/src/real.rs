@@ -83,6 +83,8 @@ reals! {
     CONNECT = "connect";
     BIND = "bind";
     SOCKET = "socket";
+    SENDTO = "sendto";
+    SENDMSG = "sendmsg";
 }
 
 /// Resolves every real function up front. Called once, at load.
