@@ -522,6 +522,7 @@ print(fetch("https://HOST/"), "|", fetch("https://www.iana.org/"))
     results["hlyn run (curl)"] = cli.stdout
     for name, text in results.items():
         print(f"{name}: {text}")
+    print(f"hlyn run's stderr:\n{cli.stderr}")
     for name in ("on", "run", "spawn"):
         assert results[name].startswith("200 | <urlopen error Tunnel connection failed: 403 hlyn: "
                                         "www.iana.org:443"), name

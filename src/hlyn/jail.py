@@ -509,6 +509,7 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
                 gate.prepare()
     try:
         read, write = os.pipe()
+        _flush()
         kid = os.fork()
         if kid == 0:  # child
             os.close(read)
@@ -554,6 +555,17 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     raise value
 
 
+def _flush() -> None:
+    """Write out what Python holds for stdout and stderr, as `multiprocessing`
+    does around a fork. Before a fork, so the child can't write the parent's
+    pending output a second time; before `os._exit` or an exec, which skip the
+    interpreter's own flush, so nothing printed into a pipe is lost."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None:
+            with contextlib.suppress(Exception):  # closed, or replaced by something odd
+                stream.flush()
+
+
 def _child(fn: Callable[[], Any], seal: Callable[[], object], write: int) -> NoReturn:
     """In the confined child: seal, run `fn`, send back its result or its
     exception, and exit."""
@@ -573,6 +585,7 @@ def _child(fn: Callable[[], Any], seal: Callable[[], object], write: int) -> NoR
         with os.fdopen(write, "wb") as fh:
             fh.write(body)
     finally:
+        _flush()
         os._exit(code)
 
 
@@ -609,8 +622,10 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
     def body() -> None:
         closed = _neutral(plan)
         _seal(plan, _proxied(port), found=found, proxy=(port, way.pid), closed=closed)
+        _flush()
         os.execv(run, argv)  # noqa: S606 - see _spawn
 
+    _flush()
     gate.become(body, forward=True, isolate=True, close=[way.life], log=told)
 
 
@@ -657,6 +672,7 @@ def _spawn(
     run, argv, plan = _prepare(cmd, plan)
     closed = _neutral(plan)
     _seal(plan, extra, tag, found, proxy=proxy, closed=closed)
+    _flush()
     # No shell, deliberately: the command is executed as given, so nothing in
     # it is ever interpreted as shell syntax.
     os.execv(run, argv)  # noqa: S606

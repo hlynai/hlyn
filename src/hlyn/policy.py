@@ -293,7 +293,7 @@ def _lib() -> tuple[str, ...]:
 
 def _dev() -> tuple[str, ...]:
     """Character devices the runtime reads."""
-    out = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random", "/dev/full")
+    out: tuple[str, ...] = ("/dev/null", "/dev/zero", "/dev/urandom", "/dev/random", "/dev/full")
     if sys.platform == "darwin":
         # Opened by macOS path lookup to avoid triggering automounts. Reading
         # it yields nothing; being refused it makes every launch log a denial.

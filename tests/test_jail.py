@@ -270,6 +270,41 @@ def test_run_reports_a_denial_instead_of_hanging():
 
 
 @here
+@pytest.mark.parametrize("net", ["False", "[443]", "['api.example.com']"])
+def test_what_fn_prints_reaches_a_pipe(net):
+    """stdout into a pipe (CI, `| tee`) is block-buffered, so the child must
+    flush it before it exits: `os._exit` skips the interpreter's own flush.
+    Also a result, an exception, and a print after both, in order."""
+    done = boot(
+        f"""
+        import sys, hlyn
+        def speak():
+            print("stdout from fn")
+            print("stderr from fn", file=sys.stderr)
+            sys.stdout.write("no newline at the end")
+            return 7
+        def fail():
+            print("printed before raising")
+            raise ValueError("boom")
+        print("parent before")  # pending in the parent's buffer at the fork: must appear once
+        print("result:", hlyn.run(speak, net={net}, log=False))
+        try:
+            hlyn.run(fail, net={net}, log=False)
+        except ValueError as exc:
+            print("raised:", exc)
+        print("parent done")
+        """
+    )
+    print(f"stdout:\n{done.stdout}\nstderr:\n{done.stderr}")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == [
+        "parent before", "stdout from fn", "no newline at the endresult: 7", "printed before raising",
+        "raised: boom", "parent done",
+    ]
+    assert "stderr from fn" in done.stderr
+
+
+@here
 def test_run_propagates_an_ordinary_exception():
     done = boot(
         """
@@ -303,6 +338,23 @@ def test_spawn_runs_the_command_confined():
     )
     assert "CHILD ALIVE" in done.stdout, f"spawn did not run the command: {done.stderr}"
     assert "CHILD CONFINED" in done.stdout, f"the spawned child was not confined: {done.stdout}"
+
+
+@here
+@pytest.mark.parametrize("net", ["False", "['api.example.com']"])
+def test_what_was_printed_before_spawn_reaches_a_pipe(net):
+    """An exec discards what Python still holds for stdout, so spawn writes
+    it out first: the line printed before the call, then the command's."""
+    done = boot(
+        f"""
+        import hlyn, sys
+        print("printed before spawn")
+        hlyn.spawn([sys.executable, "-c", "print('printed by the command')"], net={net}, log=False)
+        """
+    )
+    print(f"stdout:\n{done.stdout}\nstderr:\n{done.stderr}")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == ["printed before spawn", "printed by the command"]
 
 
 @here

@@ -257,6 +257,48 @@ def test_row_26_a_listed_address_waits_for_the_proxys_verdict(proxy):
     assert any(seen[:2] == ("10.20.3.4", 8080) for seen in proxy.seen)
 
 
+@pytest.mark.skipif(os.uname().machine not in ("aarch64", "arm64"), reason="pointer tags are arm64's")
+def test_a_tagged_sockaddr_pointer_is_read_where_the_kernel_reads_it(proxy):
+    """On arm64 a program may carry a tag in a pointer's top byte (MTE and
+    HWASan builds do, once they opt in with PR_SET_TAGGED_ADDR_CTRL), and
+    the kernel ignores it. The gate reads the agent's sockaddr from
+    /proc/PID/mem, so it clears the tag too (`notify.UNTAG`). The kernel
+    already ignores a tag in that offset (remote page lookups untag, since
+    Linux 6.4), except one with the top bit set -- HWASan's tags use the
+    whole byte -- which makes the offset negative, so pread refuses it and
+    the connect would fail. 0x0b is an MTE-style tag; 0xa5 has the top bit."""
+    out, events = gated(f"""
+        libc = ctypes.CDLL(None, use_errno=True)
+        # PR_SET_TAGGED_ADDR_CTRL (55), PR_TAGGED_ADDR_ENABLE (1)
+        attempt("tagged pointers enabled", lambda: str(libc.prctl(55, 1, 0, 0, 0)))
+        def dial(port, tag, send=b""):
+            s = socket.socket()
+            addr = (ctypes.c_ubyte * 16)()
+            addr[0:8] = (2).to_bytes(2, "little") + port.to_bytes(2, "big") + bytes([127, 0, 0, 1])
+            where = ctypes.addressof(addr) | (tag << 56)
+            if libc.connect(s.fileno(), ctypes.c_void_p(where), 16) != 0:
+                raise OSError(ctypes.get_errno(), "connect")
+            if send:
+                s.sendall(send)
+            s.close()
+        for tag in (0, 0x0B, 0xA5):
+            attempt(f"tag {{tag:#x}}: the proxy", lambda: dial({proxy.port}, tag, b"to proxy %d" % tag))
+            attempt(f"tag {{tag:#x}}: listed localhost:5432", lambda: dial(5432, tag, b"to db %d" % tag))
+            attempt(f"tag {{tag:#x}}: unlisted localhost:5999", lambda: dial(5999, tag))
+    """, net=["example.com", "localhost:5432"], proxy=proxy)
+    got = lines(out)
+    if got["tagged pointers enabled"] != "0":
+        pytest.skip("this kernel doesn't offer the tagged-address ABI")
+    for tag in ("0x0", "0xb", "0xa5"):
+        assert got[f"tag {tag}: the proxy"] == "OK"
+        assert got[f"tag {tag}: listed localhost:5432"] == "OK"
+        assert got[f"tag {tag}: unlisted localhost:5999"] == "EACCES"
+    for sent in (11, 165):
+        assert ("127.0.0.1", proxy.port, b"to proxy %d" % sent) in proxy.seen
+        assert ("127.0.0.1", 5432, b"to db %d" % sent) in proxy.seen
+    assert any(event.get("target") == "127.0.0.1:5999" for event in events)
+
+
 def test_row_22_unix_sockets_need_a_write_grant_and_the_refused_list_always_wins(proxy):
     box = tempfile.mkdtemp(prefix="hlyn-guard-")
     other = tempfile.mkdtemp(prefix="hlyn-guard-other-")
@@ -316,6 +358,98 @@ def test_row_23_a_unix_datagram_to_a_path_is_checked_like_a_connect(proxy):
     got = lines(out)
     assert got["sendto granted"] == "5"
     assert got["sendto /dev/log"] == "EACCES"
+
+
+@pytest.mark.parametrize("untag", ["native", "x86_64"])
+def test_the_gate_answers_any_arguments_and_keeps_serving(proxy, monkeypatch, untag):
+    """Every register of a trapped call is the agent's to choose. Whatever it
+    puts there -- a pointer past the top of memory, a length of 2^64-1, a
+    descriptor with its upper bits set -- the gate must answer that call (an
+    errno, as the kernel would give) and go on answering the next ones: a
+    gate that dies leaves the agent waiting forever, or running on without
+    its supervisor. "x86_64" reads memory with that architecture's mask (no
+    tag bits cleared), since the gate code is otherwise the same on both."""
+    from hlyn.core import notify
+
+    if untag == "x86_64":
+        monkeypatch.setattr(notify, "UNTAG", (1 << 64) - 1)
+    out, _ = gated(f"""
+        import itertools
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        arm = os.uname().machine in ("aarch64", "arm64")
+        CONNECT, SENDTO = (203, 206) if arm else (42, 44)
+        def raw(nr, *args):
+            rc = libc.syscall(ctypes.c_long(nr), *(ctypes.c_long(a - (1 << 64) if a >= 1 << 63 else a)
+                                                     for a in args))
+            if rc < 0:
+                raise OSError(ctypes.get_errno(), "syscall")
+            return str(rc)
+        s = socket.socket()
+        unlisted = (2).to_bytes(2, "little") + (5999).to_bytes(2, "big") + bytes([127, 0, 0, 1]) + bytes(8)
+        good = (ctypes.c_ubyte * 16)(*unlisted)
+        junk = (ctypes.c_ubyte * 128)(*range(128))
+        pointers = {{"null": 0, "one": 1, "2^47": 1 << 47, "2^56-1": (1 << 56) - 1, "2^63-1": (1 << 63) - 1,
+                    "2^63": 1 << 63, "2^64-1": (1 << 64) - 1, "junk bytes": ctypes.addressof(junk),
+                    "unlisted address": ctypes.addressof(good)}}
+        sizes = {{"0": 0, "1": 1, "7": 7, "16": 16, "2^31": 1 << 31, "2^32-1": (1 << 32) - 1,
+                 "2^32+16": (1 << 32) + 16, "2^64-1": (1 << 64) - 1}}
+        fds = {{"socket": s.fileno(), "socket, upper bits": (1 << 32) | s.fileno(), "-1": (1 << 64) - 1,
+               "2^31-1": (1 << 31) - 1, "stdin": 0}}
+        answers = set()
+        for (pn, pv), (sn, sv), (fn, fv) in itertools.product(pointers.items(), sizes.items(), fds.items()):
+            for nr, args in ((CONNECT, (fv, pv, sv)), (SENDTO, (fv, 0, 0, 0, pv, sv))):
+                try:
+                    raw(nr, *args)
+                    answers.add("OK")
+                except OSError as exc:
+                    answers.add(errno.errorcode.get(exc.errno, str(exc.errno)))
+        attempt("answers given", lambda: " ".join(sorted(answers)))
+        attempt("still served: connect to the proxy",
+                lambda: socket.socket().connect(("127.0.0.1", {proxy.port})))
+        attempt("still refused: unlisted address", lambda: socket.socket().connect(("127.0.0.1", 5999)))
+    """, net=["example.com"], proxy=proxy)
+    got = lines(out)
+    assert got["still served: connect to the proxy"] == "OK"
+    assert got["still refused: unlisted address"] == "EACCES"
+    # Each an errno the kernel itself gives for such arguments, and the
+    # unlisted address refused as always; EPIPE is a send on an unconnected
+    # TCP socket, which the gate lets the kernel answer.
+    assert set(got["answers given"].split()) <= {"EACCES", "EAFNOSUPPORT", "EBADF", "EFAULT", "EINVAL",
+                                                  "ENOTSOCK", "EPIPE"}
+    assert "EACCES" in got["answers given"].split()
+
+
+def test_a_bug_in_the_gate_refuses_that_call_and_is_reported(proxy, monkeypatch):
+    """Defence in depth for the test above: any exception while deciding one
+    call -- here a parser that raises -- refuses that call (EACCES), says so
+    in the report, and the gate goes on serving the next."""
+    from hlyn.core import notify
+    from hlyn.policy import Policy
+    from hlyn.report import Denial, Report
+
+    real = notify.sockaddr
+    broken = {"once": True}
+
+    def sockaddr(data: bytes):
+        if broken.pop("once", False):
+            raise ValueError("a parser bug")
+        return real(data)
+
+    monkeypatch.setattr(notify, "sockaddr", sockaddr)
+    out, events = gated(f"""
+        attempt("the call the bug hit", lambda: socket.socket().connect(("127.0.0.1", {proxy.port})))
+        attempt("the next call", lambda: socket.socket().connect(("127.0.0.1", {proxy.port})))
+    """, net=["example.com"], proxy=proxy)
+    got = lines(out)
+    assert got["the call the bug hit"] == "EACCES" and got["the next call"] == "OK"
+    error = next(event for event in events if event["why"] == "gate-error")
+    entry = Report(Policy(net=["example.com"])).add(
+        Denial("net", error["target"], op=error["why"], source="gate"))
+    print(error, "\n", entry)
+    assert error["target"] == "ValueError"
+    assert entry.target == "a connection the gate couldn't check" and entry.allow is None
+    assert "This is a bug in hlyn" in entry.note
 
 
 def test_reduced_mode_swaps_tcp_as_unknown_and_refuses_unix(proxy):

@@ -151,7 +151,7 @@ def _paths(value: tuple[str, ...] | bool, refused: list[tuple[str, str]]) -> lis
     out = []
     for item in value:
         try:
-            fd = os.open(item, os.O_PATH)
+            fd = os.open(item, os.O_PATH)  # type: ignore[attr-defined,unused-ignore]  # Linux only
         except OSError as exc:
             why = exc.strerror or (os.strerror(exc.errno) if exc.errno else "cannot be opened")
             refused.append((item, why))
@@ -177,7 +177,7 @@ def _blame(groups: Sequence[tuple[str, list[bytes]]]) -> str:
     for field, items in groups:
         for item in items:
             try:
-                fd = os.open(item, os.O_PATH)
+                fd = os.open(item, os.O_PATH)  # type: ignore[attr-defined,unused-ignore]  # Linux only
             except OSError as exc:
                 where = os.fsdecode(item)
                 return f" The path {field} names, {where!r}, could not be opened: {exc.strerror}."

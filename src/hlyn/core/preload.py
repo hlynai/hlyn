@@ -181,7 +181,7 @@ class Listener:
             with contextlib.suppress(OSError, AttributeError):
                 import fcntl
 
-                fcntl.fcntl(self._r, fcntl.F_SETPIPE_SZ, 1 << 20)
+                fcntl.fcntl(self._r, fcntl.F_SETPIPE_SZ, 1 << 20)  # type: ignore[attr-defined,unused-ignore]  # Linux only
         except OSError as exc:
             self.why = f"the report pipe could not be created ({exc.strerror})"
             self.close()

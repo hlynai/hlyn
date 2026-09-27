@@ -380,10 +380,13 @@ def read(pid: int, where: int, size: int) -> bytes | None:
         fd = os.open(f"/proc/{pid}/mem", os.O_RDONLY | os.O_CLOEXEC)
     except OSError:
         return None
+    where &= UNTAG
     try:
-        if size <= 0:
+        if size <= 0 or where >= 1 << 63:
+            # Nothing to read, or past any address a process can map (and
+            # past what pread's signed offset can say): the kernel's EFAULT.
             return b""
-        return os.pread(fd, min(size, MOST), where & UNTAG)
+        return os.pread(fd, min(size, MOST), where)
     except OSError:
         return b""
     finally:

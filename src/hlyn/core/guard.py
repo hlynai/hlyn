@@ -279,11 +279,15 @@ class Guard:
         self.served += 1
         try:
             self._decide(call)
-        except OSError:
-            # Anything unexpected while deciding: refuse. A failed answer
-            # means the call has gone already.
+        except Exception as exc:  # noqa: BLE001 - whatever it was, this call is refused and the gate goes on
+            # Anything unexpected while deciding: refuse this call and keep
+            # serving. Its registers are the agent's to choose, and a gate
+            # that stopped would leave the agent waiting on it forever, or
+            # running on without it. A failed answer means the call has gone.
             with contextlib.suppress(OSError):
                 notify.answer(self.notice, call, error=errno.EACCES)
+            if not isinstance(exc, OSError):  # an OSError is the call or process going away
+                self._event(call, "gate-error", type(exc).__name__, None)
 
     # -- deciding ---------------------------------------------------------
 

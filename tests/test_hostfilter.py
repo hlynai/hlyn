@@ -129,7 +129,8 @@ def test_ip_sockets_must_be_tcp_and_other_families_are_refused():
         # A protocol with upper bits set: the kernel reads only the low 32
         # (6, TCP), the filter compares the whole register.
         long = ctypes.c_long  # a bare int would reach syscall() as a 32-bit C int
-        rc = libc.syscall(long(41), long(2), long(1), long((1 << 32) | 6))
+        number = {"x86_64": 41, "aarch64": 198}[os.uname().machine]  # socket(2); 41 is pivot_root on arm64
+        rc = libc.syscall(long(number), long(2), long(1), long((1 << 32) | 6))
         print("tcp proto (1<<32)|6", "OK" if rc >= 0 else errno.errorcode[ctypes.get_errno()])
     """)
     got = dict(line.rsplit(" ", 1) for line in done.stdout.splitlines())

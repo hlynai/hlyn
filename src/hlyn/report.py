@@ -567,6 +567,10 @@ class Report:
                          "a local socket needs write access to its folder", source="gate")
         if why == "udp":
             return Entry("net", f"a name lookup or QUIC ({safe(where)[:20]})", None, LOOKUP, source="gate")
+        if why == "gate-error":
+            return Entry("net", "a connection the gate couldn't check", None,
+                         f"refused, as the gate refuses anything it can't check ({safe(where)[:40]}). "
+                         "This is a bug in hlyn: please report it with the log's deny record", source="gate")
         if why in ("direct", "dns", "proxy-gone"):
             entry = self._host(Denial("net", where, op=why, allow=denial.allow, source="proxy"))
             if entry is not None:
