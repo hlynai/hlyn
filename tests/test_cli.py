@@ -7,16 +7,67 @@ than merely launches.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 
 import pytest
 from conftest import SRC, enforces, skip_if_too_old
 
 REAL = sys.platform in ("linux", "darwin")
 here = pytest.mark.skipif(not REAL, reason="no enforcement backend on this platform")
+
+
+@contextlib.contextmanager
+def _listening():
+    """A real TCP server on loopback, on a free port picked by the OS.
+
+    Used to prove --net enforcement against an actual connection rather than
+    an absence of one: a refused connect to a port nothing listens on would
+    look identical whether hlyn blocked it or the OS just had nobody home.
+    """
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+    stop = threading.Event()
+
+    def serve() -> None:
+        srv.settimeout(0.2)
+        while not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            conn.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    try:
+        yield port
+    finally:
+        stop.set()
+        srv.close()
+        t.join(timeout=2)
+
+
+_CONNECT = (
+    "import socket, sys\n"
+    "s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+    "s.settimeout(3)\n"
+    "try:\n"
+    "    s.connect(('127.0.0.1', {port}))\n"
+    "    print('CONNECTED {port}')\n"
+    "except OSError as e:\n"
+    "    print('REFUSED {port}', repr(e))\n"
+)
 
 
 def hlyn(*args: str) -> subprocess.CompletedProcess:
@@ -117,14 +168,71 @@ def test_flags_add_to_a_policy_file_never_replace_it(tmp_path):
     assert set(out["env"]) == {"A", "B"}
 
 
-def test_a_flag_never_narrows_a_field_that_grants_everything(tmp_path):
+def test_a_flag_never_narrows_read_or_write_that_grant_everything(tmp_path):
+    # Naming a path on top of read=true/write=true is a no-op -- the wider
+    # grant already covers it -- so, unlike --net (below), it stays true
+    # rather than being replaced by the named path. Design 4.1 draws this
+    # line: net narrowing is the point of the feature, read/write widening a
+    # full grant is harmless.
     policy = tmp_path / "policy.toml"
-    policy.write_text("read = true\nnet = true\n")
-    out = json.loads(hlyn(
-        "show", "-f", str(policy), "--read", "/srv", "--net", "443", "--intent", "--json",
-    ).stdout)
+    policy.write_text("read = true\nwrite = true\n")
+    done = hlyn(
+        "show", "-f", str(policy), "--read", "/srv", "--write", "/out", "--intent", "--json",
+    )
+    print("show --read /srv --write /out on top of read=true/write=true:", done.stdout, done.stderr)
+    out = json.loads(done.stdout)
     assert out["read"] is True
+    assert out["write"] is True
+
+
+def test_net_narrows_an_open_network_named_by_a_flag_from_a_preset():
+    # Gap 8.6: `--preset web` (net=true) plus `--net 443` used to leave net
+    # at true, so the flag silently restricted nothing. Design 4.1 says
+    # naming a port must narrow an open network instead, and say so.
+    done = hlyn("show", "--preset", "web", "--net", "443", "--json")
+    print("show --preset web --net 443:", done.stdout, done.stderr)
+    assert (
+        "hlyn: net was any network (from --preset web); --net narrows it to 443. "
+        "Use --net-any to keep it open." in done.stderr
+    )
+    out = json.loads(done.stdout)
+    assert out["net"] == [443]
+
+
+def test_net_narrows_an_open_network_named_by_a_flag_from_a_policy_file(tmp_path):
+    # The same rule for `net = true` in a policy file, not only a preset.
+    policy = tmp_path / "policy.toml"
+    policy.write_text("net = true\n")
+    done = hlyn("show", "-f", str(policy), "--net", "443", "--json")
+    print(f"show -f {policy} --net 443:", done.stdout, done.stderr)
+    assert (
+        f"hlyn: net was any network (from net = true in {policy}); --net narrows it to 443. "
+        "Use --net-any to keep it open." in done.stderr
+    )
+    out = json.loads(done.stdout)
+    assert out["net"] == [443]
+
+
+def test_net_any_keeps_an_open_network_open_and_says_nothing():
+    done = hlyn("show", "--preset", "web", "--net-any", "--json")
+    print("show --preset web --net-any:", done.stdout, done.stderr)
+    assert "narrows" not in done.stderr
+    out = json.loads(done.stdout)
     assert out["net"] is True
+
+
+def test_net_narrowing_does_not_fire_when_the_base_is_not_already_open(tmp_path):
+    # `net = [443]` plus `--net 8080` is ordinary widening (tested above in
+    # test_flags_add_to_a_policy_file_never_replace_it); it must not also
+    # print the "was any network" narrowing notice, which only applies when
+    # the base already granted everything.
+    policy = tmp_path / "policy.toml"
+    policy.write_text("net = [443]\n")
+    done = hlyn("show", "-f", str(policy), "--net", "8080", "--json")
+    print(f"show -f {policy} --net 8080:", done.stdout, done.stderr)
+    assert "narrows" not in done.stderr
+    out = json.loads(done.stdout)
+    assert out["net"] == [443, 8080]
 
 
 def test_a_host_name_gets_the_reason_not_a_type_error():
@@ -171,6 +279,57 @@ def test_run_can_be_told_to_record_nothing():
     done = hlyn("run", "--no-log", "--", sys.executable, "-c", "print('UP')")
     assert '"seal"' not in done.stderr
     assert "UP" in done.stdout
+
+
+# ---------------------------------------------------------------------------
+# --net actually narrows an open network (design 4.1, gap 8.6)
+# ---------------------------------------------------------------------------
+
+
+@here
+def test_run_net_narrows_an_open_network_so_the_unnamed_port_is_refused():
+    if not enforces():
+        pytest.skip("this machine cannot fully enforce (see `hlyn probe`)")
+    with _listening() as allowed, _listening() as other:
+        reached = hlyn(
+            "run", "--preset", "web", "--net", str(allowed), "--no-log",
+            "--", sys.executable, "-c", _CONNECT.format(port=allowed),
+        )
+        print(f"connect to the named port {allowed}:", reached.stdout, reached.stderr)
+        assert (
+            f"hlyn: net was any network (from --preset web); --net narrows it to {allowed}. "
+            "Use --net-any to keep it open." in reached.stderr
+        )
+        assert f"CONNECTED {allowed}" in reached.stdout, (
+            f"the named port should still be reachable: {reached.stdout}{reached.stderr}"
+        )
+
+        blocked = hlyn(
+            "run", "--preset", "web", "--net", str(allowed), "--no-log",
+            "--", sys.executable, "-c", _CONNECT.format(port=other),
+        )
+        print(f"connect to the un-named port {other}:", blocked.stdout, blocked.stderr)
+        assert f"REFUSED {other}" in blocked.stdout, (
+            f"a port --net never named should be refused, even though the base "
+            f"policy (--preset web) was any network: {blocked.stdout}{blocked.stderr}"
+        )
+        assert f"CONNECTED {other}" not in blocked.stdout
+
+
+@here
+def test_run_net_any_keeps_an_open_network_open():
+    if not enforces():
+        pytest.skip("this machine cannot fully enforce (see `hlyn probe`)")
+    with _listening() as port:
+        done = hlyn(
+            "run", "--preset", "web", "--net-any", "--no-log",
+            "--", sys.executable, "-c", _CONNECT.format(port=port),
+        )
+        print(f"connect to {port} under --net-any:", done.stdout, done.stderr)
+        assert "narrows" not in done.stderr
+        assert f"CONNECTED {port}" in done.stdout, (
+            f"--net-any should keep the network open: {done.stdout}{done.stderr}"
+        )
 
 
 # ---------------------------------------------------------------------------
