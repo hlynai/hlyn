@@ -1,0 +1,8 @@
+# Test bed for the Linux backend with the native crates built from source:
+# Rust to build libhlyn.so and libhlyn_report.so, Python to run the suite.
+# Used by tools/linuxtest.sh. Nothing here is part of the shipped package.
+FROM rust:slim
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends python3 python3-pytest python3-hypothesis \
+      libseccomp2 libseccomp-dev gcc libc6-dev iproute2 procps \
+ && rm -rf /var/lib/apt/lists/*
