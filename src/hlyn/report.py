@@ -190,6 +190,26 @@ REFUSED_NOTE = ("never allowed with --net hosts: the program behind it acts for 
                 "network or the machine (--net-any if you mean it)")
 
 
+# A program that looked a name up itself: with hosts, names are looked up
+# by the proxy, and a client that ignores HTTPS_PROXY has no other way out
+# (5.6, 5.7). What fixes it is a client setting, not a flag.
+LOOKUP = ("it looked up a name itself, ignoring HTTPS_PROXY; only the proxy looks names up here. "
+          "Point the client at it (aiohttp: trust_env=True; urllib3: ProxyManager)")
+
+
+def _resolver(path: str) -> bool:
+    """Whether `path` is the system resolver's socket (a name lookup)."""
+    import re
+
+    if sys.platform == "darwin":
+        from .core.mac import RESOLVER
+
+        return os.path.realpath(path) == RESOLVER or path == "/var/run/mDNSResponder"
+    from .core.guard import RESOLVERS
+
+    return any(re.search(pattern, item) for pattern in RESOLVERS for item in (path, os.path.realpath(path)))
+
+
 def _refused(path: str) -> bool:
     """Whether host mode refuses a unix socket at `path` whatever the grants
     (core/mac.py's `REFUSED` on macOS, core/guard.py's on Linux)."""
@@ -521,9 +541,11 @@ class Report:
                              "so local sockets are refused; see hlyn probe", source="gate")
             shown = f"local socket {safe(tilde(where))[:300]}"
             if denial.allow == "--net-any" or _refused(where):
-                return Entry("net", shown, None, REFUSED_NOTE, source="gate")
+                return Entry("net", shown, None, LOOKUP if _resolver(where) else REFUSED_NOTE, source="gate")
             return Entry("net", shown, flag("--write", os.path.dirname(where) or "/"),
                          "a local socket needs write access to its folder", source="gate")
+        if why == "udp":
+            return Entry("net", f"a name lookup or QUIC ({safe(where)[:20]})", None, LOOKUP, source="gate")
         if why in ("direct", "dns", "proxy-gone"):
             entry = self._host(Denial("net", where, op=why, allow=denial.allow, source="proxy"))
             if entry is not None:
@@ -598,6 +620,10 @@ class Report:
         except ValueError:
             return None
         name = FAMILY.get(family, f"family {family}")
+        if family in (2, 10) and self.plan.hosts():
+            # Host mode allows only TCP (5.3), so a refused IP socket is UDP:
+            # a name looked up by the program itself, or QUIC (5.6, 5.7).
+            return Entry("net", "a name lookup or QUIC (UDP)", None, LOOKUP, source=denial.source)
         if family in (2, 10, 17):
             if self.plan.net is not False:
                 return None  # the network is open, so something else refused it
@@ -623,8 +649,8 @@ class Report:
             # Host mode: a unix socket needs a write grant on its folder
             # (5.3, 5.4), except the always-refused ones.
             if _refused(where):
-                return Entry("net", f"local socket {safe(tilde(where))}", None, REFUSED_NOTE,
-                             source=denial.source)
+                return Entry("net", f"local socket {safe(tilde(where))}", None,
+                             LOOKUP if _resolver(where) else REFUSED_NOTE, source=denial.source)
             return Entry("net", f"local socket {safe(tilde(where))}",
                          flag("--write", os.path.dirname(where) or "/"),
                          "a local socket needs write access to its folder", source=denial.source)

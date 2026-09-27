@@ -105,8 +105,10 @@ def sealed(
 def test_ip_sockets_must_be_tcp_and_other_families_are_refused():
     """Rows 4 and 24: UDP, raw and seqpacket IP sockets are refused; SCTP,
     MPTCP and any other protocol get the answer of a kernel without them;
-    TCP, unix and route netlink stay."""
-    done, seen = sealed("""
+    TCP, unix and route netlink stay. A non-TCP IP socket goes to the gate,
+    which refuses it (EPERM, as here) and reports it; every other refusal is
+    the filter's own."""
+    done, seen = sealed(answer=lambda call: {"error": errno.EPERM}, body="""
         import ctypes, errno
         libc = ctypes.CDLL(None, use_errno=True); libc.syscall.restype = ctypes.c_long
         tries = {
@@ -143,7 +145,15 @@ def test_ip_sockets_must_be_tcp_and_other_families_are_refused():
         assert got[gone] == "EPROTONOSUPPORT", (gone, got[gone])
     for family in ("netlink audit", "packet", "rds", "tipc", "alg", "xdp"):
         assert got[family] == "EPERM", (family, got[family])
-    assert seen == []
+    from hlyn.core import seccomp
+
+    asked = [(call.args[0], call.args[1] & 0xF) for call in seen]
+    print("the gate was asked about (family, type):", asked)
+    assert all(nr == seccomp._nr("socket") for nr in (call.nr for call in seen))
+    # The filter asks before the kernel checks the family, so udp6 comes
+    # here even on a machine without IPv6.
+    for family, kind in ((2, 2), (10, 2), (2, 5)):  # udp, udp6, seqpacket
+        assert (family, kind) in asked, (family, kind)
 
 
 def test_fast_open_is_refused_even_with_an_address_and_never_reaches_the_gate():

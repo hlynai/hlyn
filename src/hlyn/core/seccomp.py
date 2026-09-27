@@ -468,7 +468,13 @@ def load(policy: Policy) -> int | None:
             for domain in (INET, INET6):
                 for kind in range(KINDS + 1):
                     if kind != STREAM:
-                        _rule(ctx, ERROR | EPERM, "socket",
+                        # To the gate, which refuses it (EPERM) and says so:
+                        # glibc's resolver makes its UDP socket through an
+                        # internal call no preloaded reporter sees, and a
+                        # program that looks names up itself should hear why
+                        # it can't (5.6). Registers only: nothing to race.
+                        # Without a gate the kernel answers ENOSYS: refused.
+                        _rule(ctx, NOTIFY, "socket",
                               [Arg(0, EQ, domain, 0), Arg(1, MASKED, KINDS, kind)])
                 # The protocol as an allowlist of 0 and TCP. Compared whole:
                 # a value with upper bits set is >= TCP + 1 and refused.

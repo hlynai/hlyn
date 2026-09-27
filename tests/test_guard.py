@@ -285,8 +285,17 @@ def test_row_22_unix_sockets_need_a_write_grant_and_the_refused_list_always_wins
     got = lines(out)
     assert got["granted folder"] == "OK" and got["granted, relative"] == "OK"
     for refused in ("runtime socket in a granted folder", "symlink to the runtime socket",
-                    "symlink out of the grant", "not granted", "nscd", "resolved", "system bus"):
+                    "symlink out of the grant", "not granted"):
         assert got[refused] == "EACCES", (refused, got[refused])
+    # Resolver and bus sockets: refused where they exist; where nothing is
+    # there, the kernel's own ENOENT, so glibc's nscd probe on every lookup
+    # isn't reported as a refusal. Never reached either way.
+    for name, path in (("nscd", "/var/run/nscd/socket"),
+                       ("resolved", "/run/systemd/resolve/io.systemd.Resolve"),
+                       ("system bus", "/run/dbus/system_bus_socket")):
+        want = "EACCES" if os.path.lexists(path) else "ENOENT"
+        print(f"{name}: {path} exists: {os.path.lexists(path)}, got {got[name]}")
+        assert got[name] == want, (name, got[name])
     allows = {event["target"]: event["allow"] for event in events}
     assert allows[os.path.realpath(f"{other}/private.sock")] == f"--write {os.path.realpath(other)}"
     assert allows[os.path.realpath(f"{box}/docker.sock")] == "--net-any"

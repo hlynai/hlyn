@@ -774,6 +774,9 @@ for path in ("/run/hlyn-test-private/app.sock", "DOCKER"):
 @pytest.mark.parametrize("form", ["text", "json"])
 def test_hlyn_run_lists_each_refusal_by_the_gate_once_with_its_flag(tmp_path, form):
     docker = str(tmp_path / "docker.sock")
+    listening = socket.socket(socket.AF_UNIX)  # one that exists: a missing one is ENOENT, not a refusal
+    listening.bind(docker)
+    listening.listen(1)
     done = subprocess.run(
         [*HLYN, "run", "--no-log", *(["--json"] if form == "json" else []), "--net", "pypi.org",
          "--write", str(tmp_path), "--", sys.executable, "-c",
@@ -809,7 +812,10 @@ def test_hlyn_run_lists_each_refusal_by_the_gate_once_with_its_flag(tmp_path, fo
 @pytest.mark.parametrize("entry", ["on", "run", "spawn"])
 def test_the_gates_refusals_reach_the_log_from_every_entry_point(tmp_path, entry):
     log = str(tmp_path / "log.jsonl")
-    body = REFUSALS.replace("DOCKER", "/run/docker.sock")
+    docker = socket.socket(socket.AF_UNIX)  # one that exists: a missing one is ENOENT, not a refusal
+    docker.bind(str(tmp_path / "docker.sock"))
+    docker.listen(1)
+    body = REFUSALS.replace("DOCKER", str(tmp_path / "docker.sock"))
     if entry == "on":
         code = f"import hlyn\nhlyn.on(net=['pypi.org'], log={log!r})\n" + body
     elif entry == "run":
@@ -826,8 +832,27 @@ def test_the_gates_refusals_reach_the_log_from_every_entry_point(tmp_path, entry
     assert got[("direct", "140.82.112.5:443")]["by"].startswith("python")
     assert got[("dns", "1.1.1.1:53")]["allow"] is None
     assert got[("unix", "/run/hlyn-test-private/app.sock")]["allow"] == "--write /run/hlyn-test-private"
-    assert got[("unix", "/run/docker.sock")]["allow"] == "--net-any"
+    assert got[("unix", str(tmp_path / "docker.sock"))]["allow"] == "--net-any"
+    docker.close()
     # Five connects to the same address: written on the 1st, 2nd and 4th, the
     # way every hlyn log collapses repeats.
     seen = [row.get("seen", 1) for row in rows if row["target"] == "140.82.112.5:443"]
     assert seen == [1, 2, 4]
+
+
+@linux
+def test_a_program_that_looks_up_names_itself_is_told_how_to_use_the_proxy():
+    """5.6, 5.7: with hosts there is no DNS. A client that ignores
+    HTTPS_PROXY and resolves the name itself fails at the lookup; the report
+    says why and which client setting fixes it. glibc's probe of a missing
+    nscd socket on the way is the kernel's own ENOENT, not a refusal."""
+    done = subprocess.run(
+        [*HLYN, "run", "--no-log", "--net", "pypi.org", "--", sys.executable, "-c",
+         "import socket\nsocket.create_connection(('api.github.com', 443), timeout=5)"],
+        capture_output=True, text=True, env=ENV, timeout=120, check=False, cwd="/",
+    )
+    print(done.stderr)
+    assert "Temporary failure in name resolution" in done.stderr or "Name or service not known" in done.stderr
+    assert "a name lookup or QUIC (UDP)" in done.stderr
+    assert "ignoring HTTPS_PROXY" in done.stderr and "aiohttp: trust_env=True" in done.stderr
+    assert "nscd" not in done.stderr

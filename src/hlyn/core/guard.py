@@ -10,6 +10,7 @@ gate. `Guard` answers them from one loop:
 | TCP to the proxy (127.0.0.1:P, [::1]:P, mapped)        | swap, answer 0               |
 | TCP to an address the policy lists (IP, CIDR, localhost) | swap, wait for the proxy's verdict, answer it |
 | TCP anywhere else                                     | `EACCES`                     |
+| an IP socket other than TCP (UDP: a name lookup)       | `EPERM`, and say so          |
 | unix path in a write-granted folder, not refused       | let it run                   |
 | unix path anywhere else, or on the refused list        | `EACCES`                     |
 | unix abstract or unnamed, `AF_UNSPEC`, netlink         | let it run                   |
@@ -58,12 +59,15 @@ __all__ = ["REFUSED", "Config", "Guard"]
 # Unix sockets never reachable in host mode, whatever folders are granted:
 # the program behind each acts for its caller on the network or the machine
 # (5.3). Regexes over the path, checked as written and resolved.
-REFUSED: tuple[str, ...] = (
-    # The resolvers: a lookup through nss-resolve goes to systemd-resolved
-    # over Varlink and never touches UDP port 53; nscd queries DNS for its
-    # caller (FINDINGS.md, gap 8.2).
+# The resolvers: a lookup through nss-resolve goes to systemd-resolved over
+# Varlink and never touches UDP port 53; nscd queries DNS for its caller
+# (FINDINGS.md, gap 8.2). A refusal here is a name lookup, and says so.
+RESOLVERS: tuple[str, ...] = (
     r"^/run/systemd/resolve/",
     r"^/(var/)?run/nscd/",
+)
+REFUSED: tuple[str, ...] = (
+    *RESOLVERS,
     # The D-Bus buses: systemd-resolved answers lookups over D-Bus too.
     r"^/(var/)?run/dbus/system_bus_socket$",
     r"^/run/user/[^/]+/bus$",
@@ -152,6 +156,7 @@ class Guard:
         self._poll: select.poll | None = None
         self.connect_nr = seccomp._nr("connect")
         self.sendto_nr = seccomp._nr("sendto")
+        self.socket_nr = seccomp._nr("socket")
         self.served = 0
         writes = self.config.writes
         self.writes: tuple[str, ...] | Literal[True] = (
@@ -228,6 +233,14 @@ class Guard:
     # -- deciding ---------------------------------------------------------
 
     def _decide(self, call: notify.Call) -> None:
+        if call.nr == self.socket_nr:
+            # Only IP sockets other than TCP come here (the filter): refuse,
+            # and say what it was, from the registers alone.
+            kind = call.args[1] & seccomp.KINDS
+            shown = {socket.SOCK_DGRAM: "UDP", socket.SOCK_RAW: "raw IP"}.get(kind, f"IP socket type {kind}")
+            self._event(call, "udp", shown, None)
+            self._no(call, errno.EPERM)
+            return
         if call.nr == self.connect_nr:
             pointer, size = call.args[1], call.args[2]
         elif call.nr == self.sendto_nr:
@@ -338,6 +351,12 @@ class Guard:
         path = os.path.normpath(path)
         real = os.path.realpath(path)
         if any(pattern.search(item) for pattern in _REFUSED for item in (path, real)):
+            if not os.path.lexists(real):
+                # Nothing listens there (glibc tries nscd's socket on every
+                # lookup, running or not): the kernel's own answer, without
+                # running the call, and nothing to report.
+                self._no(call, errno.ENOENT)
+                return
             self._event(call, "unix", real, "--net-any",
                         detail="never allowed with --net hosts: the program behind it acts for its caller")
             self._no(call, errno.EACCES)

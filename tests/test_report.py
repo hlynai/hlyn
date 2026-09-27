@@ -696,3 +696,11 @@ def test_on_linux_the_preload_copy_of_a_direct_connect_is_left_to_the_gate(tmp_p
     print("preload's copy:", inside, "| gate's:", outside.target, outside.allow)
     assert inside is None and outside is not None
     assert [entry.target for entry in report.items()] == ["140.82.112.5:443"]
+
+
+def test_a_refused_udp_socket_in_host_mode_explains_the_lookup(tmp_path):
+    report = gated(tmp_path)
+    entry = one(report, kind="net", target="UDP", op="udp", source="gate", by="python3")
+    print(entry.target, "|", entry.note)
+    assert entry.target == "a name lookup or QUIC (UDP)" and entry.allow is None
+    assert "ignoring HTTPS_PROXY" in entry.note

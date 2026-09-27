@@ -23,6 +23,13 @@ What it sees, and what it does not, stated plainly because the gap matters:
   * It uses CPython's audit hooks, so it observes what *Python* does -- `open`,
     `connect`, `subprocess`, and the rest of PEP 578's events. That covers the
     agent's own code and almost every library it calls.
+  * Host names come from the names the agent looks up (`socket.getaddrinfo`)
+    and, for `http.client` and so `urllib`, from the host a request through a
+    proxy tunnels to. When it saw any, the draft names hosts
+    (`net = ["api.openai.com"]`, DESIGN-host-allowlisting.md 4.7), so the
+    enforced run can check every name; otherwise it names ports, as before.
+    A client that tunnels through a proxy without `http.client` (requests,
+    httpx) shows only the proxy: watch it with the proxy variables unset.
   * It does not see a C extension that calls `open(2)` directly without going
     through Python, and it does not see inside a child process unless that
     child is also watched. `hlyn watch` arranges the latter for child Pythons;
@@ -117,6 +124,26 @@ def _port(value: object) -> None:
         _seen.add(("net", str(value)))
 
 
+def _name(host: object, port: object) -> None:
+    """Record a host name looked up or dialled, with its port if known."""
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    if not isinstance(host, str) or not host or len(host) > 253:
+        return
+    if isinstance(port, str) and port.isdigit():
+        port = int(port)
+    number = port if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536 else 0
+    _seen.add(("host", f"{host.lower().rstrip('.')} {number}"))
+
+
+def _address(where: object) -> None:
+    """Record the address and port of an IP connection."""
+    if isinstance(where, tuple) and len(where) >= 2 and isinstance(where[0], str):
+        port = where[1]
+        if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536:
+            _seen.add(("addr", f"{where[0]} {port}"))
+
+
 def _hook(event: str, args: tuple[Any, ...]) -> None:
     """The audit hook itself.
 
@@ -138,6 +165,18 @@ def _hook(event: str, args: tuple[Any, ...]) -> None:
             # scoping governs those, and `net` does not describe them.
             if isinstance(where, tuple) and len(where) >= 2:
                 _port(where[1])
+                _address(where)
+        elif event == "socket.getaddrinfo":
+            _name(args[0] if args else None, args[1] if len(args) > 1 else None)
+        elif event == "http.client.connect":
+            # (self, host, port). Through a proxy, host is the proxy and the
+            # real target is the tunnel's (set_tunnel).
+            conn = args[0] if args else None
+            tunnel = getattr(conn, "_tunnel_host", None)
+            if tunnel:
+                _name(tunnel, getattr(conn, "_tunnel_port", None))
+            else:
+                _name(args[1] if len(args) > 1 else None, args[2] if len(args) > 2 else None)
         elif event in ("subprocess.Popen", "os.exec"):
             _path("exec", args[0] if args else None)
         elif event == "os.system":
@@ -236,7 +275,10 @@ def suggest(**edits: Any) -> Policy:
     reads = [v for k, v in _seen if k == "read" and _mine(v, skip)]
     writes = [v for k, v in _seen if k == "write" and _mine(v, skip)]
     runs = [v for k, v in _seen if k == "exec"]
-    net = sorted({int(v) for k, v in _seen if k == "net"})
+    net: tuple[object, ...] = tuple(sorted({int(v) for k, v in _seen if k == "net"}))
+    hosts = _hosts()
+    if hosts:
+        net = hosts
 
     # A path opened for writing is already readable under any policy that
     # grants the write, so repeating it in `read` is noise in a document whose
@@ -248,7 +290,83 @@ def suggest(**edits: Any) -> Policy:
         "read": _tidy(reads),
         "write": kept,
         "exec": prune(runs) if runs else False,
-        "net": tuple(net) if net else False,
+        "net": net or False,
     }
     plan.update(edits)
     return Policy(**plan)
+
+
+def _hosts() -> tuple[str, ...]:
+    """Host entries for what was observed, or () if no host name was.
+
+    A name looked up with a port becomes `name:port`; without one, the port
+    of a connection made after it, else 443. A connection to an address no
+    looked-up name explains becomes an address entry: `localhost:PORT` for
+    loopback, `ADDRESS:PORT` otherwise -- but not the environment's own
+    proxy, which hlyn's proxy chains through (5.5). Names the grammar
+    refuses (non-ASCII, a malformed label) are left out.
+    """
+    import ipaddress
+
+    from .error import Invalid
+    from .hosts import parse
+
+    names: dict[str, set[int]] = {}
+    for kind, value in _seen:
+        if kind == "host":
+            host, _, port = value.rpartition(" ")
+            try:
+                ipaddress.ip_address(host.strip("[]"))
+                continue  # an address, not a name: see the connections
+            except ValueError:
+                pass
+            names.setdefault(host, set())
+            if port.isdigit() and int(port):
+                names[host].add(int(port))
+    if not names:
+        return ()
+    dialled = {(host, int(port)) for kind, value in _seen if kind == "addr"
+               for host, _, port in [value.rpartition(" ")]}
+    ports = {port for _, port in dialled}
+    named_ports = {port for found in names.values() for port in found}
+    skip = _proxies()
+    out: list[str] = []
+    for host, found in sorted(names.items()):
+        for port in sorted(found or (named_ports & ports) or {443}):
+            out.append(f"{host}:{port}")
+    for address, port in sorted(dialled):
+        if (address, port) in skip or port in named_ports:
+            continue
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        loop = ip.is_loopback
+        out.append(f"localhost:{port}" if loop else (f"[{ip}]:{port}" if ip.version == 6 else f"{ip}:{port}"))
+    kept = []
+    for entry in dict.fromkeys(out):
+        try:
+            kept.append(str(parse(entry)))
+        except Invalid:
+            continue
+    return tuple(dict.fromkeys(kept))
+
+
+def _proxies() -> set[tuple[str, int]]:
+    """The address and port of each proxy the environment names."""
+    from urllib.parse import urlsplit
+
+    out: set[tuple[str, int]] = set()
+    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        value = os.environ.get(key)
+        if not value:
+            continue
+        try:
+            parts = urlsplit(value if "://" in value else f"http://{value}")
+            if parts.hostname and parts.port:
+                out.add((parts.hostname, parts.port))
+                if parts.hostname == "localhost":
+                    out.update({("127.0.0.1", parts.port), ("::1", parts.port)})
+        except ValueError:
+            continue
+    return out

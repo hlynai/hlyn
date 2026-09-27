@@ -175,3 +175,84 @@ def test_watching_a_child_records_what_it_touched(tmp_path):
     got = {tuple(item) for item in pairs}
     assert ("write", str(box / "one.txt")) in got
     assert ("write", str(box / "two.txt")) in got
+
+
+# -- host names (DESIGN-host-allowlisting.md 4.7) ----------------------------
+
+
+def test_a_name_looked_up_is_recorded_with_its_port(clean):
+    watch._hook("socket.getaddrinfo", ("API.OpenAI.com.", 443, 0, 1, 0, 0))
+    watch._hook("socket.getaddrinfo", (b"pypi.org", "https", 0, 1, 0, 0))
+    print(sorted(clean))
+    assert ("host", "api.openai.com 443") in clean
+    assert ("host", "pypi.org 0") in clean  # a service name, not a number: port unknown
+
+
+def test_a_request_through_a_proxy_records_the_host_it_tunnels_to(clean):
+    class Tunnel:
+        _tunnel_host = "pypi.org"
+        _tunnel_port = 443
+
+    watch._hook("http.client.connect", (Tunnel(), "127.0.0.1", 3128))
+    print(sorted(clean))
+    assert clean == {("host", "pypi.org 443")}
+
+
+def test_hosts_seen_make_the_draft_name_hosts(clean, monkeypatch):
+    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    observed({
+        ("host", "api.openai.com 443"), ("host", "pypi.org 0"),
+        ("addr", "151.101.0.223 443"),  # pypi.org's address: a name explains it
+        ("addr", "127.0.0.1 5432"),  # a local database: localhost:5432
+        ("addr", "10.0.0.5 6379"),  # an internal service, by address
+        ("host", "127.0.0.1 0"),  # an address looked up: not a name
+        ("host", "b\u00fccher.de 443"),  # the grammar refuses it: left out
+        ("net", "443"), ("net", "5432"), ("net", "6379"),
+    })
+    got = [str(rule) for rule in watch.suggest().net]
+    print(got)
+    assert got == ["10.0.0.5:6379", "api.openai.com:443", "localhost:5432", "pypi.org:443"]
+
+
+def test_the_environments_own_proxy_is_not_drafted(clean, monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:46467")
+    observed({("host", "pypi.org 443"), ("addr", "127.0.0.1 46467"), ("net", "46467")})
+    got = [str(rule) for rule in watch.suggest().net]
+    print(got)
+    assert got == ["pypi.org:443"]
+
+
+def test_without_names_the_draft_names_ports_as_before(clean):
+    observed({("addr", "10.0.0.1 443"), ("net", "443")})
+    assert watch.suggest().net == (443,)
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="needs a backend that seals")
+def test_watch_once_then_enforce_the_draft(tmp_path):
+    """The workflow 4.7 recommends: watch, read the draft, run under it. The
+    agent here only looks a name up (offline), so the draft must list that
+    host, and the enforced run must refuse a host the watch never saw."""
+    agent = tmp_path / "agent.py"
+    agent.write_text(
+        "import socket, sys, urllib.request\n"
+        "try:\n    socket.getaddrinfo('api.example.com', 443)\nexcept OSError:\n    pass\n"
+        "if len(sys.argv) > 1:\n"
+        "    try:\n        urllib.request.urlopen('https://evil.example.net/', timeout=10)\n"
+        "    except Exception as e:\n        print('evil:', e)\n"
+    )
+    env = {key: value for key, value in os.environ.items() if "proxy" not in key.lower()}
+    env["PYTHONPATH"] = SRC
+    drafted = subprocess.run([sys.executable, "-m", "hlyn.cli", "watch", "--", sys.executable, str(agent)],
+                             capture_output=True, text=True, env=env, cwd=str(tmp_path), check=False)
+    print(drafted.stdout)
+    assert 'net = [\n  "api.example.com:443",\n]' in drafted.stdout
+    policy = tmp_path / "policy.toml"
+    policy.write_text(drafted.stdout)
+    enforced = subprocess.run(
+        [sys.executable, "-m", "hlyn.cli", "run", "--no-log", "-f", str(policy), "--read", str(tmp_path),
+         "--", sys.executable, str(agent), "evil"],
+        capture_output=True, text=True, env=env, cwd=str(tmp_path), check=False)
+    print(enforced.stdout, enforced.stderr[-800:])
+    assert "403 hlyn: evil.example.net:443 is not in --net" in enforced.stdout
+    assert "allow with --net evil.example.net" in enforced.stderr
