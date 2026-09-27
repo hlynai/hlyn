@@ -40,11 +40,17 @@ HOSTS = True
 
 
 # The interpreter cannot start without these. They grant no access to user
-# data: process-fork and signalling itself are self-directed, and metadata
-# reads expose names and sizes rather than contents.
+# data: process-fork is self-directed, and metadata reads expose names and
+# sizes rather than contents.
 BASE: tuple[str, ...] = (
     "(allow process-fork)",
-    "(allow signal (target self))",
+    # Signals within this sandbox: the process, its children and theirs, and
+    # back. Nothing outside it -- not hlyn, not an unrelated process, not a
+    # second agent sealed by the same policy (each seal is its own sandbox).
+    # That is Landlock's signal scope on Linux. `(target self)` alone left an
+    # agent unable to stop what it started: `Popen.terminate()` and
+    # `subprocess.run(timeout=...)` failed (tests/test_signals.py).
+    "(allow signal (target same-sandbox))",
     "(allow sysctl-read)",
     "(allow mach-lookup)",
     "(allow file-read-metadata)",
