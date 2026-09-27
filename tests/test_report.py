@@ -609,3 +609,18 @@ def test_the_tag_goes_into_the_profile_and_changes_nothing_else():
     assert "(deny default)" in plain
     assert f'(deny default (with message "{TAG}"))' in tagged
     assert tagged.replace(f' (with message "{TAG}")', "") == plain
+
+
+def test_refusals_that_are_not_paths_are_never_folded_together():
+    # Two local sockets share the flag --net-any, which names no folder:
+    # folding them used to crash the report (IndexError) and would have
+    # printed "2 paths under ..." for things that are not paths.
+    report = Report(Policy(net=[443]))
+    for path in ("/var/run/a.sock", "/var/run/b.sock"):
+        report.add(Denial(kind="net", target=f"unix:{path}", op="network-outbound", by="x",
+                          pid=1, source="kernel"))
+    text = report.text(1, ["x"])
+    print(text)
+    assert "local socket /var/run/a.sock" in text
+    assert "local socket /var/run/b.sock" in text
+    assert "paths under" not in text

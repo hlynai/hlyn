@@ -28,7 +28,7 @@ from collections.abc import Iterable
 
 from ..error import Failed, Invalid, Unsupported
 from ..policy import Policy
-from ..report import Listener
+from ..report import SERVICES, Listener
 
 __all__ = ["listen", "load", "probe", "profile", "ready", "seal"]
 
@@ -219,8 +219,43 @@ def profile(policy: Policy, tag: str | None = None) -> str:
             lines.append(f'(allow network-outbound (remote tcp "*:{port}"))')
         # macOS resolves names through this daemon rather than by sending DNS
         # itself. Without it, allowing port 443 still cannot reach a host by
-        # name. The daemon answers lookups; it is not a way out to anywhere.
+        # name. Granting it is not a closed door, though: it answers whatever
+        # name the caller asks for, chosen name included, so data can leave
+        # one DNS label at a time (DNS tunnelling) even though every TCP
+        # connect is still checked against the port list. Verified live
+        # (FINDINGS.md, "the blanket mach-lookup grant"): port mode is not a
+        # boundary against exfiltration by DNS. Host allowlisting's proxy,
+        # which resolves names itself and never grants this socket, is what
+        # closes it (DESIGN-host-allowlisting.md 5.4, 5.6).
         lines.append(f'(allow network-outbound (remote unix-socket (path-literal "{RESOLVER}")))')
+
+    if not policy.net:
+        # net=False (or an empty port list, which forbids the same thing):
+        # HTTPS is impossible either way, so refusing these two services costs
+        # nothing while closing two routes past the sandbox that the blanket
+        # `(allow mach-lookup)` in BASE otherwise leaves open. Both verified
+        # live under shipped net=False (FINDINGS.md, "the blanket mach-lookup
+        # grant"):
+        #   - trustd fetches whatever certificate-issuer URL a checked
+        #     certificate names, attacker-chosen included, for any caller
+        #     that verifies a certificate through Security.framework (Swift
+        #     URLSession, Go's crypto/x509 on macOS).
+        #   - dnssd.service resolves whatever name a caller asks for, which
+        #     carries data out over DNS even though no TCP connect is ever
+        #     allowed to complete.
+        # These rules must come after the `(allow mach-lookup)` above so they
+        # win: SBPL applies the rules for one operation in order and the last
+        # match decides it, the same pattern the RESOLVER deny in the design
+        # doc's example profile relies on. This is TODO.md item 1 step 1 and
+        # DESIGN-host-allowlisting.md gap 8.3's first phase: the blanket grant
+        # otherwise stays for now (every other service), and the full
+        # allowlist for every mode is later work.
+        # An explicit deny is logged with the run's tag only when it carries
+        # the message itself (measured: without it the report never hears of
+        # the refusal, so it could not say what to do).
+        said = f" (with message {quote(tag)})" if tag else ""
+        for name in SERVICES:
+            lines.append(f'(deny mach-lookup{said} (global-name "{name}"))')
 
     return "\n".join(lines)
 

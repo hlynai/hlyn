@@ -47,7 +47,7 @@ from typing import Any, Protocol
 from .policy import Policy, under
 from .secret import credential, secret
 
-__all__ = ["Denial", "Entry", "Listener", "Quiet", "Report", "credential", "removed", "safe", "secret"]
+__all__ = ["Denial", "Entry", "Listener", "Quiet", "Report", "SERVICES", "credential", "removed", "safe", "secret"]
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +138,14 @@ NOISE: frozenset[tuple[str, str]] = frozenset({
     ("read", "/dev/dtracehelper"),
     ("read", "/dev/fd"),
 })
+
+# macOS services refused under net=False because each one goes on the network
+# for its caller (FINDINGS.md, "the blanket mach-lookup grant"). The profile
+# in core/mac.py refuses exactly these; the report says what each one does.
+SERVICES: dict[str, str] = {
+    "com.apple.trustd.agent": "checks certificates, and fetches URLs named inside them",
+    "com.apple.dnssd.service": "looks up host names",
+}
 
 def removed(plan: Policy, env: Mapping[str, str]) -> list[str]:
     """Environment variables `plan` strips, secret-looking names first.
@@ -326,6 +334,13 @@ class Report:
             return self._local(denial)
         if kind in ("net", "bind"):
             return self._port(denial)
+        if kind == "system" and denial.op == "mach-lookup" and target in SERVICES:
+            # Not plumbing: a service that would reach the network for the
+            # program. Refused only while the network is off, so naming a
+            # port (which allows HTTPS) lifts it.
+            return Entry("net", f"macOS service {target}", "--net 443",
+                         f"{SERVICES[target]} on the program's behalf; refused while net is off",
+                         source=denial.source)
         if kind == "system":
             # The OS's own plumbing (macOS): counted, shown with --json, left
             # out of the list, since no flag allows it and a list full of
@@ -575,7 +590,11 @@ class Report:
         out: list[Entry] = []
         together: dict[tuple[str, str, bool], list[Entry]] = {}
         for e in items:
-            if e.allow and not e.quiet:
+            if e.kind not in ("read", "write", "exec"):
+                # Only paths fold: "N paths under X" means nothing for a
+                # socket or a service, and their flags may name no folder.
+                out.append(e)
+            elif e.allow and not e.quiet:
                 together.setdefault((e.kind, e.allow, False), []).append(e)
             elif e.quiet and not e.allow and e.note:
                 # The same harmless thing, many times: one line.

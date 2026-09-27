@@ -8,7 +8,13 @@ if it does not.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 from conftest import jail
@@ -303,3 +309,198 @@ def test_companion_finds_the_framework_interpreter():
     else:
         assert inner and inner.endswith("/Resources/Python.app")
     assert companion("/bin/ls") is None
+
+
+# ---------------------------------------------------------------------------
+# system services that reach the network for the caller (net=False)
+# ---------------------------------------------------------------------------
+#
+# The base profile allows Mach lookups, and two macOS services go on the
+# network for whoever asks: trustd fetches the issuer URLs written inside a
+# certificate it is asked to check, and dnssd.service looks up names. Both
+# carried data past net=False until they were refused (FINDINGS.md, "the
+# blanket mach-lookup grant").
+
+# Asks Security.framework to check a certificate, network fetches allowed, the
+# way any HTTPS client on macOS does. Plain Python, so no compiler is needed.
+CHECK = """
+import ctypes, ctypes.util, sys
+cf = ctypes.CDLL(ctypes.util.find_library("CoreFoundation"))
+sec = ctypes.CDLL(ctypes.util.find_library("Security"))
+V = ctypes.c_void_p
+cf.CFDataCreate.restype = V
+cf.CFDataCreate.argtypes = [V, ctypes.c_char_p, ctypes.c_long]
+sec.SecCertificateCreateWithData.restype = V
+sec.SecCertificateCreateWithData.argtypes = [V, V]
+sec.SecPolicyCreateBasicX509.restype = V
+sec.SecTrustCreateWithCertificates.argtypes = [V, V, ctypes.POINTER(V)]
+sec.SecTrustSetNetworkFetchAllowed.argtypes = [V, ctypes.c_bool]
+sec.SecTrustEvaluateWithError.restype = ctypes.c_bool
+sec.SecTrustEvaluateWithError.argtypes = [V, ctypes.POINTER(V)]
+der = open(sys.argv[1], "rb").read()
+cert = sec.SecCertificateCreateWithData(None, cf.CFDataCreate(None, der, len(der)))
+trust = V()
+sec.SecTrustCreateWithCertificates(cert, sec.SecPolicyCreateBasicX509(), ctypes.byref(trust))
+sec.SecTrustSetNetworkFetchAllowed(trust, True)
+err = V()
+print("CHECKED, trusted:", sec.SecTrustEvaluateWithError(trust, ctypes.byref(err)))
+"""
+
+
+@pytest.fixture
+def listener():
+    """A local HTTP server that records every path requested of it."""
+    got: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - the stdlib's name
+            got.append(f"{self.path} (User-Agent: {self.headers.get('User-Agent')})")
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server.server_address[1], got
+    server.shutdown()
+
+
+def _leaf(folder, url: str):
+    """A certificate whose issuer is missing, with its issuer URL set to `url`."""
+    openssl = shutil.which("openssl")
+    if not openssl:
+        pytest.skip("openssl is needed to make a test certificate")
+
+    def run(*args: str) -> None:
+        subprocess.run([openssl, *args], cwd=folder, check=True, capture_output=True)
+
+    run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "ca.key", "-out", "ca.pem",
+        "-days", "2", "-subj", "/CN=hlyn test issuer")
+    run("req", "-newkey", "rsa:2048", "-nodes", "-keyout", "leaf.key", "-out", "leaf.csr",
+        "-subj", "/CN=leak.example")
+    (folder / "leaf.ext").write_text(f"authorityInfoAccess=caIssuers;URI:{url}\n")
+    run("x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
+        "-CAcreateserial", "-out", "leaf.der", "-outform", "DER", "-days", "2",
+        "-extfile", "leaf.ext")
+    return folder / "leaf.der"
+
+
+def test_trustd_cannot_fetch_for_a_program_with_the_network_off(tmp_path, listener):
+    port, got = listener
+    secret = f"SECRET-{uuid.uuid4().hex[:8]}"
+    leaf = _leaf(tmp_path, f"http://127.0.0.1:{port}/{secret}.cer")
+    check = tmp_path / "check.py"
+    check.write_text(CHECK)
+
+    # The control: unconfined, trustd does fetch the URL. Without this the
+    # confined half would pass on any machine where trustd happens not to.
+    free = subprocess.run([sys.executable, str(check), str(leaf)],
+                          capture_output=True, text=True, timeout=60, check=False)
+    print("unconfined:", free.stdout.strip(), free.stderr.strip(), "| listener got:", got)
+    if not any(secret in hit for hit in got):
+        pytest.skip("trustd did not fetch the issuer URL even unconfined, so this proves nothing")
+
+    got.clear()
+    secret = f"SECRET-{uuid.uuid4().hex[:8]}"
+    leaf = _leaf(tmp_path, f"http://127.0.0.1:{port}/{secret}.cer")
+    done = jail(
+        f"""
+        import runpy, sys
+        sys.argv = [{str(check)!r}, {str(leaf)!r}]
+        runpy.run_path({str(check)!r})
+        """,
+        policy=f"Policy(read=[{str(tmp_path)!r}])",
+        seal=SEAL,
+    )
+    time.sleep(2)  # trustd fetches asynchronously
+    print("net=False:", done.stdout.strip(), done.stderr.strip()[-300:], "| listener got:", got)
+    assert "CHECKED" in done.stdout, f"the check never ran: {done.stderr}"
+    assert not got, f"trustd fetched a URL for a program with net=False: {got}"
+
+
+FETCH = """
+import Foundation
+let sem = DispatchSemaphore(value: 0)
+URLSession.shared.dataTask(with: URL(string: CommandLine.arguments[1])!) { _, r, e in
+    if let h = r as? HTTPURLResponse { print("STATUS", h.statusCode) }
+    else { print("ERROR", (e as NSError?)?.code ?? 0, e?.localizedDescription ?? "?") }
+    sem.signal()
+}.resume()
+_ = sem.wait(timeout: .now() + 20)
+"""
+CANNOT_FIND_HOST = -1003  # NSURLErrorCannotFindHost
+
+
+@pytest.fixture(scope="module")
+def fetch(tmp_path_factory):
+    """A Swift URLSession client, which looks names up through dnssd.service."""
+    swiftc = shutil.which("swiftc")
+    if not swiftc:
+        pytest.skip("swiftc is needed to build a URLSession client")
+    folder = tmp_path_factory.mktemp("fetch")
+    (folder / "fetch.swift").write_text(FETCH)
+    subprocess.run([swiftc, "-O", "fetch.swift", "-o", "fetch"], cwd=folder, check=True,
+                   capture_output=True, timeout=300)
+    return folder / "fetch"
+
+
+def test_dnssd_cannot_look_up_names_with_the_network_off(fetch):
+    url = "http://example.com/"
+    free = subprocess.run([str(fetch), url], capture_output=True, text=True, timeout=60,
+                          check=False)
+    print("unconfined:", free.stdout.strip())
+    if f"ERROR {CANNOT_FIND_HOST}" in free.stdout or not free.stdout:
+        pytest.skip("example.com does not resolve here even unconfined, so this proves nothing")
+
+    done = jail(
+        f"""
+        import subprocess
+        out = subprocess.run([{str(fetch)!r}, {url!r}], capture_output=True, text=True)
+        print(out.stdout)
+        """,
+        policy=f"Policy(exec=[{str(fetch)!r}])",
+        seal=SEAL,
+    )
+    print("net=False:", done.stdout.strip())
+    # Before the fix the name resolved and only the TCP connect was refused
+    # (ERROR 1, "Operation not permitted"): the lookup itself had left.
+    assert f"ERROR {CANNOT_FIND_HOST}" in done.stdout, (
+        f"the name lookup was not refused, so it left the machine: {done.stdout}{done.stderr}"
+    )
+
+
+def test_the_two_services_are_refused_only_with_the_network_off():
+    from hlyn.core import mac
+    from hlyn.policy import Policy
+
+    for net, refused in ((False, True), ([443], False), (True, False)):
+        text = mac.profile(Policy(net=net), tag="T")
+        print(f"net={net!r}:", [line for line in text.splitlines() if "mach-lookup" in line])
+        for name in ("com.apple.trustd.agent", "com.apple.dnssd.service"):
+            rule = f'(deny mach-lookup (with message "T") (global-name "{name}"))'
+            assert (rule in text) is refused
+            if refused:
+                # Seatbelt takes the last matching rule, so the refusal must
+                # come after the blanket grant or it does nothing.
+                assert text.index(rule) > text.index("(allow mach-lookup)")
+
+
+def test_a_refused_service_is_reported_with_what_to_do():
+    from hlyn.policy import Policy
+    from hlyn.report import Denial, Report
+
+    report = Report(Policy())
+    for name in ("com.apple.trustd.agent", "com.apple.dnssd.service"):
+        report.add(Denial(kind="system", target=name, op="mach-lookup", by="curl", pid=1,
+                          count=1, source="kernel"))
+    report.add(Denial(kind="system", target="com.apple.cfprefsd.daemon", op="mach-lookup",
+                      by="curl", pid=1, count=1, source="kernel"))
+    text = report.text(1, ["curl"])
+    print(text)
+    assert "macOS service com.apple.trustd.agent" in text
+    assert "macOS service com.apple.dnssd.service" in text
+    assert "--net 443" in text
+    assert "cfprefsd" not in text  # plumbing stays out of the list
+    assert report.system == 1
