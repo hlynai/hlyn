@@ -121,7 +121,8 @@ def test_a_proxy_that_does_not_start_is_refused_with_the_fix():
 def test_the_users_own_proxy_is_passed_on_and_a_bad_one_refused():
     way = route.start(RULES, source={"HTTPS_PROXY": "http://proxy.corp:3128", "NO_PROXY": "internal"})
     try:
-        line = subprocess.run(["ps", "-o", "command=", "-p", str(way.pid)], capture_output=True,
+        # -ww: procps cuts the line at 80 columns when stdout is not a terminal.
+        line = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(way.pid)], capture_output=True,
                               text=True, check=False).stdout
         print(line)
         assert "--upstream http://proxy.corp:3128 --skip internal" in line

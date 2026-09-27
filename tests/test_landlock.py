@@ -388,15 +388,19 @@ def test_ipv6_gets_the_same_port_enforcement_as_ipv4():
     # named-port policy reaches Landlock exactly as unfiltered as IPv4 does.
     # If Landlock's own port match were somehow IPv4-only, this is the test
     # that would catch it.
+    # socket.has_ipv6 says how Python was built, not whether this kernel has
+    # IPv6: a container without it answers EAFNOSUPPORT at socket().
+    try:
+        socket.socket(socket.AF_INET6, socket.SOCK_STREAM).close()
+    except OSError as exc:
+        pytest.skip(f"no IPv6 on this machine ({exc})")
     done = jail(
         """
         import socket
-        # Checked before connecting, not caught after: catching every OSError
-        # from the connect below would also catch ConnectionRefusedError, which
-        # means "nothing is listening" and says nothing about the policy -- the
-        # same shape of false pass as trusting any OSError anywhere else.
-        if not socket.has_ipv6:
-            print("NO IPV6"); raise SystemExit(0)
+        # Only PermissionError counts: catching every OSError would also catch
+        # ConnectionRefusedError, which means "nothing is listening" and says
+        # nothing about the policy -- the same shape of false pass as trusting
+        # any OSError anywhere else.
         try:
             socket.create_connection(("::1", 9000), timeout=1)
         except PermissionError:
@@ -406,6 +410,7 @@ def test_ipv6_gets_the_same_port_enforcement_as_ipv4():
         policy="Policy(net=[8080])",
         seal=SEAL,
     )
+    print(done.stdout, done.stderr[-500:])
     assert done.returncode == 0, f"IPv6 bypassed port enforcement: {done.stdout}"
 
 
