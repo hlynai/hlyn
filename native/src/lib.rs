@@ -70,6 +70,9 @@ fn readable() -> BitFlags<AccessFs> {
 /// block node creation are deliberately absent: nothing an agent legitimately
 /// does requires minting a device.
 ///
+/// `ResolveUnix` (ABI 9, Linux 7.1+) is NOT here -- see `bonus` below for why
+/// it cannot be a fixed bit in this mask, and where it is actually added.
+///
 /// `ReadFile` is deliberately **not** here, and the reason is the one bug in
 /// this file that mattered. See `runnable`.
 fn writable() -> BitFlags<AccessFs> {
@@ -84,6 +87,22 @@ fn writable() -> BitFlags<AccessFs> {
         | AccessFs::MakeSock
         | AccessFs::MakeFifo
         | AccessFs::Refer
+}
+
+/// Whether this kernel's real Landlock ABI has `ResolveUnix` (V9, Linux 7.1+).
+///
+/// Measured (`tests/downgrade.rs`, and directly on this file's own test
+/// machine, ABI 7): asking `handle_access` for a right the *running* kernel
+/// does not have, even under `BestEffort`, downgrades `restrict_self` to
+/// `PartiallyEnforced` -- `BestEffort` decides how to react to a kernel that
+/// falls short, it does not make the shortfall invisible. `WANT` is fixed at
+/// the floor this shim always needs (`AbstractUnixSocket`/`Signal` scoping,
+/// V6) for exactly that reason (see its own doc comment). `ResolveUnix` is
+/// optional hardening, not a right any caller depends on to get a seal at
+/// all, so it is requested only when this real, freshly-probed ABI actually
+/// carries it -- never from `WANT`, which must never rise with it.
+fn bonus(real: ABI) -> bool {
+    real >= ABI::V9
 }
 
 /// Execute, and nothing else.
@@ -195,11 +214,14 @@ pub mod marshal {
 /// The ABI this shim is written against.
 ///
 /// The crate's guidance is to name the version whose features you actually use
-/// and let `BestEffort` handle older kernels. V6 is exactly our ceiling: V4
+/// and let `BestEffort` handle older kernels. V6 is exactly our floor: V4
 /// brought network ports and V6 brought scoping, which is what confines signals
-/// and abstract sockets between agents. Naming a newer ABI would request rights
-/// we never use and report `PartiallyEnforced` on a current kernel, turning our
-/// own honesty check into noise.
+/// and abstract sockets between agents. Naming a newer ABI here would request
+/// rights we always want and get downgraded to `PartiallyEnforced` on any
+/// kernel that lacks them, turning our own honesty check into noise -- this is
+/// measured, not assumed (`tests/downgrade.rs`; `bonus`, above, has the same
+/// finding for the one right, V9's `ResolveUnix`, that this shim requests
+/// opportunistically instead of unconditionally).
 const WANT: ABI = ABI::V6;
 
 /// The Landlock ABI the running kernel speaks. Zero means no Landlock.
@@ -248,13 +270,22 @@ unsafe fn build(plan: &Plan) -> Result<RulesetCreated, i32> {
     };
 
     let abi = WANT;
+    // The real, freshly-probed kernel ABI -- used only to decide whether
+    // `ResolveUnix` (V9, Linux 7.1+) can be requested without downgrading
+    // this seal to `PartiallyEnforced` (see `bonus`). `abi` above stays fixed
+    // at the floor `hlyn_seal` always requires, whatever this comes back as.
+    let extra = bonus(ABI::from(hlyn_abi()));
 
     // Handle every right the running kernel understands. Anything handled and
     // not granted is denied, so this is what makes the ruleset deny-by-default
     // rather than an advisory list.
+    let mut fs_access = AccessFs::from_all(abi);
+    if extra {
+        fs_access |= AccessFs::ResolveUnix;
+    }
     let mut ruleset = match Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
-        .handle_access(AccessFs::from_all(abi))
+        .handle_access(fs_access)
     {
         Ok(value) => value,
         Err(_) => return Err(EBUILD),
@@ -288,7 +319,6 @@ unsafe fn build(plan: &Plan) -> Result<RulesetCreated, i32> {
 
     for (paths, pick) in [
         (&reads, readable as Pick),
-        (&writes, writable as Pick),
         (&execs, runnable as Pick),
     ] {
         for path in paths.iter() {
@@ -308,6 +338,32 @@ unsafe fn build(plan: &Plan) -> Result<RulesetCreated, i32> {
                 Err(_) => return Err(ERULE),
             };
         }
+    }
+
+    for path in writes.iter() {
+        let fd = match PathFd::new(path) {
+            Ok(value) => value,
+            Err(_) => return Err(ERULE),
+        };
+        let dir = match directory(&fd) {
+            Some(value) => value,
+            None => return Err(ERULE),
+        };
+        let mut want = fit(writable(), dir, abi);
+        // DESIGN-host-allowlisting.md 5.3: on a kernel new enough, a pathname
+        // unix socket living under a write grant stays connectable, and
+        // Landlock itself now refuses one bound anywhere else -- closing, at
+        // the kernel, the race a gate or a `net=False` seal could otherwise
+        // lose to a multi-threaded agent (measured: 762 of 3000 tries won it
+        // without this bit, FINDINGS.md). Only writes carry it: a read or
+        // exec grant says nothing about what may be dialled.
+        if extra {
+            want |= AccessFs::ResolveUnix;
+        }
+        made = match made.add_rule(PathBeneath::new(fd, want)) {
+            Ok(value) => value,
+            Err(_) => return Err(ERULE),
+        };
     }
 
     if plan.flags & NET != 0 {
@@ -539,6 +595,9 @@ mod tests {
         ] {
             assert!(dir.contains(right), "a writable directory needs {right:?}");
         }
+        // ResolveUnix is never a fixed bit of `writable()` itself -- see
+        // `bonus`'s doc comment and its own tests below.
+        assert!(!dir.contains(AccessFs::ResolveUnix));
         assert!(!dir.contains(AccessFs::ReadFile), "write must not imply read");
     }
 
@@ -574,6 +633,29 @@ mod tests {
         // and visible instead of universal and silent.
         assert!(!on_file(runnable).contains(AccessFs::ReadFile));
         assert!(!on_dir(runnable).contains(AccessFs::ReadFile));
+    }
+
+    #[test]
+    fn bonus_is_true_only_from_v9_up() {
+        // The one bit this shim ever asks for beyond the fixed floor, and
+        // only when the real, live-probed kernel actually has it -- never
+        // from `WANT`, which this file's own doc comment (and
+        // `tests/downgrade.rs`) requires stays put. Below V9, `false` for
+        // every version this crate knows, `Unsupported` included.
+        for abi in [
+            ABI::Unsupported,
+            ABI::V1,
+            ABI::V2,
+            ABI::V3,
+            ABI::V4,
+            ABI::V5,
+            ABI::V6,
+            ABI::V7,
+            ABI::V8,
+        ] {
+            assert!(!bonus(abi), "{abi:?} does not have ResolveUnix");
+        }
+        assert!(bonus(ABI::V9), "V9 is exactly where ResolveUnix landed");
     }
 
     #[test]

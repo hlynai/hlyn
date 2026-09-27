@@ -21,6 +21,18 @@ pytestmark = pytest.mark.skipif(
 
 SEAL = "landlock.load"
 
+if sys.platform == "linux":
+    from hlyn.core import landlock as _landlock
+
+    _ABI = _landlock.abi()
+else:
+    _ABI = 0
+
+_NEED_V9 = pytest.mark.skipif(
+    _ABI < 9,
+    reason=f"needs Landlock ABI 9 (Linux 7.1+); this machine speaks ABI {_ABI}",
+)
+
 
 @pytest.fixture
 def box(tmp_path):
@@ -719,3 +731,57 @@ def test_every_shim_failure_raises_and_says_which(shim, code, why):
     with pytest.raises(Failed) as caught:
         landlock.load(Policy())
     assert why in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# phase 6: ResolveUnix (Landlock ABI 9, Linux 7.1+)
+# ---------------------------------------------------------------------------
+#
+# DESIGN-host-allowlisting.md 5.3: a write grant closes the unix-socket race
+# in the kernel itself, on a kernel new enough. Measured directly on this
+# machine (ABI 7, native/tests/downgrade.rs): asking `handle_access` for a
+# right the real kernel does not have downgrades `restrict_self` to
+# `PartiallyEnforced`, even under `BestEffort` -- so the shim only adds
+# `ResolveUnix` once it has separately probed that the running kernel is V9
+# or newer (native/src/lib.rs, `bonus`). What is testable here, on any
+# kernel, is that this stays true: a write grant seals FULL exactly as before
+# phase 6. What needs a 7.1 kernel is testable nowhere yet.
+
+
+def test_a_write_grant_still_seals_full_below_the_resolveunix_floor(box):
+    # The regression phase 6 could have introduced: requesting ResolveUnix
+    # unconditionally (rather than gated on the real running ABI) reports
+    # PartiallyEnforced on every kernel below ABI 9 -- which `load` treats as
+    # a failed seal, so a write grant that worked yesterday would refuse
+    # outright today. This is that seal, run for real.
+    inside, _ = box
+    done = jail(
+        f"""
+        open({str(inside / 'new.txt')!r}, "w").write("hello")
+        """,
+        policy=f"Policy(write=[{str(inside)!r}])",
+        seal=SEAL,
+    )
+    assert done.returncode == 0, (
+        f"a write grant no longer seals fully on this ABI-{_ABI} kernel:\n{done.stderr}"
+    )
+
+
+@_NEED_V9
+def test_row_3_the_unix_socket_race_is_closed_by_the_kernel_on_7_1(box):
+    # The residual this whole phase exists to close (FINDINGS.md, "Linux: the
+    # unix-socket race is easy to win": 762 of 3000 tries won it without this
+    # bit). On a 7.1+ kernel, a write grant should make the race harness in
+    # test_guard.py come back at 0 of however many it tries, the same way TCP
+    # already does -- run that harness's unix case here once such a kernel is
+    # available, and delete this placeholder for the real thing.
+    pytest.skip("no ABI 9 kernel was available to write this test against")
+
+
+@_NEED_V9
+def test_row_23_unix_datagram_sendmsg_is_refused_by_the_kernel_on_7_1(box):
+    # RESEARCH-host-allowlisting.md open question 4: ResolveUnix covers
+    # sendmsg with a msg_name as well as connect, confirmed from the kernel's
+    # own source (unix_dgram_sendmsg reaches security_unix_find through
+    # unix_find_bsd) but never run against a real 7.1 kernel.
+    pytest.skip("no ABI 9 kernel was available to write this test against")
