@@ -263,10 +263,6 @@ def load(policy: Policy) -> int:
     the kernel applied less than was asked for: a caller that believes it is
     confined and is not is the single worst outcome this package can produce.
     """
-    if policy.hosts():
-        # Host entries aren't ports: never let them reach a rule that reads
-        # them as such. jail.unbuilt refuses first, with the user's message.
-        raise Unsupported("host entries in net are not enforced by this backend yet.")
     api = lib()
     _alone()
 
@@ -297,7 +293,12 @@ def load(policy: Policy) -> int:
         # With net=False that leaves no port rules at all, which denies every
         # TCP bind and connect here as well as in the syscall filter.
         flags |= NET
-        if isinstance(policy.net, tuple):
+        # Host entries (DESIGN-host-allowlisting.md 5.3, layer 1) allow no
+        # port at all: every TCP connect the kernel actually runs is refused,
+        # whatever its address, so nothing is open for an attacker's server
+        # to share (nono GHSA-6hww-cch7-pfrh). The gate swaps each allowed
+        # connection in instead of letting it run.
+        if isinstance(policy.net, tuple) and not policy.hosts():
             # Named ports grant outbound reach only. Binding a port accepts
             # inbound connections, which is a listener an agent should have to
             # ask for separately rather than receive by implication.
@@ -309,7 +310,7 @@ def load(policy: Policy) -> int:
             # can read a host name, so the only reachable alternative is
             # refusing all of UDP, which breaks every hostname lookup. `net`
             # set to False closes both by refusing the socket outright.
-            connects = policy.net
+            connects = tuple(port for port in policy.net if isinstance(port, int))
 
     ra, na = _array(reads)
     wa, nw = _array(writes)

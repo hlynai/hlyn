@@ -21,8 +21,9 @@ from collections.abc import Iterable
 
 from ..error import Failed, Unsupported
 from ..policy import Policy
+from . import notify  # at import time: after the seal nothing more may be loaded
 
-__all__ = ["SHUT", "load", "ready", "why"]
+__all__ = ["SHUT", "busy", "load", "ready", "why"]
 
 
 # -- libseccomp constants ---------------------------------------------------
@@ -30,7 +31,9 @@ __all__ = ["SHUT", "load", "ready", "why"]
 KILL = 0x80000000  # SCMP_ACT_KILL_PROCESS
 ALLOW = 0x7FFF0000  # SCMP_ACT_ALLOW
 ERROR = 0x00050000  # SCMP_ACT_ERRNO(x), errno in the low 16 bits
+NOTIFY = 0x7FC00000  # SCMP_ACT_NOTIFY: ask the gate (host mode)
 EPERM = 1
+EBUSY = 16
 ENOSYS = 38
 EPROTONOSUPPORT = 93
 
@@ -70,6 +73,17 @@ FAMILIES = 46
 # runs. Writing through it still needs CAP_NET_ADMIN, which nothing here has.
 NETLINK = 16
 ROUTE = 0
+
+# Host mode (DESIGN-host-allowlisting.md 5.3, layer 2): an IP socket must be
+# TCP. The type's low four bits are the kind (the rest are SOCK_NONBLOCK and
+# SOCK_CLOEXEC); only SOCK_STREAM passes, so UDP (DNS, QUIC), raw, RDM and
+# seqpacket IP sockets are refused. The protocol must be 0 or TCP: SCTP (132)
+# and MPTCP (262) are stream protocols Landlock's TCP rules don't cover, and
+# they, like every other value, get the answer of a kernel without them, so
+# clients fall back to TCP.
+STREAM = 1
+KINDS = 0xF
+TCP = 6
 
 # Two ways to open a TCP connection that Landlock's port rules do not see.
 # Landlock checks connect(). TCP Fast Open connects from a send call instead,
@@ -319,17 +333,61 @@ def _rule(ctx: int, action: int, name: str, args: Iterable[Arg] = ()) -> None:
         raise Failed(f"could not add a seccomp rule for {name!r}: error {-rc}")
 
 
-def load(policy: Policy) -> None:
+# The refusal when this process is already inside a seccomp notifier (5.2).
+BUSY = (
+    "can't restrict hosts here: this process is already inside a sandbox that filters "
+    "connections (a host-mode hlyn run, LXD, Sysbox, nono or Sandlock), and Linux allows "
+    "only one. The outer sandbox's rules still apply. Use ports (--net 443) or net=False "
+    "here, or run hlyn outside it."
+)
+
+
+def busy() -> bool:
+    """Whether a filter with a notification listener would be refused here
+    (`EBUSY`: the kernel allows one listener per filter chain).
+
+    Asked in a forked child, which tries it for real and exits, so this
+    process is never changed. Called before anything is sealed, so the
+    refusal comes while the caller can still act on it.
+    """
+    import os
+    import struct
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    number = _nr("seccomp")
+    # One instruction: return ALLOW. struct sock_filter, then sock_fprog.
+    code = ctypes.create_string_buffer(struct.pack("=HBBI", 0x06, 0, 0, ALLOW))
+    prog = ctypes.create_string_buffer(struct.pack("=HxxxxxxQ", 1, ctypes.addressof(code)))
+    pid = os.fork()
+    if pid == 0:
+        out = 1
+        try:
+            libc.prctl(38, 1, 0, 0, 0)  # PR_SET_NO_NEW_PRIVS
+            # SECCOMP_SET_MODE_FILTER (1), SECCOMP_FILTER_FLAG_NEW_LISTENER (8)
+            rc = libc.syscall(ctypes.c_long(number), ctypes.c_long(1), ctypes.c_long(8), prog)
+            out = 0 if rc >= 0 else (2 if ctypes.get_errno() == EBUSY else 3)
+        finally:
+            os._exit(out)
+    _, status = os.waitpid(pid, 0)
+    return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2
+
+
+def load(policy: Policy) -> int | None:
     """Compile and install the syscall filter for `policy`.
 
     One-way. Once loaded the filter applies to this process and every thread
     and child it has, and cannot be removed.
+
+    Returns the notification descriptor when `net` names hosts: every
+    `connect()` then waits for an answer on it, so it must be handed to the
+    gate at once and this process's copy closed (5.2, step 5). Otherwise
+    returns None.
     """
-    if policy.hosts():
-        # Host entries aren't ports: never let them reach a rule that reads
-        # them as such. jail.unbuilt refuses first, with the user's message.
-        raise Unsupported("host entries in net are not enforced by this backend yet.")
+    named = bool(policy.hosts())
     api = lib()
+    if named:
+        notify._lib()  # raises, naming the fix, before anything is loaded
     ctx = api.seccomp_init(ALLOW)
     if not ctx:
         raise Failed("libseccomp could not create a filter context")
@@ -383,7 +441,7 @@ def load(policy: Policy) -> None:
                 _rule(ctx, ERROR | EPERM, "socket", [Arg(0, EQ, domain, 0)])
             for name in WIRE:
                 _rule(ctx, ERROR | EPERM, name)
-        elif isinstance(policy.net, tuple):
+        elif isinstance(policy.net, tuple) and not named:
             # Named ports: close the two routes around Landlock (see FASTOPEN).
             # Fast Open is refused outright. It is an optimisation every client
             # can do without, and its flag is a plain register, so the refusal
@@ -397,16 +455,61 @@ def load(policy: Policy) -> None:
             for domain in (INET, INET6):
                 _rule(ctx, ERROR | EPROTONOSUPPORT, "socket",
                       [Arg(0, EQ, domain, 0), Arg(2, MASKED, LOW, MPTCP)])
+        elif named:
+            # Host mode (5.3). Landlock handles TCP with no port allowed, so
+            # a TCP connect the kernel runs is refused whatever its address;
+            # these rules keep every other route shut and send the rest to
+            # the gate. Measured: when a refusing rule and a notify rule both
+            # match a call, the notify rule can win (FINDINGS.md, "Linux
+            # gate primitives"). So every rule below that refuses is disjoint
+            # from every rule that notifies.
+            for name, arg in SENDS.items():
+                _rule(ctx, ERROR | EPERM, name, [Arg(arg, MASKED, FASTOPEN, FASTOPEN)])
+            for domain in (INET, INET6):
+                for kind in range(KINDS + 1):
+                    if kind != STREAM:
+                        _rule(ctx, ERROR | EPERM, "socket",
+                              [Arg(0, EQ, domain, 0), Arg(1, MASKED, KINDS, kind)])
+                # The protocol as an allowlist of 0 and TCP. Compared whole:
+                # a value with upper bits set is >= TCP + 1 and refused.
+                for proto in range(1, TCP):
+                    _rule(ctx, ERROR | EPROTONOSUPPORT, "socket",
+                          [Arg(0, EQ, domain, 0), Arg(2, EQ, proto, 0)])
+                _rule(ctx, ERROR | EPROTONOSUPPORT, "socket",
+                      [Arg(0, EQ, domain, 0), Arg(2, GE, TCP + 1, 0)])
+            # Every connect, of any family: the gate tells unix from TCP by
+            # the socket, not by the address the agent wrote (5.3, layer 3).
+            _rule(ctx, NOTIFY, "connect")
+            # A send that names an address (an unconnected unix datagram
+            # socket sending to a path never calls connect). A NULL address
+            # never leaves the kernel. Disjoint from the Fast Open refusal.
+            _rule(ctx, NOTIFY, "sendto", [Arg(4, NE, 0, 0), Arg(3, MASKED, FASTOPEN, 0)])
 
         if policy.exec is False:
             for name in BIRTH:
                 _rule(ctx, ERROR | EPERM, name)
 
+        ctypes.set_errno(0)
         rc = api.seccomp_load(ctx)
         if rc != 0:
+            # libseccomp's rc can come from one of its earlier feature
+            # probes (measured: -EFAULT when the kernel said EBUSY); errno
+            # holds the kernel's answer to the load itself.
+            code = ctypes.get_errno() or -rc
+            if named and code == EBUSY:
+                raise Unsupported(BUSY + " Nothing past the filesystem rules was applied.")
             raise Failed(
-                f"the kernel refused the syscall filter (error {-rc}). "
+                f"the kernel refused the syscall filter (error {code}). "
                 "The process is NOT confined."
             )
+        if not named:
+            return None
+        fd = int(api.seccomp_notify_fd(ctx))
+        if fd < 0:
+            raise Failed(
+                "the syscall filter loaded but gave no notification descriptor, so no "
+                "connection could ever be answered. The network is closed; nothing reaches it."
+            )
+        return fd
     finally:
         api.seccomp_release(ctx)
