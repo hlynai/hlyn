@@ -43,6 +43,7 @@ EPROTONOSUPPORT = 93
 
 NNP = 3  # SCMP_FLTATR_CTL_NNP
 TSYNC = 4  # SCMP_FLTATR_CTL_TSYNC
+WAITKILL = 10  # SCMP_FLTATR_CTL_WAITKILL, libseccomp 2.6+ (checked against its 2.6.0 header)
 
 NE = 1  # SCMP_CMP_NE
 GE = 5  # SCMP_CMP_GE
@@ -408,6 +409,13 @@ def load(policy: Policy) -> int | None:
         # thread only and every other thread stays unconfined.
         if api.seccomp_attr_set(ctx, TSYNC, 1) != 0:
             raise Failed("libseccomp refused to synchronise the filter across threads")
+        # Host mode: a notified connect() stays put while its thread is sent a
+        # signal, instead of being restarted half-swapped
+        # (SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, Linux 5.19). libseccomp
+        # before 2.6 has no attribute for it and refuses the call; the gate
+        # then answers the restarted call itself (FINDINGS.md, "half").
+        if policy.hosts():
+            api.seccomp_attr_set(ctx, WAITKILL, 1)
 
         # On x86_64 a syscall number can carry the x32 bit. Adding the x32
         # architecture makes libseccomp emit each rule for that convention too,
