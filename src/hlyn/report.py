@@ -131,12 +131,16 @@ class Quiet:
 # ---------------------------------------------------------------------------
 
 # Probes every program makes and nothing can act on: the dynamic loader
-# looking for DTrace on macOS, and CPython listing its open descriptors before
-# starting a subprocess (it falls back to closing them one by one). Exact
+# looking for DTrace on macOS, CPython listing its open descriptors before
+# starting a subprocess (it falls back to closing them one by one), and
+# CPython's allocator reading the kernel's overcommit setting during
+# interpreter start-up on Linux -- still happens with `-I -S`, before any
+# user or site code runs, so it is not something the program did. Exact
 # paths only, so a real read beneath either is still reported.
 NOISE: frozenset[tuple[str, str]] = frozenset({
     ("read", "/dev/dtracehelper"),
     ("read", "/dev/fd"),
+    ("read", "/proc/sys/vm/overcommit_memory"),
 })
 
 def removed(plan: Policy, env: Mapping[str, str]) -> list[str]:
