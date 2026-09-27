@@ -74,6 +74,8 @@ reals! {
     SYMLINKAT = "symlinkat";
     TRUNCATE = "truncate";
     TRUNCATE64 = "truncate64";
+    POPEN = "popen";
+    SYSTEM = "system";
     EXECVE = "execve";
     EXECV = "execv";
     EXECVP = "execvp";

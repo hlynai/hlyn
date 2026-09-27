@@ -171,6 +171,26 @@ def test_a_refused_program_run_by_a_child_is_listed(tmp_path):
 
 
 @here
+@pytest.mark.parametrize("call", ["system", "popen"])
+def test_a_shell_the_c_library_starts_is_listed(tmp_path, call):
+    # glibc starts /bin/sh for system() and popen() through its internal
+    # posix_spawn, which no other wrapper sees; before these two were
+    # wrapped, the run reported nothing (checked against the previous build).
+    done = run(tmp_path, f"""
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.popen.restype = ctypes.c_void_p
+        for _ in range({TRIES}):
+            libc.{call}(b"echo hi", *([b"r"] if "{call}" == "popen" else []))
+    """)
+    execs = [item for item in report(done)["blocked"] if item["kind"] == "exec"]
+    print(execs)
+    assert execs, done.stderr
+    shell = os.path.realpath("/bin/sh")
+    assert execs[0]["allow"] == f"--exec {shell}"
+
+
+@here
 def test_a_refused_port_is_listed_with_its_flag(tmp_path):
     done = run(tmp_path, f"""
         import socket

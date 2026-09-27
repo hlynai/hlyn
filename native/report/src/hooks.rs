@@ -823,6 +823,47 @@ pub unsafe extern "C" fn posix_spawnp(
     rc
 }
 
+// -- the shell ------------------------------------------------------------
+//
+// glibc starts `/bin/sh` for these through its internal `posix_spawn`, which
+// no wrapper above sees. Measured on glibc 2.39: when the shell may not run,
+// `popen` returns NULL with `errno` EACCES, and `system` returns exit status
+// 127 -- as for a command the shell can't find -- with `errno` EACCES. That
+// `errno` is what tells the two apart, so `system` clears it first and puts
+// the program's own value back if the call left it alone.
+
+const SHELL: &[u8] = b"/bin/sh\0";
+
+#[no_mangle]
+pub unsafe extern "C" fn popen(command: *const c_char, mode: *const c_char) -> *mut FILE {
+    let real = next!(POPEN, fn(*const c_char, *const c_char) -> *mut FILE, core::ptr::null_mut());
+    let out = real(command, mode);
+    if out.is_null() {
+        refused(EXEC, b"popen", Target::Path(AT_FDCWD, SHELL.as_ptr().cast()));
+    } else {
+        used(EXEC, b"popen", Target::Path(AT_FDCWD, SHELL.as_ptr().cast()));
+    }
+    out
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn system(command: *const c_char) -> c_int {
+    let real = next!(SYSTEM, fn(*const c_char) -> c_int, -1);
+    let saved = errno();
+    set_errno(0);
+    let rc = real(command);
+    let err = errno();
+    if !command.is_null() && rc == 127 << 8 && (err == EACCES || err == EPERM) {
+        refused(EXEC, b"system", Target::Path(AT_FDCWD, SHELL.as_ptr().cast()));
+    } else if !command.is_null() && rc != -1 {
+        used(EXEC, b"system", Target::Path(AT_FDCWD, SHELL.as_ptr().cast()));
+    }
+    if err == 0 {
+        set_errno(saved); // untouched by the call: the program's own value
+    }
+    rc
+}
+
 // -- the network ----------------------------------------------------------
 
 #[no_mangle]

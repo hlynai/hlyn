@@ -365,7 +365,7 @@ How it hears the refusals, and what it can miss:
 |---|---|---|
 | Source | A tiny library preloaded into the command and its children | The sandbox's own reports, from the system log |
 | Cost | Nothing measurable on calls that succeed | About 50 ms per run |
-| Misses | Statically linked programs (most Go binaries; hlyn says so), and programs started through `system()` / `popen()` | A few percent of reports under heavy system load |
+| Misses | Statically linked programs (most Go binaries; hlyn says so), and children of a program that clears its own environment | A few percent of reports under heavy system load |
 | With hosts | The proxy and the gate report network refusals from outside the sandbox, whatever the program, static binaries included. Past 1,000 different ones, the rest are counted, not listed | The proxy's refusals, as on Linux; direct connections come from the system log as above |
 
 ---
