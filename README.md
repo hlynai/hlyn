@@ -551,7 +551,7 @@ Messages say what to do next, naming the field or flag that would change the out
 | Direct connections to address entries (`10.0.0.5:5432`) | ✅ | ❌ Only through the proxy. `localhost:PORT` entries work directly |
 | Local sockets only in write-granted folders | ✅ Whenever the network isn't open: by the kernel from Linux 7.1, before that by the gate, which connects the socket it checked itself | ✅ |
 | All network off (TCP and UDP) | ✅ | ✅ |
-| Isolation between agents (signals, abstract sockets) | ✅ | Signals ✅, as on Linux (macOS has no abstract sockets). ❌ System services such as the pasteboard are shared |
+| Isolation between agents (signals, abstract sockets) | ✅ | ✅ Signals, as on Linux (macOS has no abstract sockets), and only measured system services: the pasteboard and notifications are refused. With an open network every service is allowed |
 | Dangerous syscalls blocked (`io_uring`, `ptrace`, `mount`, namespaces, kernel modules, `bpf`, …) | ✅ | n/a |
 | Secret environment variables removed | ✅ | ✅ |
 | Report of what was blocked | ✅ | ✅ Best-effort |
@@ -649,8 +649,8 @@ A sandbox that oversells itself is worse than one that doesn't, so here is exact
 | **Writable folders others execute** | Writing into a folder that cron, git hooks or CI later runs is running code outside the sandbox. | Don't grant write to folders something else executes from. |
 | **Hardlinks** | A hardlink planted inside a granted folder beforehand reaches the file it points at. | Don't share granted folders with untrusted writers, and don't run as root. |
 | **GPU workloads** | CUDA writes under `/proc`, which is closed by default because it exposes the environment. | Grant `write=["/proc"]` and remove secrets at the source. |
-| **macOS: shared system services** | Signals stay within each agent's sandbox, as on Linux, but macOS services are shared: two agents on one Mac can pass data through the pasteboard or notifications, and an agent can read or replace what you copied. | Use Linux where cross-agent isolation matters. |
-| **macOS: the working folder** | macOS reports a folder's path only to a program that may read the folder, so `os.getcwd()`, Node, git and shells fail with `Operation not permitted` when the folder they start in isn't granted. Linux doesn't need it. | `--read .`, or a preset that grants the folder (`-p coder`). |
+| **macOS: system services with an open network** | Unless the network is open, only measured system services are allowed (no pasteboard, no notifications, the keychain only with a readable keychain file). With `--net-any` every service is, so two agents can pass data through the pasteboard, and an agent can read or replace what you copied. | Name hosts or ports instead of `--net-any`. |
+| **macOS: the start folder's names** | macOS reports a folder's path only to a program that may read the folder, so hlyn lets a program read the folder it starts in: its path and the names in it, not the files or anything below. On Linux the names stay hidden. | Start the agent in a folder whose names you don't mind it seeing. |
 | **macOS: browsers, Electron and `open`** | Chromium registers system services and sandbox extensions of its own, which hlyn's sandbox refuses, so Chrome, Electron apps and browser automation built on them don't run under hlyn on macOS. `open` can't start apps or open URLs in any mode (the app would run outside the sandbox). | Run them outside hlyn. |
 | **Reports are not complete** | Linux can't see inside static binaries; macOS drops a few percent of reports. | Neither affects enforcement, only the explanation. |
 

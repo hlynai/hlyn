@@ -240,6 +240,24 @@ def test_env_points_every_common_client_at_the_proxy():
     assert got["JAVA_TOOL_OPTIONS"].startswith("-Xmx1g -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=40000")
 
 
+def test_on_macos_clients_check_certificates_from_a_file_not_trustd(monkeypatch):
+    """macOS host mode refuses trustd (it fetches URLs for its caller, 5.4).
+    The openai and anthropic SDKs and pip ask it through `truststore`, so
+    they are pointed at the system's CA file instead (measured: the SDKs
+    follow SSL_CERT_FILE; pip only legacy-certs), unless set already."""
+    monkeypatch.setattr(route.sys, "platform", "darwin")
+    got = route.env(40000, {})
+    print({k: v for k, v in got.items() if k in ("SSL_CERT_FILE", "PIP_USE_DEPRECATED")})
+    if os.path.isfile("/etc/ssl/cert.pem"):
+        assert got["SSL_CERT_FILE"] == "/etc/ssl/cert.pem"
+    assert got["PIP_USE_DEPRECATED"] == "legacy-certs"
+    kept = route.env(40000, {"SSL_CERT_FILE": "/corp/ca.pem", "PIP_USE_DEPRECATED": "other"})
+    assert "SSL_CERT_FILE" not in kept and "PIP_USE_DEPRECATED" not in kept
+    monkeypatch.setattr(route.sys, "platform", "linux")
+    linux = route.env(40000, {})
+    assert "SSL_CERT_FILE" not in linux and "PIP_USE_DEPRECATED" not in linux
+
+
 # ---------------------------------------------------------------------------
 # sockets open before a seal (5.2, row 27)
 # ---------------------------------------------------------------------------

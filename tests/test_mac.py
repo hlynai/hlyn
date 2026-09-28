@@ -479,13 +479,15 @@ def test_the_two_services_are_refused_only_with_the_network_off():
     for net, refused in ((False, True), ([443], False), (True, False)):
         text = mac.profile(Policy(net=net), tag="T")
         print(f"net={net!r}:", [line for line in text.splitlines() if "mach-lookup" in line])
+        # Only an open network grants every service; otherwise the list.
+        assert ("(allow mach-lookup)" in text) is (net is True)
         for name in ("com.apple.trustd.agent", "com.apple.dnssd.service"):
             rule = f'(deny mach-lookup (with message "T") (global-name "{name}"))'
+            allow = f'(allow mach-lookup (global-name "{name}"))'
+            # Refused, and said in the log with the run's tag so the report
+            # can explain; allowed by name with ports (decision 3).
             assert (rule in text) is refused
-            if refused:
-                # Seatbelt takes the last matching rule, so the refusal must
-                # come after the blanket grant or it does nothing.
-                assert text.index(rule) > text.index("(allow mach-lookup)")
+            assert (allow in text) is (net == [443])
 
 
 def test_a_refused_service_is_reported_with_what_to_do():
@@ -505,3 +507,37 @@ def test_a_refused_service_is_reported_with_what_to_do():
     assert "--net 443" in text
     assert "cfprefsd" not in text  # plumbing stays out of the list
     assert report.system == 1
+
+
+def test_a_program_can_find_its_working_folder_and_nothing_more(tmp_path):
+    """macOS reports a folder's path (getcwd) only to a program that may read
+    the folder, so Node, git, shells and os.getcwd() failed in a folder the
+    policy doesn't grant; Linux needs nothing for it (FINDINGS.md). The
+    start folder itself is readable now: its path and its names, never a
+    file in it or a folder below it."""
+    from conftest import boot
+
+    (tmp_path / "secret.txt").write_text("not for the agent")
+    (tmp_path / "below").mkdir()
+    (tmp_path / "below" / "deep.txt").write_text("x")
+    done = boot(f"""
+import os, hlyn
+os.chdir({str(tmp_path)!r})
+def look():
+    out = {{}}
+    for name, fn in (("getcwd", os.getcwd), ("names", lambda: sorted(os.listdir("."))),
+                     ("read a file", lambda: open("secret.txt").read()),
+                     ("list below", lambda: os.listdir("below"))):
+        try:
+            out[name] = fn()
+        except OSError as exc:
+            out[name] = type(exc).__name__
+    return out
+print(hlyn.run(look, log=False))
+""")
+    print(done.stdout, done.stderr[-500:])
+    got = eval(done.stdout.strip())  # noqa: S307 - our own child's dict
+    assert got["getcwd"] == os.path.realpath(tmp_path) or got["getcwd"] == str(tmp_path)
+    assert got["names"] == ["below", "secret.txt"]
+    assert got["read a file"] == "PermissionError"
+    assert got["list below"] == "PermissionError"

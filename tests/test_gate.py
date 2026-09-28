@@ -67,11 +67,35 @@ def test_the_exit_code_comes_back_unchanged(code):
     assert got == code
 
 
-@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGSEGV, signal.SIGKILL, signal.SIGUSR1])
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGSEGV, signal.SIGABRT, signal.SIGKILL,
+                                    signal.SIGUSR1])
 def test_a_death_by_signal_comes_back_as_that_signal(number):
+    """As tini does, the gate dies by the command's signal. Except on macOS
+    for a signal that makes a crash report (SIGSEGV, SIGABRT and the like):
+    there a Python dying of it is reported as "Python quit unexpectedly",
+    blaming hlyn for the command's crash, so the gate exits with 128 + the
+    signal instead, the status a shell gives for that death."""
+    reports = _reports()
     got, _, _ = finish(start("forward", "/bin/sh", "-c", f"kill -{int(number)} $$"))
-    print(f"wanted -{int(number)} ({number.name})")
-    assert got == -number
+    crash = sys.platform == "darwin" and number in (signal.SIGSEGV, signal.SIGABRT)
+    want = 128 + number if crash else -number
+    new = _reports() - reports
+    for _ in range(30 if number in (signal.SIGSEGV, signal.SIGABRT) else 0):
+        if new:
+            break
+        time.sleep(0.1)  # macOS writes a crash report a moment after the death
+        new = _reports() - reports
+    print(f"got {got}, wanted {want} ({number.name}); new Python crash reports: {sorted(new)}")
+    assert got == want
+    assert not new, "the gate left a crash report"
+
+
+def _reports() -> set[str]:
+    """Python crash reports macOS has written for this user (read only)."""
+    where = os.path.expanduser("~/Library/Logs/DiagnosticReports")
+    if sys.platform != "darwin" or not os.path.isdir(where):
+        return set()
+    return {name for name in os.listdir(where) if name.startswith("Python")}
 
 
 def test_the_gate_keeps_the_original_pid_and_the_command_is_its_child():

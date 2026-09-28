@@ -173,6 +173,20 @@ HOSTED: dict[str, str] = {
     ),
 }
 
+# macOS services outside the allowlist that a user will meet (core/mac.py):
+# what each is, and what allows it. Every other refused service is plumbing.
+SHARED: dict[str, tuple[str, str]] = {
+    "com.apple.SecurityServer": (
+        "the keychain",
+        "allowed when the agent may read a keychain file, e.g. --read ~/Library/Keychains/login.keychain-db "
+        "(a credential: only if it should have your passwords)",
+    ),
+    "com.apple.pasteboard.1": (
+        "the pasteboard",
+        "shared with every other program, so only an open network allows it (--net-any)",
+    ),
+}
+
 # What each of the proxy's reasons (4.6) means, for the report.
 WHY: dict[str, str] = {
     "not-listed": "",
@@ -446,6 +460,9 @@ class Report:
             return Entry("net", f"macOS service {target}", "--net 443",
                          f"{SERVICES[target]} on the program's behalf; refused while net is off",
                          source=denial.source)
+        if kind == "system" and denial.op == "mach-lookup" and target in SHARED:
+            what, note = SHARED[target]
+            return Entry("system", f"{what} ({target})", None, note, source=denial.source)
         if kind == "system" and denial.op == "lsopen":
             # macOS: `open`, or LaunchServices called directly. Never allowed
             # in any mode: the app, or the browser for a URL, would run outside
@@ -602,6 +619,11 @@ class Report:
         if not head.isdigit():
             return None
         port = int(head)
+        if port == 0:
+            # Nothing can listen on port 0, so no connect to it succeeds, and
+            # no entry names it (1-65535): nothing to allow. Seen from pip
+            # on macOS.
+            return None
         net = self.plan.net
         anywhere = rest in ("", "*", "0.0.0.0", "::")  # noqa: S104 - read from a report, not bound
         shown = f"TCP {port}" + ("" if anywhere else f" ({safe(rest)})")

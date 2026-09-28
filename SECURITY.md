@@ -47,10 +47,14 @@ docstrings, and in the error messages:
 - **What naming hosts does not stop**, listed below: data sent to a host you
   allowed, domain fronting, unix datagrams sent with `sendmsg` on Linux before
   7.1, and the rest.
-- **macOS agents share system services.** Signals stay within each agent's
-  sandbox, as Landlock scopes them on Linux, but macOS services such as the
-  pasteboard and notifications are shared: two agents on one Mac can pass data
-  through them. `hlyn probe` reports this.
+- **macOS: an open network shares system services.** Unless the network is
+  open, an agent reaches only measured system services (no pasteboard, no
+  notifications, the keychain only with a readable keychain file). With
+  `--net-any`, every service is allowed, so two agents on one Mac can pass
+  data through the pasteboard.
+- **macOS: the start folder's names.** A program may read the folder it starts
+  in (its path and the names in it, not the files), because macOS reports a
+  folder's path only to a program that may read it.
 - **A kernel below Landlock ABI 6 cannot be used.** hlyn refuses to seal rather
   than enforcing part of the policy.
 - **A policy that grants something dangerous is doing as it was told.**

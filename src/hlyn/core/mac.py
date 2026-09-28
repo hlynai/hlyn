@@ -52,7 +52,8 @@ BASE: tuple[str, ...] = (
     # `subprocess.run(timeout=...)` failed (tests/test_signals.py).
     "(allow signal (target same-sandbox))",
     "(allow sysctl-read)",
-    "(allow mach-lookup)",
+    # System services: a measured allowlist (`MACH`, `services`), or all of
+    # them with an open network (`(allow mach-lookup)`, added by `profile`).
     "(allow file-read-metadata)",
     # The root directory node itself, and nothing inside it. A freshly exec'd
     # process resolves every path from `/`, and a `subpath` rule on a child
@@ -74,11 +75,13 @@ BASE: tuple[str, ...] = (
 # The system resolver's socket. Every name lookup on macOS goes through it.
 RESOLVER = "/private/var/run/mDNSResponder"
 
-# Host mode's Mach allowlist (DESIGN-host-allowlisting.md 5.4), in place of
-# BASE's blanket `(allow mach-lookup)`. Every entry is measured, and checked
-# for work done on the caller's behalf (tools/hostlab/hostmode.py; FINDINGS.md,
-# "macOS host mode"). Python, curl, git and node fetch through the proxy with
-# none at all.
+# The Mach allowlist for every mode but an open network (DESIGN-host-
+# allowlisting.md 5.4, gap 8.3). Every entry is measured, and checked for work
+# done on the caller's behalf (tools/hostlab/hostmode.py, machlab.py;
+# FINDINGS.md, "macOS host mode", "which Mach services programs need").
+# curl, Python, Node, git, Java and clang need none at all. Left out on
+# purpose: the pasteboard and the notification centre, which carried data
+# between two separately sealed agents (measured), and everything unmeasured.
 #   - opendirectoryd.libinfo answers user and group lookups. Without it
 #     `pwd.getpwuid()` fails, which breaks real programs. It resolves no host
 #     names (those still go to the refused mDNSResponder socket; measured).
@@ -89,11 +92,36 @@ RESOLVER = "/private/var/run/mDNSResponder"
 #     sandbox for both reading and writing (measured: `defaults read` and
 #     `defaults write` of a domain outside the grants both fail under the
 #     seal), and does no network work.
+#   - opendirectoryd.membership answers group-membership checks; Swift and
+#     swiftc need it (measured). Same daemon and residual as libinfo.
 MACH: tuple[str, ...] = (
     "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership",
     "com.apple.cfprefsd.daemon",
     "com.apple.cfprefsd.agent",
 )
+
+# The keychain's service. Measured: it returns an item only from a keychain
+# file the caller may read, but it also lets a caller lock every one of the
+# user's keychains. So it comes with a readable keychain file and not
+# otherwise (`keychains`).
+KEYCHAIN = "com.apple.SecurityServer"
+
+
+def keychains(policy: Policy) -> bool:
+    """Whether `policy` lets the program read a keychain file."""
+    reads = policy.reads()
+    if reads is True:
+        return True
+    places = [real(os.path.expanduser("~/Library/Keychains")), "/Library/Keychains"]
+    for item in reads:
+        path = real(item)
+        if path.endswith((".keychain", ".keychain-db")):
+            return True
+        if any(path == place or path.startswith(place + "/") or place.startswith(path.rstrip("/") + "/")
+               for place in places):
+            return True
+    return False
 
 # Unix sockets never reachable in host mode, whatever folders are granted
 # (5.3, 5.6): the program behind each acts for its caller, on the network or
@@ -159,13 +187,12 @@ def probe() -> dict[str, object]:
         "seatbelt": ready(),
         "enforce": ready(),
         # Signals are scoped to each agent's sandbox, as Landlock scopes them
-        # (`(target same-sandbox)`), and macOS has no abstract sockets. But the
-        # blanket `mach-lookup` grant leaves system services shared: two agents
-        # can pass data through the pasteboard or notifyd (measured, FINDINGS.md).
-        # So not isolated, and said plainly rather than left to be discovered.
-        "scope": False,
-        "scope_why": "signals stay in each agent's sandbox, but macOS services such as the pasteboard "
-                     "are shared; use Linux where this matters",
+        # (`(target same-sandbox)`), and macOS has no abstract sockets. System
+        # services are the measured allowlist unless the network is open, so
+        # the pasteboard no longer carries data between agents (measured,
+        # tests/test_mach.py); an open network allows every service.
+        "scope": ready(),
+        "scope_why": "with --net-any every system service, the pasteboard included, is shared",
         "ports": ready(),
         # Host names in `net`: the proxy (5.5) behind a profile that allows
         # only its port (5.4).
@@ -243,11 +270,7 @@ def profile(policy: Policy, tag: str | None = None, port: int | None = None) -> 
     if named and port is None:
         raise Invalid("net names hosts, so the profile needs the proxy's port. Start it with route.start().")
     deny = f"(deny default (with message {quote(tag)}))" if tag else "(deny default)"
-    base = BASE
-    if named:
-        base = tuple(line for line in BASE if line != "(allow mach-lookup)")
-        base += tuple(f'(allow mach-lookup (global-name "{name}"))' for name in MACH)
-    lines = ["(version 1)", deny, *base]
+    lines = ["(version 1)", deny, *BASE, *services(policy), *start()]
     refused: list[str] = []
 
     reads = policy.reads()
@@ -333,6 +356,35 @@ def profile(policy: Policy, tag: str | None = None, port: int | None = None) -> 
             lines.append(f'(deny mach-lookup{said} (global-name "{name}"))')
 
     return "\n".join(lines)
+
+
+def start() -> list[str]:
+    """The folder the program starts in, itself only: its path and the names
+    in it, never a file in it or a folder below it. macOS reports a folder's
+    path (getcwd) only to a program that may read the folder, so without it
+    `os.getcwd()`, Node, git and shells fail in a folder the policy doesn't
+    grant (measured, FINDINGS.md); Linux needs nothing for it. `literal`
+    matches that one folder."""
+    try:
+        here = real(os.getcwd())
+    except OSError:
+        return []
+    return [f"(allow file-read-data (literal {quote(here)}))"]
+
+
+def services(policy: Policy) -> list[str]:
+    """The system services (Mach) `policy` allows: all of them with an open
+    network; otherwise `MACH`, plus trustd and dnssd with ports (which
+    already allow HTTPS to any host, so they add no new reach: decision 3),
+    plus the keychain's service with a readable keychain file."""
+    if policy.net is True:
+        return ["(allow mach-lookup)"]
+    names = list(MACH)
+    if isinstance(policy.net, tuple) and policy.net and not policy.hosts():
+        names += list(SERVICES)
+    if keychains(policy):
+        names.append(KEYCHAIN)
+    return [f'(allow mach-lookup (global-name "{name}"))' for name in names]
 
 
 def hosts(policy: Policy, port: int, tag: str | None = None) -> list[str]:

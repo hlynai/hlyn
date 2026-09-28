@@ -499,7 +499,22 @@ def env(port: int, base: Mapping[str, str] | None = None) -> dict[str, str]:
             f"-Dhttp.nonProxyHosts=localhost|127.*|[::1]")
     before = (base or {}).get("JAVA_TOOL_OPTIONS", "")
     out["JAVA_TOOL_OPTIONS"] = f"{before} {java}".strip()
+    if sys.platform == "darwin":
+        # Host mode refuses trustd, which fetches URLs for its caller (5.4).
+        # The openai and anthropic SDKs and pip check certificates through
+        # it (`truststore`); pointed at the system's CA file they don't
+        # need it (measured: the SDKs follow SSL_CERT_FILE, pip only its
+        # legacy-certs switch). Left alone if the user set them.
+        have = base or {}
+        if "SSL_CERT_FILE" not in have and os.path.isfile(CERTS):
+            out["SSL_CERT_FILE"] = CERTS
+        if "PIP_USE_DEPRECATED" not in have:
+            out["PIP_USE_DEPRECATED"] = "legacy-certs"
     return out
+
+
+# macOS's own bundle of public certificate authorities.
+CERTS = "/etc/ssl/cert.pem"
 
 
 # ---------------------------------------------------------------------------

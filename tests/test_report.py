@@ -753,6 +753,40 @@ def test_the_gates_refusals_become_lines_with_the_flag_that_allows_each(tmp_path
     assert all(entry.source == "gate" for entry in got.values())
 
 
+def test_the_keychain_and_the_pasteboard_are_explained_not_counted_as_plumbing(tmp_path):
+    """macOS allows only measured services unless the network is open. Two
+    refusals a user will meet are worth a line each: the keychain's service
+    (it comes with a readable keychain file) and the pasteboard (shared with
+    every program, so only an open network allows it)."""
+    from hlyn.policy import Policy
+    from hlyn.report import Denial, Report
+
+    report = Report(Policy())
+    keychain = report.add(Denial(kind="system", target="com.apple.SecurityServer", op="mach-lookup",
+                                 by="git-credential-osxkeychain", pid=1, count=1, source="kernel"))
+    pasteboard = report.add(Denial(kind="system", target="com.apple.pasteboard.1", op="mach-lookup",
+                                   by="pbcopy", pid=1, count=1, source="kernel"))
+    for entry in (keychain, pasteboard):
+        print(entry.target, "| allow", entry.allow, "|", entry.note)
+    assert keychain.target == "the keychain (com.apple.SecurityServer)"
+    assert "--read ~/Library/Keychains/login.keychain-db" in keychain.note and keychain.allow is None
+    assert pasteboard.target == "the pasteboard (com.apple.pasteboard.1)"
+    assert "--net-any" in pasteboard.note and pasteboard.allow is None
+
+
+def test_a_connection_to_port_0_suggests_no_flag(tmp_path):
+    """Seen from pip on macOS: a refused connect to port 0. No entry can name
+    port 0 (1-65535), so no flag is suggested."""
+    from hlyn.policy import Policy
+    from hlyn.report import Denial, Report
+
+    for net in (["pypi.org"], [443], False):
+        entry = Report(Policy(net=net)).add(Denial(kind="net", target="0 *", op="connect", by="python3",
+                                                   pid=1, count=1, source="kernel"))
+        print(net, "->", entry)
+        assert entry is None or (entry.allow is None and ":0" not in (entry.note or ""))
+
+
 def test_a_unix_send_to_a_path_and_a_bound_socket_are_explained(tmp_path):
     """The two unix refusals the pinned swap adds (guard._unix): each says
     what to change in the program, since no grant makes them race-free."""

@@ -63,6 +63,11 @@ __all__ = ["become", "detached", "drop", "hand", "main", "prepare", "relay"]
 # of the terminal. SIGCONT is forwarded, by its own handler.
 KEEP = {signal.SIGKILL, signal.SIGSTOP, signal.SIGCHLD, signal.SIGTTIN, signal.SIGTTOU}
 
+# Signals whose default action dumps core: on macOS a process that dies of
+# one gets a crash report and a "quit unexpectedly" dialog (measured).
+REPORTED = {signal.SIGQUIT, signal.SIGILL, signal.SIGTRAP, signal.SIGABRT, signal.SIGFPE,
+            signal.SIGBUS, signal.SIGSEGV, signal.SIGSYS}
+
 # Whether the gate has work beyond waiting and passing on signals on this
 # platform. On Linux it answers the kernel's connection checks (5.3); on
 # macOS it has none. A gate that only waits needs no fresh interpreter:
@@ -392,6 +397,11 @@ def relay(child: int, *, forward: bool, terminal: int | None, guard: Guard | Non
     if os.WIFEXITED(status):
         return os.WEXITSTATUS(status)
     death = os.WTERMSIG(status)
+    if sys.platform == "darwin" and death in REPORTED:
+        # Dying of it would have macOS show "Python quit unexpectedly",
+        # blaming hlyn for the command's crash (the command's own report is
+        # already made). Exit as a shell reports that death instead.
+        return 128 + death
     import resource
 
     with contextlib.suppress(OSError, ValueError):

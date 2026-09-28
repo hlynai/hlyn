@@ -112,10 +112,13 @@ def test_host_mode_needs_the_proxy_port():
     assert "proxy's port" in str(caught.value)
 
 
-def test_port_mode_is_unchanged():
+def test_port_mode_allows_the_measured_services_and_the_two_that_reach_the_network():
     text = mac.profile(Policy(net=[443]), None)
-    print(text.splitlines()[-4:])
-    assert "(allow mach-lookup)" in text and '(remote tcp "*:443")' in text
+    print([line for line in text.splitlines() if "mach-lookup" in line or "443" in line])
+    assert '(remote tcp "*:443")' in text
+    assert "(allow mach-lookup)" not in text
+    for name in (*mac.MACH, "com.apple.trustd.agent", "com.apple.dnssd.service"):
+        assert f'(allow mach-lookup (global-name "{name}"))' in text
 
 
 # ---------------------------------------------------------------------------
