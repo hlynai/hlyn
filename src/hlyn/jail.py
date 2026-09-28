@@ -801,6 +801,10 @@ def _script(
     real = os.path.realpath(target)
     if interpreter.python(target, real):
         plan, run = interpreter.grants(interpreter.ask(target, real), plan, real)
+        # By the path the line names, as `_prepare` runs a Python command,
+        # unless a launcher was followed: a venv's python is a link, and only
+        # through the link does the interpreter know it is in the venv.
+        run = run if run != real else target
         options = [word for arg in words for word in arg.split()]
         return run, [run, *options, named, *cmd[1:]], plan
     runs: list[str] = []

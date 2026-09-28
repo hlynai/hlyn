@@ -235,6 +235,22 @@ def test_a_virtualenv_runs_with_its_own_packages(tmp_path, venv):
 
 
 @here
+def test_a_virtualenvs_own_script_runs_in_the_virtualenv(tmp_path, venv):
+    """A console script a venv installs (`pip`, `pytest`, `black`) starts with
+    `#!VENV/bin/python`, a link to the base interpreter. Run by its real path
+    the interpreter doesn't know it is in the venv, and the script's imports
+    fail: found running `hlyn run -- .venv/bin/pip install six`
+    (tools/hostlab/watchlab.sh). Run by the path its first line names."""
+    tool = venv / "bin" / "tool"
+    body = "import sys, onlyhere\nprint('UP', onlyhere.WHERE, sys.prefix)\n"
+    tool.write_text(f"#!{venv / 'bin' / 'python'}\n{body}")
+    tool.chmod(0o755)
+    done = hlyn("run", "--no-log", "--no-report", "--read", str(tmp_path), "--", str(tool), cwd=str(tmp_path))
+    print(done.stdout, done.stderr[-600:])
+    assert "UP venv" in done.stdout, done.stderr
+
+
+@here
 def test_a_launcher_script_runs_the_interpreter_it_names(tmp_path, venv):
     # pyenv and asdf put a small script called `python` first on PATH that
     # starts the real interpreter. It is followed rather than refused.

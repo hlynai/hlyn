@@ -15,6 +15,7 @@ runtime sockets, by symlink and relative path), 23 (unix datagram to a path),
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import ipaddress
 import os
@@ -122,7 +123,7 @@ class Proxy:
 
 
 def gated(body: str, *, net: list[str], write: list[str] = (), read: list[str] = (), proxy: Proxy,
-          reduced: bool = False, preload: str = "", timeout: float = 60):
+          reduced: bool = False, preload: str = "", timeout: float = 60, env: dict | None = None):
     """Run `body` sealed for `net`; the real Guard answers. Returns the
     child's output and the events the gate reported."""
     from hlyn.core import guard
@@ -132,7 +133,8 @@ def gated(body: str, *, net: list[str], write: list[str] = (), read: list[str] =
     code = (AGENT.replace("NET", repr(net)).replace("WRITE", repr(list(write)))
             .replace("READ", repr([SRC, *read])).replace("PRELOAD", preload) + textwrap.dedent(body))
     child = subprocess.Popen([sys.executable, "-c", code, str(theirs.fileno())], pass_fds=[theirs.fileno()],
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             env=None if env is None else {**os.environ, **env})
     theirs.close()
     ours.settimeout(timeout)
     try:
@@ -607,13 +609,35 @@ def test_reduced_mode_swaps_tcp_as_unknown_and_refuses_unix(proxy):
 RACE = os.path.join(ROOT, "tools", "hostlab", "race.c")
 
 
+# Long runs (REMAINING part 1 #16): HLYN_RACE tries (default 3,000), and
+# HLYN_RACE_SANITIZE=address or thread to build the racing program with
+# AddressSanitizer or ThreadSanitizer, which changes its timing and checks
+# its own memory and threads while it races.
+TRIES = int(os.environ.get("HLYN_RACE", "3000"))
+SANITIZE = os.environ.get("HLYN_RACE_SANITIZE", "")
+
+
 def _race_library() -> str:
     out = os.path.join(tempfile.mkdtemp(prefix="hlyn-race-"), "race.so")
-    done = subprocess.run(["cc", "-O2", "-shared", "-fPIC", "-pthread", "-o", out, RACE],
+    flags = ["-O2"] if not SANITIZE else ["-O1", "-g", f"-fsanitize={SANITIZE}", "-fno-omit-frame-pointer"]
+    done = subprocess.run(["cc", *flags, "-shared", "-fPIC", "-pthread", "-o", out, RACE],
                           capture_output=True, text=True, check=False)
     if done.returncode != 0:
         pytest.skip(f"no C compiler for the race harness: {done.stderr[-300:]}")
     return out
+
+
+def _runtime() -> dict[str, str]:
+    """The environment that loads a sanitizer's runtime first, as it must be
+    when the sanitized library is loaded into a Python that isn't."""
+    if not SANITIZE:
+        return {}
+    name = {"address": "libasan.so", "thread": "libtsan.so"}[SANITIZE]
+    found = subprocess.run(["cc", f"-print-file-name={name}"], capture_output=True, text=True,
+                           check=True).stdout.strip()
+    return {"LD_PRELOAD": os.path.realpath(found), "ASAN_OPTIONS": "detect_leaks=0:abort_on_error=1",
+            "TSAN_OPTIONS": "report_signal_unsafe=0:halt_on_error=1:"
+                            f"suppressions={os.path.join(ROOT, 'tools', 'hostlab', 'race.tsan')}"}
 
 
 @pytest.mark.skipif(not any(os.access(os.path.join(p, "cc"), os.X_OK)
@@ -623,7 +647,7 @@ def test_row_3_racing_the_address_never_connects_tcp_anywhere_but_the_proxy(prox
     the proxy and a listener on the same port at 127.0.0.2. The gate never
     lets a TCP connect run, so that listener must get nothing."""
     library = _race_library()
-    iterations = int(os.environ.get("HLYN_RACE", "3000"))
+    iterations = TRIES
     evil = socket.socket()
     evil.bind(("127.0.0.2", proxy.port))
     evil.listen(4096)
@@ -639,7 +663,9 @@ def test_row_3_racing_the_address_never_connects_tcp_anywhere_but_the_proxy(prox
                       {iterations}, 4, out)
         took = __import__("time").monotonic() - began
         print("connected", out[0], "refused", out[1], "other", out[2], f"in {{took:.1f}} s", flush=True)
-    """, net=["example.com"], proxy=proxy, preload=f"race = ctypes.CDLL({library!r})", timeout=600)
+    """, net=["example.com"], proxy=proxy, preload=f"race = ctypes.CDLL({library!r})",
+       timeout=max(600, iterations / 50), env=_runtime())
+    print(f"{iterations} tries, sanitizer: {SANITIZE or 'none'}")
     reached = 0
     while True:
         try:
@@ -682,12 +708,27 @@ def test_row_3_unix_race(proxy, where):
         server.listen(4096)
         server.setblocking(False)
         servers.append(server)
+    served = threading.Event()
+
+    def drain() -> None:  # the allowed listener's queue never fills
+        while not served.is_set():
+            ready, _, _ = __import__("select").select([servers[0]], [], [], 0.2)
+            if ready:
+                with contextlib.suppress(OSError):
+                    servers[0].accept()[0].close()
+
+    drainer = threading.Thread(target=drain, daemon=True)
+    drainer.start()
     out, _ = gated(f"""
         out = (ctypes.c_int * 3)()
-        race.race_unix({allowed.encode()!r}, {refused.encode()!r}, 3000, 4, out)
-        print("connected", out[0], "refused", out[1], "other", out[2], flush=True)
+        began = __import__("time").monotonic()
+        race.race_unix({allowed.encode()!r}, {refused.encode()!r}, {TRIES}, 4, out)
+        took = __import__("time").monotonic() - began
+        print("connected", out[0], "refused", out[1], "other", out[2], f"in {{took:.1f}} s", flush=True)
     """, net=["example.com"], write=[box], proxy=proxy, preload=f"race = ctypes.CDLL({library!r})",
-       timeout=600)
+       timeout=max(600, TRIES / 50), env=_runtime())
+    served.set()
+    drainer.join()
     won = 0
     while True:
         try:
@@ -696,7 +737,8 @@ def test_row_3_unix_race(proxy, where):
         except OSError:
             break
     abi = landlock.abi()
-    print(f"Landlock ABI {abi}, refused socket {where} the grant: races won {won} of 3000 "
+    print(f"Landlock ABI {abi}, sanitizer {SANITIZE or 'none'}, refused socket {where} the grant: "
+          f"races won {won} of {TRIES} "
           f"(reached {refused}); must be 0")
     counts = out.split()
     assert int(counts[1]) > 0 and int(counts[3]) > 0

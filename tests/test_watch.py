@@ -106,28 +106,123 @@ def test_the_hook_never_raises_on_a_malformed_event(clean):
 # -- turning observations into a draft --------------------------------------
 
 
-def test_two_files_in_one_directory_become_the_directory(clean):
-    observed({("read", "/data/a.json"), ("read", "/data/b.json")})
-    assert watch.suggest().read == ("/data",)
+def files(root, *names: str) -> list[str]:
+    """Real files under `root` (the draft leaves out paths that don't exist)."""
+    out = []
+    for name in names:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x")
+        out.append(str(path))
+    return out
 
 
-def test_a_lone_file_stays_a_file(clean):
-    observed({("read", "/data/only.json")})
-    assert watch.suggest().read == ("/data/only.json",)
+@pytest.fixture
+def data(tmp_path, monkeypatch):
+    """A project folder outside the temp folder, which the draft skips."""
+    home = tmp_path.parent / f"{tmp_path.name}-home"
+    home.mkdir()
+    monkeypatch.setattr(watch.tempfile, "gettempdir", lambda: str(tmp_path / "not-here"))
+    return home
 
 
-def test_the_interpreters_own_files_are_left_out(clean):
+def test_two_files_in_one_directory_become_the_directory(clean, data):
+    a, b = files(data / "data", "a.json", "b.json")
+    observed({("read", a), ("read", b)})
+    assert watch.suggest().read == (str(data / "data"),)
+
+
+def test_a_lone_file_stays_a_file(clean, data):
+    (only,) = files(data / "data", "only.json")
+    observed({("read", only)})
+    assert watch.suggest().read == (only,)
+
+
+def test_the_interpreters_own_files_are_left_out(clean, data):
     """Every policy grants them anyway; listing them buries the real decisions."""
-    observed({("read", os.path.join(sys.prefix, "lib", "thing.py")), ("read", "/data/mine.json")})
-    assert watch.suggest().read == ("/data/mine.json",)
+    (mine,) = files(data / "data", "mine.json")
+    observed({("read", os.path.join(sys.prefix, "lib", "os.py")), ("read", mine)})
+    assert watch.suggest().read == (mine,)
 
 
-def test_a_written_path_is_not_repeated_as_a_read(clean):
+def test_a_written_path_is_not_repeated_as_a_read(clean, data):
     """Granting write already grants read, so saying both is noise."""
-    observed({("write", "/out/a"), ("write", "/out/b"), ("read", "/out/a")})
+    a, b = files(data / "out", "a", "b")
+    observed({("write", a), ("write", b), ("read", a)})
     plan = watch.suggest()
-    assert plan.write == ("/out",)
+    assert plan.write == (str(data / "out"),)
     assert plan.read == ()
+
+
+def test_a_path_that_does_not_exist_is_left_out(clean, data):
+    """Found in real runs: a program started by name is looked for along PATH,
+    and each miss was drafted as a program to allow; `hlyn run` then refused
+    the draft, since a path that doesn't exist can't be granted. A read of a
+    file that isn't there is the same kind of probe."""
+    (tool,) = files(data / "bin", "tool")
+    observed({("exec", "/usr/local/sbin/no-such-tool"), ("exec", tool),
+              ("read", str(data / "missing.cfg"))})
+    plan = watch.suggest()
+    print(plan)
+    assert plan.exec == (tool,) and plan.read == ()
+
+
+def test_a_file_the_run_created_is_granted_by_its_folder(clean, data):
+    """Creating a file needs its folder: a grant on the file alone refuses the
+    next run, which starts before it exists (found: an agent writing
+    out/report.json)."""
+    (data / "out").mkdir()
+    observed({("write", str(data / "out" / "report.json"))})
+    assert watch.suggest().write == (str(data / "out"),)
+
+
+def test_a_written_path_is_granted_by_its_folder_unless_that_is_too_wide(clean, data, monkeypatch):
+    """Writing is granted by folder: a tool that saves by writing a temporary
+    file and renaming it, or that creates what it writes (git clone's new
+    folder, found in tools/hostlab/watchlab.sh), needs the folder, which the
+    next run starts without. Not the home folder, though: a file written
+    there stays a file."""
+    monkeypatch.setenv("HOME", str(data))
+    (notes,) = files(data / "notes", "today.md")
+    (rc,) = files(data, ".toolrc")
+    observed({("write", notes), ("write", rc), ("write", str(data / "clone")),
+              ("write", str(data / "clone" / "README"))})
+    plan = watch.suggest()
+    print(plan.write)
+    assert str(data / "notes") in plan.write and rc in plan.write
+    assert str(data) not in plan.write
+    # A folder the run made in the home folder is named itself: its parent is
+    # too wide to grant on a guess.
+    assert str(data / "clone") in plan.write
+
+
+def test_a_wide_folder_read_whole_is_left_out(clean, data):
+    """pip lists /etc (its `distro` check), which recorded `/etc` as a read and
+    drafted all of it, /etc/shadow included. Measured: pip installs with the
+    listing refused, since the files it wants are granted by every policy.
+    So a folder too wide to grant on a guess is left out when read whole;
+    files read in it stay."""
+    observed({("read", "/etc"), ("read", "/etc/hosts")})
+    plan = watch.suggest()
+    print(plan.read)
+    assert "/etc" not in plan.read and "/etc/hosts" in plan.read
+
+
+def test_never_collapsed_into_a_top_folder_proc_or_a_folder_holding_credentials(clean, data):
+    """Two files in /etc became `/etc` (hlyn then warned /etc/shadow was
+    exposed), and npm's /proc reads became `/proc`, every process's
+    environment. The draft keeps the files instead."""
+    keyed = data / "config"
+    a, b = files(keyed, "app.toml", "db.toml")
+    (keyed / ".env").write_text("API_KEY=sk-live-not-real")
+    observed({("read", "/etc/hosts"), ("read", "/etc/passwd"), ("read", a), ("read", b),
+              *(("read", f"/proc/{os.getpid()}/{name}") for name in ("stat", "status")
+                if sys.platform == "linux")})
+    plan = watch.suggest()
+    print(plan.read)
+    assert "/etc" not in plan.read and "/etc/hosts" in plan.read and "/etc/passwd" in plan.read
+    assert str(keyed) not in plan.read and a in plan.read and b in plan.read
+    assert not any(item in ("/proc", f"/proc/{os.getpid()}") for item in plan.read)
 
 
 def test_ports_are_collected_as_numbers(clean):

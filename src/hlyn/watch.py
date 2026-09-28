@@ -261,17 +261,25 @@ def _load(path: str) -> None:
             _seen.add((kind, value))
 
 
-def _tidy(paths: list[str]) -> tuple[str, ...]:
+def _tidy(paths: list[str], writes: bool = False) -> tuple[str, ...]:
     """Turn a list of touched files into the shortest honest set of grants.
 
     Two files in the same directory become the directory. One file stays a
     file. It is a guess either way, which is the whole reason the output is a
     draft: the alternative is naming four hundred stdlib files individually,
     which nobody reads and nobody would keep.
+
+    With `writes`, every path is granted by its folder: creating a file
+    needs its folder, and so does saving one the usual safe way (write a
+    temporary file, rename it over), so a grant on the file alone refuses
+    the next run (found: git clone's new folder, an agent's out/report.json,
+    tools/hostlab/watchlab.sh). Never collapsed into a folder too wide to
+    grant on a guess (`_wide`): those keep their paths.
     """
     crowd: dict[str, int] = {}
     for item in paths:
         crowd[os.path.dirname(item)] = crowd.get(os.path.dirname(item), 0) + 1
+    wide: dict[str, bool] = {}
     out = []
     for item in paths:
         home = os.path.dirname(item)
@@ -279,8 +287,31 @@ def _tidy(paths: list[str]) -> tuple[str, ...]:
         # observed should be relative, and if something is, granting the empty
         # string would be refused by `Policy` several steps later, where it is
         # far harder to trace back to here.
-        out.append(home if home and crowd.get(home, 0) >= TOGETHER else item)
+        wanted = writes or crowd.get(home, 0) >= TOGETHER
+        if home and wanted and home not in wide:
+            wide[home] = _wide(home)
+        out.append(home if home and wanted and not wide[home] else item)
     return prune(item for item in out if item)
+
+
+def _wide(folder: str) -> bool:
+    """Whether granting all of `folder` on a guess would give away more than
+    was seen: the root or a top-level folder (`/etc`, `/usr`), anything under
+    `/proc` or `/sys` (other processes' environments, the machine's
+    settings), the home folder itself, or a folder holding credentials (a
+    `.env`, keys). Measured in real runs: two files in `/etc` became `/etc`,
+    and npm's `/proc` reads became `/proc` (tools/hostlab/watchlab.sh)."""
+    from .secret import credential, exposed
+
+    real = os.path.realpath(folder)
+    # By the folder as written as well as its real path: macOS's /etc is a
+    # link to /private/etc.
+    top = min(os.path.normpath(folder).count("/"), real.replace("/private/", "/", 1).count("/"))
+    if top < 2 or real == os.path.realpath(os.path.expanduser("~")):
+        return True
+    if under(real, "/proc") or under(real, "/sys") or credential(real):
+        return True
+    return bool(exposed(Policy(read=(real,), net=True, log=False)))
 
 
 def _mine(path: str, skip: tuple[str, ...]) -> bool:
@@ -305,9 +336,18 @@ def suggest(**edits: Any) -> Policy:
     # the last run's temporary files would grant a path that no longer exists.
     skip = (*runtime(), os.path.abspath(tempfile.gettempdir()))
 
-    reads = [v for k, v in _seen if k == "read" and _mine(v, skip)]
+    # A path that doesn't exist now was a probe -- a program looked for along
+    # PATH, a config file tried and missed -- and can't be granted anyway:
+    # `hlyn run` refuses a policy naming one. A written one is the exception,
+    # handled by `_tidy`: the run may have created and removed it.
+    reads = [v for k, v in _seen if k == "read" and _mine(v, skip) and os.path.lexists(v)]
+    # A folder too wide to grant on a guess, read whole (listed): left out.
+    # Granting it would grant everything in it (pip lists /etc, which drafted
+    # /etc/shadow); the program is refused the listing and carries on, or the
+    # report names it (measured with pip, tools/hostlab/watchlab.sh).
+    reads = [v for v in reads if not (os.path.isdir(v) and _wide(v))]
     writes = [v for k, v in _seen if k == "write" and _mine(v, skip)]
-    runs = [v for k, v in _seen if k == "exec"]
+    runs = [v for k, v in _seen if k == "exec" and os.path.lexists(v)]
     net: tuple[object, ...] = tuple(sorted({int(v) for k, v in _seen if k == "net"}))
     hosts = _hosts()
     if hosts:
@@ -316,7 +356,7 @@ def suggest(**edits: Any) -> Policy:
     # A path opened for writing is already readable under any policy that
     # grants the write, so repeating it in `read` is noise in a document whose
     # whole job is being read.
-    kept = _tidy(writes)
+    kept = _tidy(writes, writes=True)
     reads = [item for item in reads if not any(under(item, done) for done in kept)]
 
     plan: dict[str, Any] = {
