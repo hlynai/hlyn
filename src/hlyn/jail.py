@@ -139,7 +139,9 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
     No child processes, unless `net` names hosts (DESIGN-host-allowlisting.md
     5.8): then two detached helpers start before the seal and live as long as
     this process -- a local proxy, and on Linux a gate that makes it the only
-    way out. The seal record names them (`"helpers"`), and the proxy
+    way out. On Linux before 7.1 a gate starts for the other limited modes
+    too (`net=False`, ports), to check unix sockets, which Landlock can't
+    there (`watched`). The seal record names them (`"helpers"`), and the proxy
     variables (`HTTPS_PROXY` and the rest) are set in `os.environ`, so a
     client created before this call misses them: create it after.
     """
@@ -164,7 +166,19 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
         )
     found = _warn(plan)
     if not plan.hosts():
-        return _seal(plan, found=found)
+        if not watched(plan):
+            return _seal(plan, found=found)
+        # Unix sockets before Linux 7.1 (`watched`): a gate without a proxy,
+        # started and exempted from Yama as host mode's is, below.
+        from . import gate
+
+        with _denials(plan) as fd:
+            _ptracer(gate.detached(log=fd))
+        try:
+            return _seal(plan, found=found)
+        except BaseException:
+            gate.drop()
+            raise
 
     # Host mode (DESIGN-host-allowlisting.md 5.2, 5.8): a proxy started now,
     # before the seal, and held alive by this process for the rest of its
@@ -193,6 +207,13 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
 
             gate.drop()
         raise
+
+
+def watched(plan: Policy) -> bool:
+    """Whether sealing `plan` here starts a gate for unix sockets although it
+    names no hosts (Linux before 7.1: `core/linux.watched`)."""
+    check = getattr(back(), "watched", None)
+    return bool(check is not None and check(plan))
 
 
 def gated() -> bool:
@@ -337,29 +358,37 @@ def _both(one: Extra | None, two: Extra) -> Extra:
 
 
 def reaches(plan: Policy) -> list[str]:
-    """Warnings for a host policy that reaches further than it reads (6.7):
-    an entry naming a local service with onward reach, and, on Linux, a
-    write grant holding a socket the gate refuses but can't protect from a
-    racing program (5.3). Empty for any other policy."""
+    """Warnings for a policy that reaches further than it reads (6.7): a
+    host entry naming a local service with onward reach, and, on Linux, a
+    write grant holding a socket that runs things for its caller (the
+    resolver, D-Bus, a container runtime) where nothing refuses it. With
+    hosts, and before Linux 7.1 with any limited network, the gate refuses
+    those race-free (guard's pinned swap); from 7.1, ports and `net=False`
+    have no gate, and Landlock allows every socket in a write-granted folder."""
     from .hosts import warn
 
     named = plan.hosts()
     out = [said for said in (warn(rule) for rule in named) if said]
-    if named and sys.platform == "linux":
-        from .core.guard import granted
+    if named or plan.net is True or sys.platform != "linux":
+        return out
+    from .core import landlock
 
-        writes = plan.writes()
-        for path in granted(writes):
-            if writes is True:
-                where = "The policy grants writing everywhere, which covers"
-            else:
-                folder = max((item for item in writes if under(path, os.path.realpath(item))), key=len)
-                where = f"--write {folder} covers"
-            out.append(
-                f"hlyn: {where} {path}, a socket hlyn refuses with --net hosts. A program that "
-                f"races threads can reach it anyway while its folder is granted, on any Linux "
-                f"kernel. Grant a narrower folder unless you mean it."
-            )
+    if landlock.abi() < 9:
+        return out
+    from .core.guard import granted
+
+    writes = plan.writes()
+    for path in granted(writes):
+        if writes is True:
+            where = "The policy grants writing everywhere, which covers"
+        else:
+            folder = max((item for item in writes if under(path, os.path.realpath(item))), key=len)
+            where = f"--write {folder} covers"
+        out.append(
+            f"hlyn: {where} {path}, a socket whose program acts for its caller (it can run "
+            f"things outside the sandbox). Linux lets a confined program connect to any socket "
+            f"in a write-granted folder. Grant a narrower folder unless you mean it."
+        )
     return out
 
 
@@ -479,6 +508,9 @@ def _seal(
         log.emit("exposed", paths=found[:20])
 
     more: dict[str, object] = {}
+    # A gate without a proxy (`watched`), about to be handed this seal.
+    minder = sys.modules.get(__name__.rpartition(".")[0] + ".gate")
+    watcher = getattr(minder, "pid", None) if getattr(minder, "_handoff", None) is not None else None
     if proxy is not None:
         from . import gate
 
@@ -489,8 +521,10 @@ def _seal(
         more = {"proxy": f"127.0.0.1:{port}", "helpers": helpers, "closed": closed}
     else:
         level = back().load(plan, tag) if tag else back().load(plan)
+        if watcher is not None:
+            more = {"helpers": [watcher]}
         if closed:
-            more = {"closed": closed}
+            more["closed"] = closed
 
     _sealed = True
     log.seal(plan, back().__name__, level, box, **more)
@@ -523,11 +557,19 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     # Before the fork, never after: see the note above.
     back().ready()
     named = plan.hosts()
+    watch = not named and watched(plan)
     share = None
     port = 0
     alone = False
     told: int | None = None
     found: list[str] = []
+    if watch:
+        # Unix sockets before Linux 7.1: the child becomes a gate, as in host
+        # mode, with no proxy (`watched`).
+        from . import gate
+
+        with _denials(plan) as fd:
+            told = os.dup(fd) if fd is not None else None  # the gate's copy
     if named:
         # Imported here, before the fork: the child must not take the
         # import lock another thread might have been holding.
@@ -538,14 +580,14 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
         with _denials(plan) as fd:
             port = share.lease(fd)
             told = os.dup(fd) if fd is not None and gated() else None  # the gate's copy
+    if (named or watch) and sys.platform == "linux":
         # A caller with one thread can have its gate serve in the forked
         # child with no interpreter start (gate.become, `fresh`).
-        if sys.platform == "linux":
-            from .core.landlock import crowd
+        from .core.landlock import crowd
 
-            alone = len(crowd()) <= 1
-            if alone:
-                gate.prepare()
+        alone = len(crowd()) <= 1
+        if alone:
+            gate.prepare()
     try:
         read, write = os.pipe()
         _flush()
@@ -553,7 +595,13 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
         if kid == 0:  # child
             os.close(read)
             if share is None:
-                _child(fn, lambda: _seal(plan, found=_warn(plan), closed=_neutral(plan)), write)
+                def plain() -> None:
+                    _seal(plan, found=_warn(plan), closed=_neutral(plan))
+
+                if not watch:
+                    _child(fn, plain, write)
+                gate.become(lambda: _child(fn, plain, write), forward=False, isolate=False,
+                            close=[write], fresh=not alone, log=told)
             pid = share.route.pid
 
             def sealed() -> None:
@@ -647,8 +695,18 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
     _ready(plan)
     found = _warn(plan)
     if not plan.hosts():
-        _spawn(cmd, plan, found=found)
-        return
+        if not watched(plan):
+            _spawn(cmd, plan, found=found)
+            return
+        # Unix sockets before Linux 7.1: this process becomes the command's
+        # gate, as in host mode, with no proxy (`watched`).
+        from . import gate
+
+        _prepare(cmd, plan)  # here, so a bad command is an exception
+        with _denials(plan) as fd:
+            told = os.dup(fd) if fd is not None else None  # the gate's copy
+        _flush()
+        gate.become(lambda: _spawn(cmd, plan, found=found), forward=True, isolate=True, log=told)
 
     from . import gate, route
 

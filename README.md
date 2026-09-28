@@ -67,7 +67,7 @@ With hlyn, the answer is "only what you wrote down."
 - **Enforced by the kernel.** Linux uses Landlock and seccomp; macOS uses Seatbelt. The rules are not a Python wrapper the agent could monkey-patch or talk its way around.
 - **Deny by default.** An empty policy grants nothing except the files Python itself needs to run.
 - **One line to start.** `hlyn.on()` or `hlyn run -- cmd`. Every extra permission is one more obvious argument.
-- **No daemon, no container.** With ports, nothing sits between the agent and the kernel, so it adds almost no latency. Naming hosts adds two helper processes for the run: a local proxy that checks each host, and on Linux a gate that makes the proxy the only way out (see [Performance](#performance)). It works inside Docker too.
+- **No daemon, no container.** Ports and file rules are the kernel's own checks, so they add almost no latency. Naming hosts adds two helper processes for the run: a local proxy that checks each host, and on Linux a gate that makes the proxy the only way out. On Linux before 7.1 the gate also runs with ports or no network, because only it can keep programs away from local sockets such as `docker.sock` there (see [Performance](#performance)). It works inside Docker too.
 - **Refuses rather than pretends.** If the machine cannot enforce your whole policy, hlyn raises an error instead of quietly enforcing part of it.
 - **Zero runtime dependencies.**
 
@@ -116,7 +116,7 @@ ok  hlyn can confine programs on this machine (Linux 6.18.44)
     yes network ports
     yes host names in net (api.openai.com)
     yes isolation between agents on this machine
-    no  local sockets only in write-granted folders, checked by the kernel (Linux 7.1 or newer; until then host mode's gate checks them, and a racing agent can get past it)
+    yes local sockets only in write-granted folders, checked by hlyn's gate (Linux 7.1 or newer checks them in the kernel)
     yes listing what was blocked, after hlyn run
 ```
 
@@ -253,7 +253,7 @@ Worth knowing:
 - **Names are looked up by the proxy, on every connection**, and the connection uses the address that was checked. A name that resolves to a private, loopback or cloud-metadata address is refused (DNS rebinding). Reach private services by address (`--net 10.0.0.5:5432`) or as `localhost:PORT`.
 - **A program that ignores `HTTPS_PROXY`** can't look names up. The report says so, and names the client setting that fixes it (aiohttp: `trust_env=True`; urllib3: `ProxyManager`). Address and `localhost` entries are also reachable directly (on macOS, only `localhost` entries).
 - **The TLS name must match the host.** A connection that asks the proxy for one host and then names another in TLS is closed.
-- **Local sockets need `--write` on their folder.** The resolver, D-Bus and container-runtime sockets (`docker.sock` and the like) are refused whatever you grant, though on Linux a deliberately racing agent can get past that check ([residual 3](#what-naming-hosts-does-not-stop)). hlyn warns when a write grant covers one (`--write /run`), since that is where the race can't be closed.
+- **Local sockets need `--write` on their folder.** The resolver, D-Bus and container-runtime sockets (`docker.sock` and the like) are refused whatever you grant, by what they are, not their name: a link to one is refused too.
 - **Naming hosts narrows an open network.** `--preset web --net api.openai.com` means that host only, and hlyn says so.
 - **Behind a corporate proxy** (`HTTPS_PROXY` set when hlyn starts), hlyn's proxy forwards through it. The private-address check is then skipped, because the corporate proxy resolves the names.
 - **`hlyn.on()` with hosts** sets the proxy variables in `os.environ`. A client created before the call (`httpx.Client`, an aiohttp session) misses them: create it after.
@@ -360,7 +360,7 @@ hlyn: removed 12 environment variables (including OPENAI_API_KEY, GITHUB_TOKEN).
 | Reaching a host that isn't listed | `--net HOST` |
 | Connecting directly to an address, ignoring the proxy | `--net ADDRESS` (the report also names the client setting that makes it use the proxy) |
 | Looking up a name itself, ignoring the proxy | None: a client setting (the report names it) |
-| A local socket (with hosts; on Linux 7.1+ whenever the network isn't open) | `--write FOLDER` (the folder that holds it) |
+| A local socket (whenever the network isn't open) | `--write FOLDER` (the folder that holds it) |
 | Any network while the network is off | `--net-any`, or `--net PORT` for just the port it needs |
 | Listening on a port | `--net-any` |
 | A credential (`~/.ssh`, `~/.aws`, `.env`, `*.pem`, …) | **None.** It is named, never suggested. |
@@ -534,7 +534,7 @@ Messages say what to do next, naming the field or flag that would change the out
 
 - **`on()` is one-way.** There is no `off()` and no context manager that pretends to restore anything, because the kernel can't undo it.
 - **Call `on()` before starting threads.** On Linux, a thread that is already running would keep its old access, so hlyn refuses to seal a process with more than one thread. Put `on()` at the top of your program, or use `hlyn.run(fn)`, which forks a clean child.
-- **With hosts, `on()` starts two helpers** before it seals: the proxy, and on Linux the gate. They live as long as your process, and the seal record names them. With ports only, `on()` starts nothing.
+- **With hosts, `on()` starts two helpers** before it seals: the proxy, and on Linux the gate. They live as long as your process, and the seal record names them. With ports or no network, `on()` starts the gate alone on Linux before 7.1, to check local sockets, and nothing on newer kernels or macOS.
 - **With hosts, `hlyn.run(fn)` shares one proxy** between every call with the same hosts, for the life of the caller. Each call still gets its own gate.
 
 ---
@@ -549,7 +549,7 @@ Messages say what to do next, naming the field or flag that would change the out
 | TCP ports | ✅ | ✅ |
 | Host names in `net` | ✅ Proxy, plus a gate that answers every `connect()` | ✅ Proxy, plus a profile that allows only its port |
 | Direct connections to address entries (`10.0.0.5:5432`) | ✅ | ❌ Only through the proxy. `localhost:PORT` entries work directly |
-| Local sockets only in write-granted folders | With hosts: checked by the gate (racy before 7.1; see [limits](#what-naming-hosts-does-not-stop)). From Linux 7.1, by the kernel whenever the network isn't open | ✅ |
+| Local sockets only in write-granted folders | ✅ Whenever the network isn't open: by the kernel from Linux 7.1, before that by the gate, which connects the socket it checked itself | ✅ |
 | All network off (TCP and UDP) | ✅ | ✅ |
 | Isolation between agents (signals, abstract sockets) | ✅ | Signals ✅, as on Linux (macOS has no abstract sockets). ❌ System services such as the pasteboard are shared |
 | Dangerous syscalls blocked (`io_uring`, `ptrace`, `mount`, namespaces, kernel modules, `bpf`, …) | ✅ | n/a |
@@ -562,14 +562,15 @@ Messages say what to do next, naming the field or flag that would change the out
 
 ## Performance
 
-With ports, nothing sits between the agent and the kernel, so there's nothing in the path to slow it down. Measured on Linux 6.12 (aarch64) inside Docker on an Apple Silicon laptop. That's one virtualised machine, so treat the numbers as indicative rather than a benchmark:
+Files and ports are the kernel's own checks, so nothing sits in their path. Measured on Linux 6.12 (aarch64) inside Docker on an Apple Silicon laptop. That's one virtualised machine, so treat the numbers as indicative rather than a benchmark:
 
 **Once, at startup:**
 
 | Step | Time |
 |---|---|
-| `hlyn.on()` with a small policy | ~2 ms |
-| `hlyn.on()` naming 64 paths | ~3 ms |
+| Landlock and seccomp themselves, small policy / 64 paths | ~1.5 ms / ~2 ms |
+| `hlyn.on()` in all, network off or ports, Linux 7.1+ | ~10 ms |
+| `hlyn.on()` in all, network off or ports, Linux before 7.1 | ~35 ms: it starts the gate that checks local sockets |
 
 **Per call, afterwards:**
 
@@ -577,7 +578,8 @@ With ports, nothing sits between the agent and the kernel, so there's nothing in
 |---|---|
 | `open` | ~90 ns |
 | `bind` | ~0.5 µs |
-| `connect` | Lost in its own variance (a few hundred ns at most) |
+| `connect` over TCP, Linux 7.1+ | Lost in its own variance (a few hundred ns at most) |
+| `connect`, Linux before 7.1 | ~90 µs: the gate looks at each one to find the local sockets |
 | `read`, `write`, `stat` on files already open | Nothing measurable |
 
 Files and connections that are already open are never re-checked, so throughput is unaffected.
@@ -673,7 +675,7 @@ This is the threat model from the [design](DESIGN-host-allowlisting.md), in the 
 
 1. **Sending data to an allowed host.** A gist on `github.com`, an object in a bucket under `*.s3.amazonaws.com`, or a prompt sent to `api.openai.com` all look like normal traffic. This is the third leg of the lethal trifecta (private data, untrusted content, a way out). Host allowlisting narrows that way out; it can't close it for a host the agent needs. The mitigation is still hlyn's first rule: don't let the agent read what it shouldn't send. The secret warning stays on. This point is inferred from how network filtering works; the research found no direct citation for it.
 2. **Domain fronting, shared TLS endpoints, HTTP/2 connection coalescing, and ECH on connections that are already open.** Without looking inside TLS, the proxy sees the SNI but not the HTTP `Host`. A 2024 study found fronting still works on 22 of 30 CDNs, Akamai and Fastly among them. Claude Code's own documentation carries the same warning.
-3. **Unix sockets, on Linux.** A deliberately multi-threaded agent can race a unix-socket `connect()` or `sendto()` past the gate's check, and `sendmsg` to a unix datagram path isn't checked at all (5.3); in a test, 611 of 3,000 raced connects reached a refused socket. On Linux 7.1 and newer the kernel itself refuses every socket outside the write-granted folders (built, not yet run on a 7.1 kernel), so the race reaches only a refused socket inside one (`--write /run` holds the resolver and D-Bus sockets). Before 7.1 it can reach the host's DNS resolver, D-Bus and container-runtime sockets, and `net=False` has the same gaps with no check at all. TCP is unaffected.
+3. **Unix datagrams sent with `sendmsg`, on Linux before 7.1.** Its address sits inside a struct no filter can read, so a datagram `sendmsg` to a unix path isn't checked (5.3). It reaches only datagram sockets, such as the system log, never a stream service like the resolver, D-Bus or a container runtime. Every unix `connect()` and every `sendto()` naming a path is checked without a race, with hosts and, before 7.1, with ports or no network too: the gate connects the socket file it checked itself, so racing threads or a folder swapped for a symlink reach nothing else (0 of 3,000 in a test, against 611-781 before). On Linux 7.1 and newer the kernel refuses datagrams outside the write-granted folders as well (built, not yet run on a 7.1 kernel). TCP is unaffected.
 4. **Other programs on the same Mac.** On macOS, `localhost:P` also matches the machine's own network addresses. A process outside the sandbox that listens on P at the Mac's LAN address could receive agent traffic.
 5. **Behind a corporate proxy.** The address checks are skipped when chaining to a corporate proxy (5.5).
 6. **Kernel bugs, side channels, and denial of service against the machine.** These are the same as for the rest of hlyn. For tenants who may be hostile to each other, use a microVM outer boundary; nono and Sandlock both say the same.

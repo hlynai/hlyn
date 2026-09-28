@@ -806,7 +806,7 @@ def test_hlyn_run_lists_each_refusal_by_the_gate_once_with_its_flag(tmp_path, fo
     assert any("1.1.1.1:53" in line and "DNS: the proxy looks up names" in line for line in lines)
     assert any("local socket /run/hlyn-test-private/app.sock" in line
                and "allow with --write /run/hlyn-test-private" in line for line in lines)
-    assert any(f"local socket {docker}" in line and "never allowed with --net hosts" in line
+    assert any(f"local socket {docker}" in line and "never allowed unless the network is open" in line
                for line in lines)
     assert "  to allow all of these: --net 140.82.112.5 --write /run/hlyn-test-private" in lines
 

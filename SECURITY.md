@@ -45,7 +45,8 @@ docstrings, and in the error messages:
   `net=[443]` leaves UDP reachable. Name hosts instead, or use `net=False` to
   close the network entirely.
 - **What naming hosts does not stop**, listed below: data sent to a host you
-  allowed, domain fronting, the unix-socket race on Linux, and the rest.
+  allowed, domain fronting, unix datagrams sent with `sendmsg` on Linux before
+  7.1, and the rest.
 - **macOS agents share system services.** Signals stay within each agent's
   sandbox, as Landlock scopes them on Linux, but macOS services such as the
   pasteboard and notifications are shared: two agents on one Mac can pass data
@@ -82,7 +83,7 @@ same text.
 
 1. **Sending data to an allowed host.** A gist on `github.com`, an object in a bucket under `*.s3.amazonaws.com`, or a prompt sent to `api.openai.com` all look like normal traffic. This is the third leg of the lethal trifecta (private data, untrusted content, a way out). Host allowlisting narrows that way out; it can't close it for a host the agent needs. The mitigation is still hlyn's first rule: don't let the agent read what it shouldn't send. The secret warning stays on. This point is inferred from how network filtering works; the research found no direct citation for it.
 2. **Domain fronting, shared TLS endpoints, HTTP/2 connection coalescing, and ECH on connections that are already open.** Without looking inside TLS, the proxy sees the SNI but not the HTTP `Host`. A 2024 study found fronting still works on 22 of 30 CDNs, Akamai and Fastly among them. Claude Code's own documentation carries the same warning.
-3. **Unix sockets, on Linux.** A deliberately multi-threaded agent can race a unix-socket `connect()` or `sendto()` past the gate's check, and `sendmsg` to a unix datagram path isn't checked at all (5.3); in a test, 611 of 3,000 raced connects reached a refused socket. On Linux 7.1 and newer the kernel itself refuses every socket outside the write-granted folders (built, not yet run on a 7.1 kernel), so the race reaches only a refused socket inside one (`--write /run` holds the resolver and D-Bus sockets). Before 7.1 it can reach the host's DNS resolver, D-Bus and container-runtime sockets, and `net=False` has the same gaps with no check at all. TCP is unaffected.
+3. **Unix datagrams sent with `sendmsg`, on Linux before 7.1.** Its address sits inside a struct no filter can read, so a datagram `sendmsg` to a unix path isn't checked (5.3). It reaches only datagram sockets, such as the system log, never a stream service like the resolver, D-Bus or a container runtime. Every unix `connect()` and every `sendto()` naming a path is checked without a race, with hosts and, before 7.1, with ports or no network too: the gate connects the socket file it checked itself, so racing threads or a folder swapped for a symlink reach nothing else (0 of 3,000 in a test, against 611-781 before). On Linux 7.1 and newer the kernel refuses datagrams outside the write-granted folders as well (built, not yet run on a 7.1 kernel). TCP is unaffected.
 4. **Other programs on the same Mac.** On macOS, `localhost:P` also matches the machine's own network addresses. A process outside the sandbox that listens on P at the Mac's LAN address could receive agent traffic.
 5. **Behind a corporate proxy.** The address checks are skipped when chaining to a corporate proxy (5.5).
 6. **Kernel bugs, side channels, and denial of service against the machine.** These are the same as for the rest of hlyn. For tenants who may be hostile to each other, use a microVM outer boundary; nono and Sandlock both say the same.

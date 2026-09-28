@@ -353,6 +353,31 @@ def _rule(ctx: int, action: int, name: str, args: Iterable[Arg] = ()) -> None:
         raise Failed(f"could not add a seccomp rule for {name!r}: error {-rc}")
 
 
+def alone() -> None:
+    """Add a filter that refuses every `connect` and every send with an
+    address (EPERM), on top of whatever this process is already sealed with.
+
+    For a process that must talk to nothing, where no gate can check what it
+    reaches: `interpreter.ask`'s probe of an interpreter that may be anything.
+    Filters stack, and the strictest answer wins, so this only ever narrows.
+    Needs NO_NEW_PRIVS, which a seal has set."""
+    api = lib()
+    ctx = api.seccomp_init(ALLOW)
+    if not ctx:
+        raise Failed("libseccomp could not create a filter context")
+    try:
+        _rule(ctx, ERROR | EPERM, "connect")
+        _rule(ctx, ERROR | EPERM, "sendto", [Arg(4, NE, 0, 0)])  # a send naming an address
+        # sendmsg's address is inside a struct no filter can read: refuse
+        # them all, since nothing here needs to send.
+        _rule(ctx, ERROR | EPERM, "sendmsg")
+        _rule(ctx, ERROR | EPERM, "sendmmsg")
+        if api.seccomp_load(ctx) != 0:
+            raise Failed("the kernel refused a filter that shuts every connection")
+    finally:
+        api.seccomp_release(ctx)
+
+
 # The refusal when this process is already inside a seccomp notifier (5.2).
 BUSY = (
     "can't restrict hosts here: this process is already inside a sandbox that filters "
@@ -393,9 +418,10 @@ def busy() -> bool:
     return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2
 
 
-def _build(policy: Policy) -> int:
+def _build(policy: Policy, watch: bool = False) -> int:
     """The compiled filter for `policy`, as a libseccomp context the caller
-    releases. Nothing is loaded."""
+    releases. Nothing is loaded. `watch`: send unix connects to a gate
+    without naming hosts (see `load`)."""
     named = bool(policy.hosts())
     api = lib()
     ctx = api.seccomp_init(ALLOW)
@@ -416,7 +442,7 @@ def _build(policy: Policy) -> int:
         # (SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, Linux 5.19). libseccomp
         # before 2.6 has no attribute for it and refuses the call; the gate
         # then answers the restarted call itself (FINDINGS.md, "half").
-        if policy.hosts():
+        if named or watch:
             api.seccomp_attr_set(ctx, WAITKILL, 1)
 
         # On x86_64 a syscall number can carry the x32 bit. Adding the x32
@@ -517,6 +543,20 @@ def _build(policy: Policy) -> int:
             # never leaves the kernel. Disjoint from the Fast Open refusal.
             _rule(ctx, NOTIFY, "sendto", [Arg(4, NE, 0, 0), Arg(3, MASKED, FASTOPEN, 0)])
 
+        if watch and not named:
+            # Unix sockets before Landlock ABI 9, with the network off or
+            # limited to ports: every connect, and every send naming an
+            # address, goes to the gate, which applies host mode's unix rules
+            # and lets IP sockets through to Landlock's port rules (guard,
+            # mode "off" and "ports"). Fast Open is refused outright here as
+            # in ports mode, so the send rule can require it clear and stay
+            # disjoint from that refusal.
+            if policy.net is False:
+                for name, arg in SENDS.items():
+                    _rule(ctx, ERROR | EPERM, name, [Arg(arg, MASKED, FASTOPEN, FASTOPEN)])
+            _rule(ctx, NOTIFY, "connect")
+            _rule(ctx, NOTIFY, "sendto", [Arg(4, NE, 0, 0), Arg(3, MASKED, FASTOPEN, 0)])
+
         if policy.exec is False:
             for name in BIRTH:
                 _rule(ctx, ERROR | EPERM, name)
@@ -527,14 +567,14 @@ def _build(policy: Policy) -> int:
     return int(ctx)
 
 
-def program(policy: Policy) -> bytes:
+def program(policy: Policy, watch: bool = False) -> bytes:
     """The BPF program `load` would install for `policy`, for inspection:
     what the filter answers is read from here in tests, including paths no
     kernel here can take (a foreign architecture)."""
     import tempfile
 
     api = lib()
-    ctx = _build(policy)
+    ctx = _build(policy, watch)
     try:
         with tempfile.TemporaryFile() as out:
             rc = api.seccomp_export_bpf(ctx, out.fileno())
@@ -546,22 +586,23 @@ def program(policy: Policy) -> bytes:
         api.seccomp_release(ctx)
 
 
-def load(policy: Policy) -> int | None:
+def load(policy: Policy, watch: bool = False) -> int | None:
     """Compile and install the syscall filter for `policy`.
 
     One-way. Once loaded the filter applies to this process and every thread
     and child it has, and cannot be removed.
 
-    Returns the notification descriptor when `net` names hosts: every
+    Returns the notification descriptor when `net` names hosts, or with
+    `watch` (unix sockets checked by a gate, before Landlock ABI 9): every
     `connect()` then waits for an answer on it, so it must be handed to the
     gate at once and this process's copy closed (5.2, step 5). Otherwise
     returns None.
     """
-    named = bool(policy.hosts())
+    named = bool(policy.hosts()) or watch
     api = lib()
     if named:
         notify._lib()  # raises, naming the fix, before anything is loaded
-    ctx = _build(policy)
+    ctx = _build(policy, watch)
     try:
         ctypes.set_errno(0)
         rc = api.seccomp_load(ctx)

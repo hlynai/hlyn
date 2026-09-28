@@ -409,15 +409,22 @@ def _machine(out: dict[str, object]) -> str:
          f": {out['why']}" if out.get("enforce") and out.get("why") else ""),
         ("isolation between agents on this machine", out.get("scope"),
          f" ({out['scope_why']})" if out.get("scope_why") else ""),
-        ("local sockets only in write-granted folders, checked by the kernel", out.get("sockets"),
-         " (Linux 7.1 or newer; until then host mode's gate checks them, and a racing agent "
-         "can get past it)" if linux else ""),
+        ("local sockets only in write-granted folders" + _checker(out), out.get("sockets"),
+         " (needs Linux 7.1 or newer, or libseccomp 2.5 or newer for hlyn's gate)" if linux else ""),
         ("listing what was blocked, after hlyn run", out.get("report"), ""),
     ]
     lines = [head, *(f"    {'yes' if yes else 'no':<4}{name}{'' if yes else why}" for name, yes, why in rows)]
     if out.get("reduced"):
         lines.append(f"    note: host names work in reduced mode here: {out['reduced']}.")
     return "\n".join(lines) + "\n"
+
+
+def _checker(out: dict[str, object]) -> str:
+    """What limits local sockets here, for probe's line (Linux)."""
+    return {
+        "kernel": ", checked by the kernel",
+        "gate": ", checked by hlyn's gate (Linux 7.1 or newer checks them in the kernel)",
+    }.get(str(out.get("socket_check")), "")
 
 
 def _gist(plan: Policy) -> str:
@@ -504,6 +511,21 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
     way = None
     heard = -1  # the helpers' denials, one JSON line each, for the report
     told: tuple[int | None, int | None] = (None, None)  # the gate's log and report pipe
+    # Unix sockets before Linux 7.1 (jail.watched): a gate with no proxy.
+    minded = not plan.hosts() and jail.watched(grants)
+    if minded:
+        from . import gate
+
+        heard, said = os.pipe()
+        try:
+            with jail._denials(plan) as fd:
+                told = (os.dup(fd) if fd is not None else None, os.dup(said))
+        except BaseException:
+            os.close(heard)
+            raise
+        finally:
+            os.close(said)
+        os.set_blocking(heard, False)
     if plan.hosts():
         from . import gate, route
 
@@ -532,7 +554,7 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
     # start a fresh interpreter (gate.become's `fresh`, as `hlyn.run(fn)`
     # does): no other thread can have held a lock across the fork.
     alone = False
-    if way is not None and sys.platform == "linux":
+    if (way is not None or minded) and sys.platform == "linux":
         from .core.landlock import crowd
 
         alone = len(crowd()) <= 1
@@ -568,11 +590,11 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
                 os.write(w, b"x")
                 os._exit(1)
 
-            if way is None:
+            if way is None and not minded:
                 start()
             # This child becomes the gate for the command: CLI -> gate -> agent.
-            gate.become(start, forward=True, isolate=True, close=[way.life, w], fresh=not alone,
-                        log=told[0], events=told[1])
+            gate.become(start, forward=True, isolate=True, close=[*([way.life] if way else []), w],
+                        fresh=not alone, log=told[0], events=told[1])
 
         os.close(w)
         for fd in told:

@@ -73,15 +73,21 @@ def probe() -> dict[str, object]:
         "ports": ok,  # network rules at all
         # Host names in `net`: the notify API and no other listener here.
         "hosts": ok and filter and notify.ready() and not seccomp.busy(),
-        # Socket files outside the write grants refused by the kernel itself
-        # (Landlock ABI 9, the shim's `bonus`); before that only host mode's
-        # gate checks them, and a racing agent can get past it (5.3).
-        "sockets": ok and abi >= 9,
+        # Socket files outside the write grants refused: by the kernel itself
+        # from Landlock ABI 9 (the shim's `bonus`), before that by hlyn's gate
+        # in every mode but an open network (`watched`, guard's pinned swap).
+        "sockets": False,
+        "socket_check": None,
         # Whether `hlyn run` can list what was blocked: needs the preloaded
         # reporting library. Not part of `enforce` -- the boundary holds
         # either way; only the explanation is missing.
         "report": preload.find() is not None,
     }
+    if ok and filter:
+        if abi >= 9:
+            out["sockets"], out["socket_check"] = True, "kernel"
+        elif out["hosts"]:  # the same needs as host mode's gate: notify, no other listener
+            out["sockets"], out["socket_check"] = True, "gate"
     missing = []
     if not abi:
         missing.append("Landlock is unavailable; Linux 5.13 or newer is needed")
@@ -186,6 +192,27 @@ def ready_hosts() -> None:
     _checked = True
 
 
+def watched(policy: Policy) -> bool:
+    """Whether sealing `policy` here needs a gate for unix sockets although
+    `net` names no hosts: the network is off or limited to ports, and
+    Landlock can't check socket files (ABI 9, Linux 7.1). Before that a
+    confined program reached any unix socket on the machine, among them the
+    user's systemd bus and docker.sock, each a way to run code outside the
+    sandbox (FINDINGS.md, "Checking the eight decisions").
+
+    False where no gate can be installed: libseccomp before 2.5, or this
+    process already inside a notification listener (the kernel allows one
+    per process tree: an outer hlyn in host mode, whose gate then checks
+    this process's unix sockets by its own rules). The seal says which
+    applies (`jail._seal`). Asked by each entry point before it starts
+    anything; a forked child keeps the answer."""
+    if policy.net is True or policy.hosts():
+        return False
+    if landlock.abi() >= 9:
+        return False
+    return notify.ready() and not seccomp.busy()
+
+
 def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int:
     """Apply `policy` to the calling process. One-way, and irreversible.
 
@@ -213,6 +240,13 @@ def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int
                               "connections (hlyn.on, run, spawn and hlyn run start one). Nothing was sealed.")
         writes = policy.writes()
         config = guard.Config(port=port, rules=named, writes=writes, connect=CONNECT)
+    # Unix sockets without hosts (`watched`): the entry point started a gate
+    # when it was needed and possible; that decision is read here, from
+    # whether there is a gate to hand to.
+    watch = not named and policy.net is not True and gate._handoff is not None
+    if watch:
+        config = guard.Config(port=0, rules=(), writes=policy.writes(), connect=CONNECT,
+                              mode="off" if policy.net is False else "ports")
     if policy.net is False:
         open_sockets = wired()
         if open_sockets:
@@ -225,7 +259,7 @@ def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int
                 f"through it. Close them before calling hlyn.on(), or use hlyn.run(fn)."
             )
     abi = landlock.load(policy)
-    fd = seccomp.load(policy)
+    fd = seccomp.load(policy, watch=watch)
     if fd is not None:
         gate.hand(fd, config)
     return abi

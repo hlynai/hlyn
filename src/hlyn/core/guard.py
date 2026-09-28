@@ -116,11 +116,11 @@ PLACES: tuple[str, ...] = (
 def granted(writes: tuple[str, ...] | bool) -> list[str]:
     """Refused sockets that exist here and sit under a write grant.
 
-    The gate checks a unix connect's path and lets it run (5.3), so a program
-    racing threads can swap in another path after the check. Outside the
-    write grants, Landlock refuses that on Linux 7.1+; inside one, nothing
-    does, on any kernel. A grant such as `--write /run` therefore leaves the
-    resolver, D-Bus or a container runtime one lost race away.
+    The gate refuses these whatever the grants, race-free. Where no gate
+    runs (ports or `net=False` on Linux 7.1+, whose Landlock allows every
+    socket in a write-granted folder), a grant such as `--write /run` hands
+    the program the resolver, D-Bus or a container runtime: `jail.reaches`
+    warns.
     """
     import glob
 
@@ -171,13 +171,19 @@ class Config:
     `port` is the proxy's port for this run; `rules` the policy's host
     entries; `writes` the folders granted for write (`True`: everything);
     `connect` the proxy's connect timeout; `reduced` forces reduced mode
-    (tests, and a gate that knows it can't read)."""
+    (tests, and a gate that knows it can't read).
+
+    `mode` is what `net` is: `"hosts"` (all of the table above), or `"off"`
+    and `"ports"`, where the gate only checks unix sockets, on kernels
+    whose Landlock can't (before ABI 9): IP sockets go on to Landlock's port
+    rules, and there is no proxy (`port` 0)."""
 
     port: int
     rules: tuple[Rule, ...]
     writes: tuple[str, ...] | Literal[True] = ()
     connect: float = 10.0
     reduced: bool = False
+    mode: str = "hosts"
 
     def dumps(self) -> bytes:
         return json.dumps({
@@ -186,6 +192,7 @@ class Config:
             "writes": self.writes if self.writes is True else list(self.writes),
             "connect": self.connect,
             "reduced": self.reduced,
+            "mode": self.mode,
         }).encode()
 
     @classmethod
@@ -198,6 +205,7 @@ class Config:
             writes=True if writes is True else tuple(str(item) for item in writes),
             connect=float(raw.get("connect", 10.0)),
             reduced=bool(raw.get("reduced", False)),
+            mode=str(raw.get("mode", "hosts")),
         )
 
 
@@ -345,6 +353,12 @@ class Guard:
             return
         kind = "unix" if ino in notify.unix(call.pid) else (
             "netlink" if ino in notify.netlink(call.pid) else "ip")
+        if kind != "unix" and self.config.mode != "hosts":
+            # Ports, or the network off: Landlock checks TCP ports when the
+            # call runs, whatever a racing thread writes meanwhile, and with
+            # the network off no IP socket can exist. Only unix is the gate's.
+            self._go(call)
+            return
         data = None if self.config.reduced else notify.read(call.pid, pointer, size)
         if not notify.valid(self.fd, call):
             return  # gone: the thread was interrupted or killed
@@ -506,7 +520,8 @@ class Guard:
 
     def _refuse(self, call: notify.Call, real: str) -> None:
         self._event(call, "unix", real, "--net-any",
-                    detail="never allowed with --net hosts: the program behind it acts for its caller")
+                    detail="never allowed unless the network is open: "
+                           "the program behind it acts for its caller")
         self._no(call, errno.EACCES)
 
     def _sockets(self) -> set[tuple[int, int]]:

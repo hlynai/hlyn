@@ -92,6 +92,12 @@ def test_the_canonical_form_parses_back_to_the_same_rule():
     ("0x7f.1", "--net 127.0.0.1"),
     ("2130706433", "--net 127.0.0.1"),
     ("127.1", "--net 127.0.0.1"),
+    # A trailing dot makes a name absolute, not a different address: "1." is
+    # the address 0.0.0.1 to every resolver, so it is refused like "1".
+    ("0.", "--net 0.0.0.0"),
+    ("1.:443", "--net 0.0.0.1:443"),
+    ("127.1.", "--net 127.0.0.1"),
+    ("10.0.0.1.", "--net 10.0.0.1"),
     ("2001:db8::1", "--net [2001:db8::1]:443"),
     ("10.0.0.1/8:80", "--net 10.0.0.0/8:PORT"),
     ("[::ffff:0:0/100]:80", "Write the IPv4 range"),

@@ -210,7 +210,10 @@ def ask(cmd0: str, where: str) -> Answer:
     if found == os.path.abspath(sys.executable):
         return Answer()
 
-    from . import jail
+    from . import gate, jail
+
+    if sys.platform == "linux":
+        from .core import seccomp  # before the fork: nothing is imported after a seal
 
     r, w = os.pipe()
     pid = os.fork()
@@ -222,7 +225,16 @@ def ask(cmd0: str, where: str) -> Answer:
             os.dup2(w, 1)
             os.dup2(null, 2)
             probe = Policy(read=True, exec=True, net=False, env=False, tmp=False, log=False)
+            # A gate started for the command this process is about to seal
+            # isn't this probe's: leave it to that seal.
+            gate.drop()
             jail._seal(probe)
+            if sys.platform == "linux":
+                # Nothing to talk to: no gate checks this probe's unix
+                # sockets, which Landlock can't before Linux 7.1.
+                from .core import seccomp
+
+                seccomp.alone()
             os.execv(found, [found, "-I", "-S", "-c", QUESTION])  # noqa: S606
         finally:
             os._exit(127)

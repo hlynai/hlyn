@@ -393,7 +393,14 @@ def parse(entry: str, field: str = "net") -> Rule:
     else:
         port = _parse_port(port_text or None, entry, field)
         return _address_rule(_network_of(host_part, entry, field), port)
-    loose = _loose_ipv4(host_part)
+    # A trailing dot only makes a name absolute: "10.0.0.1." and "1." are
+    # addresses to every resolver ("1" is 0.0.0.1), so they are refused as
+    # address spellings, before the dot is dropped for names below.
+    bare = host_part[:-1] if host_part.endswith(".") and host_part != "." else host_part
+    loose = _loose_ipv4(host_part) or _loose_ipv4(bare)
+    if loose is None and bare != host_part:
+        with contextlib.suppress(ValueError):
+            loose = str(ipaddress.IPv4Address(bare))
     if loose is not None:
         raise Invalid(
             f"{field}: {entry!r} is not a strict IPv4 address (four decimal numbers 0-255, "

@@ -154,6 +154,47 @@ def test_the_interpreter_cannot_write_or_reach_the_network_while_asked(tmp_path)
 
 
 @here
+def test_the_interpreter_asked_cannot_reach_a_local_socket(tmp_path):
+    """The interpreter asked may be anything (a venv's python is a file in
+    the project), so it is asked with nothing to talk to: before Linux 7.1
+    Landlock doesn't check socket files, and this probe has no gate, so it
+    gets a filter that refuses every connect and send outright."""
+    import socket as sock
+    import tempfile
+
+    # A short folder: macOS allows 104 bytes for a socket's path.
+    path = os.path.join(tempfile.mkdtemp(prefix="hlyn-", dir="/tmp"), "s.sock")
+    server = sock.socket(sock.AF_UNIX)
+    server.bind(path)
+    server.listen(4)
+    server.setblocking(False)
+    (tmp_path / "fakebin").mkdir(exist_ok=True)
+    fake_path = tmp_path / "fakebin" / "python3"
+    liar = str(fake_path)
+    with open(liar, "w") as fh:
+        fh.write(f"#!{sys.executable}\n"
+                 "import socket\n"
+                 f"for _ in range(3):\n"
+                 f"    try:\n"
+                 f"        socket.socket(socket.AF_UNIX).connect({path!r})\n"
+                 f"    except OSError:\n"
+                 f"        pass\n"
+                 "print('{\"paths\": []}')\n")
+    fake_path.chmod(0o755)
+    answer = interpreter.ask(liar, os.path.realpath(liar))
+    reached = 0
+    while True:
+        try:
+            server.accept()[0].close()
+            reached += 1
+        except OSError:
+            break
+    server.close()
+    print("answer:", answer, "| the socket was reached", reached, "times")
+    assert reached == 0
+
+
+@here
 def test_an_interpreter_that_hangs_is_given_up_on(tmp_path, monkeypatch):
     import time
 

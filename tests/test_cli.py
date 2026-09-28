@@ -125,15 +125,19 @@ def test_probe_says_why_a_no_is_a_no_and_what_to_do():
     })
     new = _machine({
         "platform": "linux", "kernel": "7.1", "enforce": True, "ports": True, "hosts": True,
-        "scope": True, "sockets": True, "report": True,
+        "scope": True, "sockets": True, "socket_check": "kernel", "report": True,
     })
-    print(old, new, sep="\n")
+    gate = _machine({
+        "platform": "linux", "kernel": "6.12", "enforce": True, "ports": True, "hosts": True,
+        "scope": True, "sockets": True, "socket_check": "gate", "report": True,
+    })
+    print(old, new, gate, sep="\n")
     assert "no  host names in net (api.openai.com): libseccomp is older than 2.5.0" in old
     assert "or upgrade libseccomp" in old
-    sockets = "local sockets only in write-granted folders, checked by the kernel"
-    assert f"no  {sockets} (Linux 7.1 or newer;" in old
-    assert "yes local sockets only in write-granted folders, checked by the kernel\n" in new
-    assert "7.1 or newer" not in new
+    sockets = "local sockets only in write-granted folders"
+    assert f"no  {sockets} (needs Linux 7.1 or newer, or libseccomp 2.5 or newer for hlyn's gate)" in old
+    assert f"yes {sockets}, checked by the kernel\n" in new
+    assert f"yes {sockets}, checked by hlyn's gate (Linux 7.1 or newer checks them in the kernel)\n" in gate
     mac = _machine({
         "platform": "darwin", "kernel": "27.0.0", "enforce": True, "ports": True, "hosts": True,
         "scope": False, "sockets": True, "report": True,
@@ -148,9 +152,12 @@ def test_probe_tells_whether_this_kernel_checks_socket_files():
     out = json.loads(hlyn("probe", "--json").stdout)
     print(out)
     if sys.platform == "linux":
-        from hlyn.core import landlock
+        from hlyn.core import landlock, notify, seccomp
 
-        assert out["sockets"] == (out["enforce"] and landlock.abi() >= 9)
+        kernel = landlock.abi() >= 9
+        gate = notify.ready() and not seccomp.busy()
+        assert out["sockets"] == bool(out["enforce"] and (kernel or gate))
+        assert out["socket_check"] == ("kernel" if kernel else "gate" if gate else None)
 
 
 @here

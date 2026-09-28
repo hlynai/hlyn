@@ -741,16 +741,26 @@ def test_granted_names_refused_sockets_only_under_a_write_grant(docker_home, tmp
             assert got == want, name
 
 
-def test_hlyn_show_warns_when_a_write_grant_holds_a_refused_socket(docker_home):
+def test_hlyn_show_warns_when_a_write_grant_holds_a_refused_socket_nothing_checks(docker_home, monkeypatch):
+    """With hosts, or before Linux 7.1 with any limited network, the gate
+    refuses docker.sock even inside a write grant, race-free: no warning.
+    From 7.1, ports and net=False have no gate, and Landlock allows every
+    socket in a write-granted folder: then `show` and the seal warn."""
     env = dict(os.environ, PYTHONPATH=SRC, HOME=str(docker_home))
     folder = str(docker_home / ".docker")
-    done = subprocess.run([sys.executable, "-m", "hlyn.cli", "show", "--net", "pypi.org", "--write", folder],
-                          capture_output=True, text=True, env=env, check=False)
-    print(done.stderr)
-    assert done.returncode == 0
-    assert f"hlyn: --write {folder} covers {os.path.realpath(folder)}/run/docker.sock" in done.stderr
-    assert "Grant a narrower folder unless you mean it." in done.stderr
-    ports = subprocess.run([sys.executable, "-m", "hlyn.cli", "show", "--net", "443", "--write", folder],
-                           capture_output=True, text=True, env=env, check=False)
-    print("with ports:", repr(ports.stderr))
-    assert "docker.sock" not in ports.stderr  # the gate's list is host mode's
+    for net in ("pypi.org", "443"):
+        done = subprocess.run([sys.executable, "-m", "hlyn.cli", "show", "--net", net, "--write", folder],
+                              capture_output=True, text=True, env=env, check=False)
+        print(f"--net {net}:", repr(done.stderr))
+        assert done.returncode == 0
+        assert "docker.sock" not in done.stderr
+    from hlyn import jail
+    from hlyn.core import landlock
+    from hlyn.policy import Policy
+
+    monkeypatch.setattr(landlock, "abi", lambda: 9)
+    said = jail.reaches(Policy(net=[443], write=[folder]))
+    print("on a 7.1 kernel, ports:", said)
+    assert any(f"--write {folder} covers {os.path.realpath(folder)}/run/docker.sock" in line
+               and "Grant a narrower folder unless you mean it." in line for line in said)
+    assert jail.reaches(Policy(net=["pypi.org"], write=[folder])) == []

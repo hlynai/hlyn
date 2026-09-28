@@ -185,9 +185,10 @@ WHY: dict[str, str] = {
     "busy": "the proxy was at its limit of connections at once",
 }
 
-# Why a resolver, D-Bus or container-runtime socket is never allowed with
-# hosts, whatever the grants (5.3).
-REFUSED_NOTE = ("never allowed with --net hosts: the program behind it acts for you, on the "
+# Why a resolver, D-Bus or container-runtime socket is never allowed while
+# the network is limited, whatever the grants (5.3): with hosts, and on
+# Linux before 7.1 with ports or no network too (core/linux.watched).
+REFUSED_NOTE = ("never allowed unless the network is open: the program behind it acts for you, on the "
                 "network or the machine (--net-any if you mean it)")
 
 
@@ -569,16 +570,19 @@ class Report:
                              "so local sockets are refused; see hlyn probe", source="gate")
             shown = f"local socket {safe(tilde(where))[:300]}"
             if denial.allow == "--net-any" or _refused(where):
-                return Entry("net", shown, None, LOOKUP if _resolver(where) else REFUSED_NOTE, source="gate")
+                # With hosts a lookup has the proxy; otherwise there is none.
+                lookup = _resolver(where) and self.plan.hosts()
+                return Entry("net", shown, None, LOOKUP if lookup else REFUSED_NOTE, source="gate")
             return Entry("net", shown, flag("--write", os.path.dirname(where) or "/"),
                          "a local socket needs write access to its folder", source="gate")
         if why in ("unix-send", "unix-bound"):
             shown = f"local socket {safe(tilde(where))[:300]}"
-            note = ("a datagram sent to a path can't be checked race-free with --net hosts: "
+            note = ("a datagram sent to a path can't be checked race-free while the network is limited: "
                     "the program must connect the socket first (--net-any if you trust it)"
                     if why == "unix-send" else
-                    "a socket bound before connecting can't be connected race-free with --net hosts: "
-                    "hlyn connects a new one, which would lose the address (--net-any if you trust it)")
+                    "a socket bound before connecting can't be connected race-free while the network "
+                    "is limited: hlyn connects a new one, which would lose the address "
+                    "(--net-any if you trust it)")
             return Entry("net", shown, None, note, source="gate")
         if why == "udp":
             return Entry("net", f"a name lookup or QUIC ({safe(where)[:20]})", None, LOOKUP, source="gate")
