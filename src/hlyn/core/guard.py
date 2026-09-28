@@ -12,8 +12,9 @@ gate. `Guard` answers them from one loop:
 | TCP to an address the policy lists (IP, CIDR, localhost) | swap, wait for the proxy's verdict, answer it |
 | TCP anywhere else                                     | `EACCES`                     |
 | an IP socket other than TCP (UDP: a name lookup)       | `EPERM`, and say so          |
-| unix path in a write-granted folder, not refused       | let it run                   |
+| unix connect, path in a write-granted folder, not refused | pinned swap                |
 | unix path anywhere else, or on the refused list        | `EACCES`                     |
+| unix `sendto` naming a path                            | `EACCES`                     |
 | unix abstract or unnamed, `AF_UNSPEC`, netlink         | let it run                   |
 | anything unreadable or unknown                        | `EACCES` (fail closed)       |
 
@@ -21,10 +22,21 @@ A *swap* is the gate opening its own connection to the proxy, writing the
 PROXY v2 header naming what the agent dialled, and installing that socket at
 the agent's descriptor number (`notify.addfd`). A TCP connect is never let
 run: if another thread rewrites the address after the gate read it, the only
-effect is which row applied, and the proxy re-checks every claim. The rows
-that do let a call run are unix sockets (the residual in 5.3, closed by
-Landlock `RESOLVE_UNIX` on 7.1+), disconnects and netlink; a race that turns
-one into a TCP connect meets Landlock's zero TCP ports.
+effect is which row applied, and the proxy re-checks every claim.
+
+A *pinned swap* does the same for a unix socket: the gate opens the socket
+file it checked with no symlink allowed on the way (`notify.pin`), checks
+that object (a socket; not one of the refused sockets, by inode, so a hard
+link under another name is refused too), connects a new socket of the
+agent's type to it through `/proc/self/fd/N`, and installs that. The agent's
+own call never runs, so neither a racing thread nor a folder swapped for a
+symlink after the check reaches anything else (CVE-2026-79994's pattern;
+FINDINGS.md, "Checking the eight decisions"). What it costs: the listener
+sees the gate as the connecting process (same user), options set before
+`connect` are lost, and a socket bound before connecting is refused (its
+address would be lost). The rows that still let a call run are disconnects,
+abstract names (Landlock's scope applies) and route netlink; a race that
+turns one into a TCP connect meets Landlock's zero TCP ports.
 
 **Reduced mode**: when the gate may not read the agent's memory (Yama
 `ptrace_scope` 2 or 3, or a child of `hlyn.on()` at 1), it still knows the
@@ -140,6 +152,14 @@ REMEMBER = 4096
 # How long past the proxy's connect timeout the gate waits for a verdict.
 SLACK = 2.0
 
+# How long the gate waits on a unix listener whose queue is full, for an
+# agent socket that blocks (a non-blocking one gets EAGAIN at once). The
+# gate answers everyone from one loop, so this is short.
+QUEUED = 1.0
+
+# How long the inodes of the refused sockets found here are trusted.
+FRESH = 1.0
+
 _LOOPBACK = (ipaddress.IPv4Address("127.0.0.1"), ipaddress.IPv6Address("::1"))
 
 
@@ -217,6 +237,7 @@ class Guard:
         self.writes: tuple[str, ...] | Literal[True] = (
             True if writes is True else tuple(os.path.realpath(item) for item in writes)
         )
+        self._refused: tuple[float, set[tuple[int, int]]] = (0.0, set())
 
     # -- the loop ---------------------------------------------------------
 
@@ -334,7 +355,7 @@ class Guard:
             self._go(call)  # route netlink only (the filter); it can't leave the machine
             return
         if kind == "unix":
-            self._unix(call, address, data is None)
+            self._unix(call, address, data is None, target, ino)
             return
 
         # An IP socket: TCP, since the filter allows no other kind.
@@ -385,9 +406,12 @@ class Guard:
         self._event(call, "dns" if port == 53 else "direct", shown, None if port == 53 else _flag(ip, port))
         self._no(call, errno.EACCES)
 
-    def _unix(self, call: notify.Call, address: notify.Address | None, reduced: bool) -> None:
+    def _unix(self, call: notify.Call, address: notify.Address | None, reduced: bool,
+              target: int, ino: int) -> None:
         """Unix sockets: a path needs a write grant on its folder and must
-        not be on the refused list. Reduced mode refuses them all."""
+        not be one of the refused sockets; the gate then connects the object
+        it checked and swaps it in (the module's pinned swap). Reduced mode
+        refuses them all."""
         if reduced or address is None:
             self._event(call, "unix", "(unknown path)", None,
                         detail="reduced mode: the gate can't read addresses here")
@@ -396,6 +420,8 @@ class Guard:
         if address.family == socket.AF_UNSPEC or (address.family == socket.AF_UNIX and address.path is None):
             # A disconnect, an abstract name (Landlock's abstract-socket
             # scope applies) or an unnamed address (the kernel refuses it).
+            if address.family == socket.AF_UNSPEC:
+                self.mine.discard(ino)
             self._go(call)
             return
         if address.family != socket.AF_UNIX or address.path is None:
@@ -417,15 +443,91 @@ class Guard:
                 # running the call, and nothing to report.
                 self._no(call, errno.ENOENT)
                 return
-            self._event(call, "unix", real, "--net-any",
-                        detail="never allowed with --net hosts: the program behind it acts for its caller")
+            self._refuse(call, real)
+            return
+        if not self._granted(real):
+            self._event(call, "unix", real, f"--write {shlex.quote(os.path.dirname(real) or '/')}")
             self._no(call, errno.EACCES)
             return
-        if self._granted(real):
-            self._go(call)
+        if call.nr == self.sendto_nr:
+            # The kernel would resolve the path again after this check. Only
+            # a send on a connected socket is safe; glibc's syslog, Python's
+            # SysLogHandler and the like connect first.
+            self._event(call, "unix-send", real, "--net-any",
+                        detail="a datagram sent to a path can't be checked race-free: "
+                               "connect the socket first")
+            self._no(call, errno.EACCES)
             return
-        self._event(call, "unix", real, f"--write {shlex.quote(os.path.dirname(real) or '/')}")
+        found = notify.unixsock(call.pid, ino)
+        if found is None:
+            self._no(call, errno.EACCES)
+            return
+        sort, bound = found
+        if ino in self.mine and sort != socket.SOCK_DGRAM:
+            self._no(call, errno.EISCONN)
+            return
+        if bound:
+            self._event(call, "unix-bound", real, "--net-any",
+                        detail="a socket bound before connecting would lose its address "
+                               "when the gate connects it")
+            self._no(call, errno.EACCES)
+            return
+        try:
+            pinned = notify.pin(real)
+        except OSError as exc:
+            # ENOENT and the like: the kernel's own answer. ELOOP: a symlink
+            # appeared in a path that had none a moment ago.
+            self._no(call, errno.EACCES if exc.errno == errno.ELOOP else (exc.errno or errno.EACCES))
+            return
+        try:
+            info = os.fstat(pinned)
+            if not stat.S_ISSOCK(info.st_mode):
+                self._no(call, errno.ECONNREFUSED)  # what connect(2) says for a file that isn't a socket
+                return
+            if (info.st_dev, info.st_ino) in self._sockets():
+                self._refuse(call, real)
+                return
+            flags = notify.fdflags(call.pid, target) or 0
+            sock = socket.socket(socket.AF_UNIX, sort)
+            try:
+                sock.settimeout(0 if flags & os.O_NONBLOCK else QUEUED)
+                sock.connect(f"/proc/self/fd/{pinned}")
+            except TimeoutError:
+                sock.close()
+                self._no(call, errno.EAGAIN)
+                return
+            except OSError as exc:
+                sock.close()
+                self._no(call, exc.errno or errno.ECONNREFUSED)
+                return
+            self._install(call, sock, target, bool(flags & os.O_CLOEXEC), flags)
+        finally:
+            os.close(pinned)
+
+    def _refuse(self, call: notify.Call, real: str) -> None:
+        self._event(call, "unix", real, "--net-any",
+                    detail="never allowed with --net hosts: the program behind it acts for its caller")
         self._no(call, errno.EACCES)
+
+    def _sockets(self) -> set[tuple[int, int]]:
+        """The refused sockets that exist here, by (device, inode), found
+        again at most once per `FRESH` seconds (a daemon restart makes a new
+        one)."""
+        when, found = self._refused
+        now = time.monotonic()
+        if now - when < FRESH:
+            return found
+        import glob
+
+        found = set()
+        for place in PLACES:
+            for item in glob.glob(os.path.expanduser(place)):
+                with contextlib.suppress(OSError):
+                    info = os.stat(item)
+                    if stat.S_ISSOCK(info.st_mode):
+                        found.add((info.st_dev, info.st_ino))
+        self._refused = (now, found)
+        return found
 
     def _granted(self, real: str) -> bool:
         if self.writes is True:
@@ -508,7 +610,7 @@ class Guard:
     def _remember(self, ino: int, pid: int) -> None:
         self.mine.add(ino)
         if len(self.mine) > REMEMBER:
-            live = notify.tcp(pid)
+            live = notify.tcp(pid) | notify.unix(pid)
             self.mine &= live
             self.owed &= live
 

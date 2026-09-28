@@ -344,20 +344,156 @@ def test_row_22_unix_sockets_need_a_write_grant_and_the_refused_list_always_wins
     assert allows[os.path.realpath(f"{box}/docker.sock")] == "--net-any"
 
 
-def test_row_23_a_unix_datagram_to_a_path_is_checked_like_a_connect(proxy):
+def test_row_23_a_unix_datagram_goes_by_connect_never_by_a_path_in_sendto(proxy):
+    """A datagram socket connected to a granted path is swapped like a stream
+    one, and its sends arrive. A `sendto` that names a path is refused: the
+    kernel would resolve the path again after the gate's check, which a
+    racing thread or a folder swap wins (5.3), and glibc's syslog, Python's
+    SysLogHandler and the like connect first."""
     box = tempfile.mkdtemp(prefix="hlyn-guard-")
     sink = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     sink.bind(f"{box}/log")
-    out, _ = gated(f"""
+    out, events = gated(f"""
         d = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        attempt("sendto granted", lambda: str(d.sendto(b"hello", {box + '/log'!r})))
-        attempt("sendto /dev/log", lambda: str(d.sendto(b"x", "/dev/log")))
+        attempt("connect granted", lambda: d.connect({box + '/log'!r}))
+        attempt("send", lambda: str(d.send(b"hello")))
+        attempt("type kept", lambda: str(d.type == socket.SOCK_DGRAM))
+        e = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        attempt("sendto granted", lambda: str(e.sendto(b"x", {box + '/log'!r})))
+        attempt("sendto /dev/log", lambda: str(e.sendto(b"x", "/dev/log")))
     """, net=["example.com"], write=[box], read=[box], proxy=proxy)
     sink.settimeout(1)
-    print("granted sink got:", sink.recv(100))
+    heard = sink.recv(100)
+    print("granted sink got:", heard)
     got = lines(out)
-    assert got["sendto granted"] == "5"
-    assert got["sendto /dev/log"] == "EACCES"
+    assert got["connect granted"] == "OK" and got["send"] == "5" and got["type kept"] == "True"
+    assert heard == b"hello"
+    assert got["sendto granted"] == "EACCES" and got["sendto /dev/log"] == "EACCES"
+    sent = [event for event in events if event["why"] == "unix-send"]
+    print("reported:", sent)
+    assert sent and sent[0]["target"] == os.path.realpath(f"{box}/log")
+
+
+def test_unix_connects_get_the_kernels_own_answers(proxy):
+    """Swapped or not, the agent sees what the kernel would say: a stream
+    socket connects once (EISCONN after), nothing listening is ECONNREFUSED,
+    a missing path is ENOENT, and the peer is the listener's address."""
+    box = tempfile.mkdtemp(prefix="hlyn-guard-")
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(f"{box}/db.sock")
+    server.listen(4)
+    dead = socket.socket(socket.AF_UNIX)
+    dead.bind(f"{box}/dead.sock")  # bound, never listening
+    out, _ = gated(f"""
+        s = socket.socket(socket.AF_UNIX)
+        attempt("connect", lambda: s.connect({box + '/db.sock'!r}))
+        attempt("peer", lambda: s.getpeername())
+        attempt("connect again", lambda: s.connect({box + '/db.sock'!r}))
+        s.sendall(b"ping")
+        attempt("nothing listening", lambda: socket.socket(socket.AF_UNIX).connect({box + '/dead.sock'!r}))
+        attempt("missing", lambda: socket.socket(socket.AF_UNIX).connect({box + '/none.sock'!r}))
+    """, net=["example.com"], write=[box], read=[box], proxy=proxy)
+    conn, _ = server.accept()
+    conn.settimeout(2)
+    heard = conn.recv(10)
+    print("server heard:", heard)
+    got = lines(out)
+    assert got["connect"] == "OK" and got["peer"] == f"{box}/db.sock"
+    assert got["connect again"] == "EISCONN"
+    assert heard == b"ping"
+    assert got["nothing listening"] == "ECONNREFUSED"
+    assert got["missing"] == "ENOENT"
+    server.close()
+    dead.close()
+
+
+def test_a_unix_socket_bound_before_connecting_is_refused_and_says_why(proxy):
+    """The gate connects a new socket of its own and swaps it in; a socket the
+    agent had bound would lose its address, so it is refused instead."""
+    box = tempfile.mkdtemp(prefix="hlyn-guard-")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    server.bind(f"{box}/srv")
+    out, events = gated(f"""
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        c.bind({box + '/client'!r})
+        attempt("bound, then connect", lambda: c.connect({box + '/srv'!r}))
+    """, net=["example.com"], write=[box], read=[box], proxy=proxy)
+    got = lines(out)
+    assert got["bound, then connect"] == "EACCES"
+    bound = [event for event in events if event["why"] == "unix-bound"]
+    print("reported:", bound)
+    assert bound and bound[0]["target"] == os.path.realpath(f"{box}/srv")
+    server.close()
+
+
+def test_a_folder_swapped_for_a_symlink_never_reaches_another_socket(proxy):
+    """CVE-2026-79994's pattern: the gate checks a path, then the folder in it
+    is swapped for a symlink to somewhere else before the connect runs. The
+    gate pins the socket file it checked and connects to that object, so the
+    other socket is never reached, whoever wins the race. One thread swaps
+    the folder (renameat2 RENAME_EXCHANGE) while the main thread connects."""
+    box = tempfile.mkdtemp(prefix="hlyn-guard-")
+    other = tempfile.mkdtemp(prefix="hlyn-guard-other-")
+    os.mkdir(f"{box}/ws")
+    good = socket.socket(socket.AF_UNIX)
+    good.bind(f"{box}/ws/s.sock")
+    good.listen(4096)
+    evil = socket.socket(socket.AF_UNIX)
+    evil.bind(f"{other}/s.sock")
+    evil.listen(4096)
+    evil.setblocking(False)
+    os.symlink(other, f"{box}/link")
+    out, _ = gated(f"""
+        import threading
+        libc = ctypes.CDLL(None, use_errno=True)
+        stop = False
+        def swap():
+            while not stop:
+                libc.renameat2(-100, {box + '/ws'!r}.encode(), -100, {box + '/link'!r}.encode(), 2)
+        t = threading.Thread(target=swap); t.start()
+        counts = {{}}
+        for _ in range(3000):
+            c = socket.socket(socket.AF_UNIX)
+            try:
+                c.connect({box + '/ws/s.sock'!r})
+                counts["connected"] = counts.get("connected", 0) + 1
+            except OSError as exc:
+                name = errno.errorcode.get(exc.errno, str(exc.errno))
+                counts[name] = counts.get(name, 0) + 1
+            c.close()
+        stop = True; t.join()
+        attempt("outcomes", lambda: " ".join(f"{{k}}={{v}}" for k, v in sorted(counts.items())))
+    """, net=["example.com"], write=[box], read=[box], proxy=proxy, timeout=300)
+    reached = 0
+    while True:
+        try:
+            evil.accept()[0].close()
+            reached += 1
+        except OSError:
+            break
+    print(f"the other socket was reached {reached} times")
+    got = lines(out)
+    assert "connected=" in got["outcomes"], "the swap never let a connect through: nothing was tested"
+    assert reached == 0
+    good.close()
+    evil.close()
+
+
+def test_a_hard_link_to_a_refused_socket_is_refused_by_what_it_is(proxy, docker_home):
+    """A refused socket linked into a granted folder under an innocent name:
+    the path matches nothing, the object is docker.sock. The gate compares the
+    pinned object with the refused sockets that exist here, by inode."""
+    box = tempfile.mkdtemp(prefix="hlyn-guard-", dir=str(docker_home))
+    sock = docker_home / ".docker" / "run" / "docker.sock"
+    os.link(sock, f"{box}/innocent.sock")
+    out, events = gated(f"""
+        link = {box + '/innocent.sock'!r}
+        attempt("hard link to docker.sock", lambda: socket.socket(socket.AF_UNIX).connect(link))
+    """, net=["example.com"], write=[box], read=[box], proxy=proxy)
+    got = lines(out)
+    assert got["hard link to docker.sock"] == "EACCES"
+    print("reported:", events)
+    assert any(event["allow"] == "--net-any" for event in events)
 
 
 @pytest.mark.parametrize("untag", ["native", "x86_64"])
@@ -524,16 +660,15 @@ def test_row_3_racing_the_address_never_connects_tcp_anywhere_but_the_proxy(prox
                             for p in os.environ.get("PATH", "").split(":")), reason="needs cc")
 @pytest.mark.parametrize("where", ["inside", "outside"])
 def test_row_3_unix_race(proxy, where):
-    """The gate lets an allowed unix connect run, so a racing thread can turn
-    it into a refused path after the check (5.3's residual).
+    """Racing threads flip a unix connect's path between an allowed socket and
+    a refused one (docker.sock). The gate connects the socket file it checked
+    itself and swaps the connection in, so the agent's own call never runs
+    and the race is won zero times, on every kernel. Before 2026-09-28 the
+    gate let the call run and this was won 611-756 times in 3,000.
 
-    `inside`: the refused socket (docker.sock) sits in the write-granted
-    folder. Landlock allows that whole folder, so no kernel closes this;
-    measured, not asserted zero. `outside`: it sits in a folder no grant
-    covers, the usual case (the resolver, D-Bus, the container runtime).
-    From Landlock ABI 9 (Linux 7.1+) the kernel refuses it after the gate's
-    check, so the race must be won zero times there (phase 6); before that
-    it is measured. Both check that the check itself works."""
+    `inside`: the refused socket sits in the write-granted folder;
+    `outside`: in a folder no grant covers. Both check that the flipping
+    lands on both paths, so the check itself was exercised."""
     from hlyn.core import landlock
 
     library = _race_library()
@@ -561,13 +696,11 @@ def test_row_3_unix_race(proxy, where):
         except OSError:
             break
     abi = landlock.abi()
-    closed = where == "outside" and abi >= 9
     print(f"Landlock ABI {abi}, refused socket {where} the grant: races won {won} of 3000 "
-          f"(reached {refused}); {'must be 0' if closed else 'measured'}")
+          f"(reached {refused}); must be 0")
     counts = out.split()
     assert int(counts[1]) > 0 and int(counts[3]) > 0
-    if closed:
-        assert won == 0
+    assert won == 0
 
 
 # ---------------------------------------------------------------------------

@@ -753,6 +753,20 @@ def test_the_gates_refusals_become_lines_with_the_flag_that_allows_each(tmp_path
     assert all(entry.source == "gate" for entry in got.values())
 
 
+def test_a_unix_send_to_a_path_and_a_bound_socket_are_explained(tmp_path):
+    """The two unix refusals the pinned swap adds (guard._unix): each says
+    what to change in the program, since no grant makes them race-free."""
+    report = gated(tmp_path)
+    send = one(report, kind="net", target="/run/app/log", op="unix-send", source="gate", allow="--net-any")
+    bound = one(report, kind="net", target="/run/app/ctl", op="unix-bound", source="gate", allow="--net-any")
+    for entry in (send, bound):
+        print(f"{entry.target!r:34} allow={entry.allow!r} note={entry.note!r}")
+    assert send.target == "local socket /run/app/log" and bound.target == "local socket /run/app/ctl"
+    assert "connect the socket first" in send.note
+    assert "bound before connecting" in bound.note
+    assert send.allow is None and bound.allow is None
+
+
 def test_a_flag_the_gate_passes_on_is_checked_not_trusted(tmp_path):
     """The address or path came from the agent's memory: a flag that doesn't
     parse as exactly that entry is dropped, and a unix flag is always built

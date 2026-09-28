@@ -572,6 +572,14 @@ class Report:
                 return Entry("net", shown, None, LOOKUP if _resolver(where) else REFUSED_NOTE, source="gate")
             return Entry("net", shown, flag("--write", os.path.dirname(where) or "/"),
                          "a local socket needs write access to its folder", source="gate")
+        if why in ("unix-send", "unix-bound"):
+            shown = f"local socket {safe(tilde(where))[:300]}"
+            note = ("a datagram sent to a path can't be checked race-free with --net hosts: "
+                    "the program must connect the socket first (--net-any if you trust it)"
+                    if why == "unix-send" else
+                    "a socket bound before connecting can't be connected race-free with --net hosts: "
+                    "hlyn connects a new one, which would lose the address (--net-any if you trust it)")
+            return Entry("net", shown, None, note, source="gate")
         if why == "udp":
             return Entry("net", f"a name lookup or QUIC ({safe(where)[:20]})", None, LOOKUP, source="gate")
         if why == "gate-error":

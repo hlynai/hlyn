@@ -12,8 +12,11 @@ them; `guard.py` decides. Nothing here decides anything.
   with `SETFD` (Linux 5.9): libseccomp has no wrapper for it.
 - What a socket is, where the agent's pointer points and what flags its
   descriptor has are read from `/proc`: the descriptor's inode from
-  `/proc/PID/fd`, unix sockets from `/proc/PID/net/unix`, the address from
-  `/proc/PID/mem`, flags from `/proc/PID/fdinfo`.
+  `/proc/PID/fd`, unix sockets (and their type) from `/proc/PID/net/unix`,
+  the address from `/proc/PID/mem`, flags from `/proc/PID/fdinfo`.
+- A unix socket file the gate will connect to is opened with `openat2`
+  (Linux 5.6), refusing symlinks, so the object checked is the object
+  connected (`pin`): FINDINGS.md, "Checking the eight decisions".
 
 Every read of the agent's state must be followed by `valid()` before the
 answer acts on it: the notification, and with it the pid, may have gone
@@ -49,11 +52,13 @@ __all__ = [
     "fdflags",
     "inode",
     "netlink",
+    "pin",
     "read",
     "receive",
     "sockaddr",
     "tcp",
     "unix",
+    "unixsock",
     "valid",
 ]
 
@@ -315,6 +320,52 @@ def unix(pid: int) -> set[int]:
     except OSError:
         pass
     return out
+
+
+def unixsock(pid: int, ino: int) -> tuple[int, bool] | None:
+    """Unix socket `ino` in thread `pid`'s network namespace: its type
+    (`SOCK_STREAM`, `SOCK_DGRAM`, `SOCK_SEQPACKET`) and whether it has an
+    address (bound, or autobound). `None` if it isn't listed."""
+    want = str(ino).encode()
+    try:
+        with open(f"/proc/{pid}/net/unix", "rb") as fh:
+            next(fh, None)
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 7 and parts[6] == want:
+                    return int(parts[4], 16), len(parts) >= 8
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+# openat2(2): the syscall (the same number on every architecture), and the
+# resolve flags that refuse any symlink, /proc magic links included.
+OPENAT2 = 437
+NO_SYMLINKS = 0x04 | 0x02  # RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS
+O_PATH = 0o10000000  # Linux's, the same on x86_64 and aarch64 (os has it only there)
+
+
+@functools.cache
+def _libc() -> ctypes.CDLL:
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    return libc
+
+
+def pin(path: str) -> int:
+    """An `O_PATH` descriptor for the file at `path`, an absolute path with no
+    symlink in it: the object the gate checks and then connects to (through
+    `/proc/self/fd/N`), so nothing swapped in afterwards is reached. A
+    symlink anywhere in `path` raises `ELOOP`: someone changed the path
+    since it was resolved. The caller closes it."""
+    how = struct.pack("=QQQ", O_PATH | os.O_CLOEXEC, 0, NO_SYMLINKS)
+    fd = _libc().syscall(ctypes.c_long(OPENAT2), ctypes.c_long(-100), path.encode(), how,
+                         ctypes.c_size_t(len(how)))
+    if fd < 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), path)
+    return int(fd)
 
 
 def netlink(pid: int) -> set[int]:
