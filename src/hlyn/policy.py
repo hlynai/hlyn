@@ -441,7 +441,7 @@ def runtime() -> tuple[str, ...]:
         out.add(os.path.abspath(sys.executable))
     out.update(_lib())
     out.update(_dev())
-    out.update(item for item in SSLCONF if os.path.isfile(item))
+    out.update(item for item in (*SSLCONF, *RELEASE) if os.path.isfile(item))
     if sys.platform == "darwin":
         # CoreFoundation reads this one-line encoding preference in every
         # process that uses it. The file itself only, not the home directory.
@@ -485,6 +485,17 @@ TRUST: tuple[str, ...] = (
     "/usr/local/etc/openssl@3/certs",
     "/home/linuxbrew/.linuxbrew/etc/ca-certificates/cert.pem",
     "/home/linuxbrew/.linuxbrew/etc/openssl@3/cert.pem",
+)
+
+# Which OS and version this is. Public, and read by programs as they start:
+# pip's user agent reads /etc/debian_version through `distro` and stops if
+# the file exists but can't be read; installers and `platform` read
+# os-release. Granted whatever the policy, the files only.
+RELEASE: tuple[str, ...] = (
+    "/etc/os-release", "/usr/lib/os-release",
+    "/etc/lsb-release", "/etc/debian_version", "/etc/redhat-release", "/etc/fedora-release",
+    "/etc/centos-release", "/etc/system-release", "/etc/SuSE-release", "/etc/alpine-release",
+    "/etc/arch-release", "/etc/gentoo-release",
 )
 
 # OpenSSL's configuration files. A program linked against OpenSSL (or

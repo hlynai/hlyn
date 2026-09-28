@@ -140,6 +140,29 @@ def test_the_real_openssl_configurations_are_on_the_list():
     assert "/opt/homebrew/etc/ca-certificates/cert.pem" in TRUST
 
 
+def test_the_files_that_name_the_os_are_readable(monkeypatch, tmp_path):
+    """Which OS and version this is: pip's user agent reads /etc/debian_version
+    through `distro` and stops if it exists but can't be read; many installers
+    read os-release. Public, so granted whatever the policy."""
+    from hlyn import policy as module
+
+    present = tmp_path / "os-release"
+    present.write_text('NAME="Test"\n')
+    monkeypatch.setattr(module, "RELEASE", (str(present), str(tmp_path / "missing-release")))
+    got = [item for item in runtime() if str(tmp_path) in item]
+    print(got, module.RELEASE)
+    assert got == [str(present)]
+
+
+def test_the_real_os_release_files_are_on_the_list():
+    from hlyn.policy import RELEASE
+
+    print(RELEASE)
+    for name in ("/etc/os-release", "/usr/lib/os-release", "/etc/debian_version", "/etc/redhat-release",
+                 "/etc/alpine-release", "/etc/lsb-release"):
+        assert name in RELEASE
+
+
 def test_runtime_is_pruned():
     items = runtime()
     for item in items:
