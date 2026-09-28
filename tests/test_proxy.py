@@ -116,7 +116,10 @@ async def start(
         mine=options.pop("mine", lambda: ()),
         **options,
     )
-    await served.listen()
+    # Listen as `listen()` does, but check the port against this machine's
+    # real addresses: the check dials each one, and a stand-in public
+    # address (OWN) would send packets to the internet (tools/capture.sh).
+    await served.adopt(proxy.bind(0, lambda port: proxy.taken(port, proxy.interfaces())))
     return served
 
 
