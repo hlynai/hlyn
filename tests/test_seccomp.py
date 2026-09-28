@@ -75,23 +75,69 @@ def test_threads_start_under_the_filter():
 # ---------------------------------------------------------------------------
 
 
-def test_io_uring_is_shut():
+def test_io_uring_is_refused_as_missing():
     # The one that matters most. io_uring submits work through a shared ring
     # instead of syscalls, so if this is reachable the entire filter is
-    # decorative and every other test here is meaningless.
+    # decorative. It is refused the way a kernel without io_uring refuses it
+    # (ENOSYS), not by killing: libuv, and so Node and npm, try it at startup
+    # and fall back when it fails (FINDINGS.md, "Checking the eight
+    # decisions"). All three calls, and the program goes on.
     done = jail(
-        RAW + "\ncall(nr, 1, 0)\nprint('ESCAPED')",
+        RAW
+        + """
+import errno
+for name, nr, args in calls:
+    rc = call(nr, *args)
+    print(name, rc, errno.errorcode.get(ctypes.get_errno()))
+print("WENT ON")
+""",
+        before=(
+            "calls = [(n, seccomp._nr(n), a) for n, a in (('io_uring_setup', (8, 0)), "
+            "('io_uring_enter', (0, 1, 0, 0)), ('io_uring_register', (0, 0, 0, 0)))]"
+        ),
+    )
+    print(done.stdout, done.stderr)
+    assert not killed(done), "io_uring killed the process instead of failing like a missing call"
+    for name in ("io_uring_setup", "io_uring_enter", "io_uring_register"):
+        assert f"{name} -1 ENOSYS" in done.stdout, f"{name} was not refused as missing"
+    assert "WENT ON" in done.stdout
+
+
+def test_a_program_that_probes_io_uring_falls_back():
+    # What libuv does: ask for a ring, and on any failure use plain calls.
+    done = jail(
+        RAW
+        + """
+ring = call(nr, 8, ctypes.addressof(ctypes.create_string_buffer(120)))
+print("ring", ring)
+if ring < 0:
+    import os
+    with open(os.__file__) as fh:  # the runtime is always readable
+        print("fell back, read", len(fh.read()) > 0)
+""",
         before="nr = seccomp._nr('io_uring_setup')",
     )
-    assert killed(done), f"io_uring was reachable: rc={done.returncode} {done.stdout}"
+    print(done.stdout, done.stderr)
+    assert "ring -1" in done.stdout and "fell back, read True" in done.stdout
 
 
-def test_io_uring_enter_is_shut():
-    done = jail(
-        RAW + "\ncall(nr, 0, 0, 0, 0)\nprint('ESCAPED')",
-        before="nr = seccomp._nr('io_uring_enter')",
-    )
-    assert killed(done), f"io_uring_enter was reachable: rc={done.returncode}"
+def test_a_syscall_from_the_wrong_architecture_kills_the_whole_process():
+    # libseccomp's default for a call made through another architecture's
+    # convention (ia32's int 0x80 on x86_64) is KILL_THREAD, which seccomp(2)
+    # says "is likely to leave the process in a permanently inconsistent and
+    # possibly corrupt state". hlyn asks for KILL_PROCESS. Read from the
+    # compiled filter, since only an x86_64 kernel with ia32 support can make
+    # the call (test_escape.py's foreign-ABI test does, there).
+    import struct
+
+    from hlyn.core import seccomp
+    from hlyn.policy import Policy
+
+    code = seccomp.program(Policy())
+    rets = {k for op, _, _, k in struct.iter_unpack("=HBBI", code) if op == 0x06}
+    print("return values in the filter:", sorted(hex(k) for k in rets))
+    assert seccomp.KILL in rets
+    assert 0x00000000 not in rets, "some path in the filter kills only the thread (KILL_THREAD)"
 
 
 def test_ptrace_is_shut():

@@ -778,7 +778,8 @@ class Report:
         if code == -signal.SIGSYS:
             out.append(
                 "hlyn: the kernel stopped the command: it made a system call hlyn never allows "
-                "(e.g. ptrace, io_uring, mount, loading kernel modules)."
+                "(e.g. ptrace, mount, loading kernel modules, or a call made through another "
+                "architecture's convention)."
             )
         elif items:
             said = f"signal {-code}" if code < 0 else f"code {code}"

@@ -28,7 +28,7 @@ TYPE_CHECKING = False
 if TYPE_CHECKING:
     from ..policy import Policy
 
-__all__ = ["SHUT", "busy", "load", "ready", "why"]
+__all__ = ["MISSING", "SHUT", "busy", "load", "program", "ready", "why"]
 
 
 # -- libseccomp constants ---------------------------------------------------
@@ -42,6 +42,7 @@ EBUSY = 16
 ENOSYS = 38
 EPROTONOSUPPORT = 93
 
+BADARCH = 2  # SCMP_FLTATR_ACT_BADARCH
 NNP = 3  # SCMP_FLTATR_CTL_NNP
 TSYNC = 4  # SCMP_FLTATR_CTL_TSYNC
 WAITKILL = 10  # SCMP_FLTATR_CTL_WAITKILL, libseccomp 2.6+ (checked against its 2.6.0 header)
@@ -126,13 +127,6 @@ NEW = {
 # one is here. The reasons are not decoration: they are what a reviewer needs to
 # judge whether the list is right, and what the log prints when one is refused.
 SHUT: dict[str, str] = {
-    # The critical one. io_uring submits work through a shared ring buffer
-    # instead of issuing syscalls, so a seccomp filter never observes it. Left
-    # open, every other entry in this list is bypassable and the syscall
-    # boundary is decorative.
-    "io_uring_setup": "bypasses syscall filtering entirely",
-    "io_uring_enter": "bypasses syscall filtering entirely",
-    "io_uring_register": "bypasses syscall filtering entirely",
     # One agent reading or writing another agent's memory.
     "ptrace": "reads and writes another process's memory",
     "process_vm_readv": "reads another process's memory",
@@ -220,10 +214,26 @@ WIRE: tuple[str, ...] = ()
 # specific paths, Landlock enforces per-path and these stay open.
 BIRTH: tuple[str, ...] = ("execve", "execveat")
 
+# Refused as a kernel without them refuses them (ENOSYS), not killed.
+#
+# The critical one. io_uring submits work through a shared ring buffer
+# instead of issuing syscalls, so a seccomp filter never observes it. Left
+# open, every other rule here is bypassable and the syscall boundary is
+# decorative. Refusing is what makes it safe; killing adds nothing, and
+# libuv asks for a ring at startup and falls back on any failure, so a kill
+# stopped Node and npm from starting at all (FINDINGS.md, "Checking the eight
+# decisions"). ENOSYS is the answer programs are written to fall back on;
+# moby answers clone3 the same way for the same reason.
+MISSING: dict[str, str] = {
+    "io_uring_setup": "bypasses syscall filtering entirely",
+    "io_uring_enter": "bypasses syscall filtering entirely",
+    "io_uring_register": "bypasses syscall filtering entirely",
+}
+
 
 def why(name: str) -> str:
     """The reason a syscall is refused, for the log and for reviewers."""
-    return SHUT.get(name, "not permitted by policy")
+    return SHUT.get(name) or MISSING.get(name) or "not permitted by policy"
 
 
 # -- the library ------------------------------------------------------------
@@ -291,6 +301,8 @@ def lib() -> ctypes.CDLL:
     _lib.seccomp_arch_resolve_name.restype = ctypes.c_uint32
     _lib.seccomp_arch_add.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     _lib.seccomp_arch_add.restype = ctypes.c_int
+    _lib.seccomp_export_bpf.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    _lib.seccomp_export_bpf.restype = ctypes.c_int
     # The array form takes a pointer to the comparisons. The variadic
     # seccomp_rule_add passes structs by value, which ctypes cannot do
     # dependably across ABIs, so we never use it.
@@ -381,25 +393,14 @@ def busy() -> bool:
     return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2
 
 
-def load(policy: Policy) -> int | None:
-    """Compile and install the syscall filter for `policy`.
-
-    One-way. Once loaded the filter applies to this process and every thread
-    and child it has, and cannot be removed.
-
-    Returns the notification descriptor when `net` names hosts: every
-    `connect()` then waits for an answer on it, so it must be handed to the
-    gate at once and this process's copy closed (5.2, step 5). Otherwise
-    returns None.
-    """
+def _build(policy: Policy) -> int:
+    """The compiled filter for `policy`, as a libseccomp context the caller
+    releases. Nothing is loaded."""
     named = bool(policy.hosts())
     api = lib()
-    if named:
-        notify._lib()  # raises, naming the fix, before anything is loaded
     ctx = api.seccomp_init(ALLOW)
     if not ctx:
         raise Failed("libseccomp could not create a filter context")
-
     try:
         # NO_NEW_PRIVS is mandatory for an unprivileged filter. libseccomp sets
         # it by default; we ask explicitly so the requirement is visible here
@@ -426,8 +427,18 @@ def load(policy: Policy) -> int | None:
             if x32:
                 api.seccomp_arch_add(ctx, x32)
 
+        # A call through another architecture's convention (ia32's int 0x80
+        # on x86_64) matches no rule written for this one. libseccomp's
+        # default kills only the calling thread, which seccomp(2) warns "is
+        # likely to leave the process in a permanently inconsistent and
+        # possibly corrupt state"; kill the process, as every rule here does.
+        if api.seccomp_attr_set(ctx, BADARCH, KILL) != 0:
+            raise Failed("libseccomp refused to set the action for a foreign architecture")
+
         for name in SHUT:
             _rule(ctx, KILL, name)
+        for name in MISSING:
+            _rule(ctx, ERROR | ENOSYS, name)
 
         # clone3 takes its flags in a struct, and seccomp cannot follow a
         # pointer. Reporting it missing makes glibc fall back to clone, whose
@@ -510,6 +521,48 @@ def load(policy: Policy) -> int | None:
             for name in BIRTH:
                 _rule(ctx, ERROR | EPERM, name)
 
+    except BaseException:
+        api.seccomp_release(ctx)
+        raise
+    return int(ctx)
+
+
+def program(policy: Policy) -> bytes:
+    """The BPF program `load` would install for `policy`, for inspection:
+    what the filter answers is read from here in tests, including paths no
+    kernel here can take (a foreign architecture)."""
+    import tempfile
+
+    api = lib()
+    ctx = _build(policy)
+    try:
+        with tempfile.TemporaryFile() as out:
+            rc = api.seccomp_export_bpf(ctx, out.fileno())
+            if rc != 0:
+                raise Failed(f"libseccomp could not export the filter: error {-rc}")
+            out.seek(0)
+            return out.read()
+    finally:
+        api.seccomp_release(ctx)
+
+
+def load(policy: Policy) -> int | None:
+    """Compile and install the syscall filter for `policy`.
+
+    One-way. Once loaded the filter applies to this process and every thread
+    and child it has, and cannot be removed.
+
+    Returns the notification descriptor when `net` names hosts: every
+    `connect()` then waits for an answer on it, so it must be handed to the
+    gate at once and this process's copy closed (5.2, step 5). Otherwise
+    returns None.
+    """
+    named = bool(policy.hosts())
+    api = lib()
+    if named:
+        notify._lib()  # raises, naming the fix, before anything is loaded
+    ctx = _build(policy)
+    try:
         ctypes.set_errno(0)
         rc = api.seccomp_load(ctx)
         if rc != 0:
