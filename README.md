@@ -570,7 +570,7 @@ Files and ports are the kernel's own checks, so nothing sits in their path. Meas
 |---|---|
 | Landlock and seccomp themselves, small policy / 64 paths | ~1.5 ms / ~2 ms |
 | `hlyn.on()` in all, network off or ports, Linux 7.1+ | ~10 ms |
-| `hlyn.on()` in all, network off or ports, Linux before 7.1 | ~35 ms: it starts the gate that checks local sockets |
+| `hlyn.on()` in all, network off or ports, Linux before 7.1 | ~15 ms: it starts the gate that checks local sockets |
 
 **Per call, afterwards:**
 

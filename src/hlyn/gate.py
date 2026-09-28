@@ -240,6 +240,14 @@ def detached(log: int | None = None) -> int:
     from . import helpers
 
     agent_end, gate_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    if DUTY and _alone():
+        started = _forked(gate_end, log)
+        gate_end.close()
+        if started is None:
+            agent_end.close()
+            raise _refused("the gate would not start (fork failed)")
+        _handoff, pid = agent_end, started
+        return started
     argv = helpers.command("gate", "--child", "0", "--detach", "--notify", str(gate_end.fileno()),
                            *(["--log", str(log)] if log is not None else []))
     try:
@@ -262,6 +270,56 @@ def detached(log: int | None = None) -> int:
         raise _refused(f"the gate didn't say its pid ({said[:80]!r})") from None
     _handoff, pid = agent_end, started
     return started
+
+
+def _alone() -> bool:
+    """Whether this process has one thread (Linux), so a plain fork can serve
+    as the gate: no lock can have been held by a thread fork didn't copy."""
+    from .core.landlock import crowd
+
+    return len(crowd()) <= 1
+
+
+def _forked(gate_end: socket.socket, log: int | None) -> int | None:
+    """`detached`'s gate without a fresh interpreter, for a caller with one
+    thread: a double fork, the grandchild keeping only its end of the
+    socket pair and the log (`_only`), so it holds none of the caller's
+    files, pipes or sockets. Returns its pid, or None."""
+    import gc
+
+    prepare()
+    tell = _reporter(log, None)
+    read, write = os.pipe()
+    first = os.fork()
+    if first == 0:
+        try:
+            os.setsid()
+            second = os.fork()
+            if second:
+                os.write(write, f"{second}\n".encode())
+                os._exit(0)
+            # No finalizer of the caller's objects may run here: one that
+            # closed a descriptor number the gate has since reused would
+            # close the gate's socket instead (as in `become`).
+            gc.disable()
+            for number in _all():
+                with contextlib.suppress(OSError, ValueError):
+                    signal.signal(number, signal.SIG_DFL)
+            _only({gate_end.fileno(), *([log] if log is not None else [])})
+            guard = _take(gate_end.detach(), tell)
+            if guard is not None:
+                guard.serve()
+        finally:
+            os._exit(0)
+    os.close(write)
+    with os.fdopen(read, "rb") as fh:
+        said = fh.readline()
+    with contextlib.suppress(ChildProcessError):
+        os.waitpid(first, 0)
+    try:
+        return int(said)
+    except ValueError:
+        return None
 
 
 def _refused(why: str) -> Exception:

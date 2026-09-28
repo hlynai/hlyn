@@ -223,3 +223,24 @@ print(hlyn.run(nested, net=["api.example.com"], exec=[sys.executable], read=[{RO
     print(done.stdout, done.stderr[-1500:], sep="\n")
     assert "inner: SEALED" in done.stdout
     check(done.stdout, False)
+
+
+@pytest.mark.parametrize("net", [False, ["api.example.com"]], ids=["off", "hosts"])
+def test_hlyn_on_s_gate_holds_none_of_the_callers_descriptors(net):
+    """`on()`'s gate outlives the call. If it kept a copy of a descriptor the
+    caller had open, closing it in the caller would close nothing: here, the
+    reader of a pipe would never see its end. It also says how long `on()`
+    took, since starting this gate is most of it before Linux 7.1."""
+    done = boot(f"""
+import os, select, time, hlyn
+r, w = os.pipe()
+start = time.perf_counter()
+got = hlyn.on(net={net!r}, log=False)
+took = (time.perf_counter() - start) * 1000
+print("on() took", round(took, 1), "ms; helpers", got.get("helpers"))
+os.close(w)
+ready, _, _ = select.select([r], [], [], 5)
+print("pipe end seen:", bool(ready) and os.read(r, 1) == b"")
+""")
+    print(done.stdout, done.stderr[-800:])
+    assert "pipe end seen: True" in done.stdout
