@@ -22,7 +22,7 @@ for target in header head hello sockaddr; do
     /tmp/fuzzvenv/bin/python tools/fuzzproxy.py "$target" "/tmp/corpus-$target" \
         -max_total_time="$seconds" -timeout=5 -rss_limit_mb=2048 -print_final_stats=1 \
         >"/tmp/fuzz-$target.log" 2>&1 || status=$?
-    grep -E "^#[0-9]+ +(DONE|NEW)|stat::|ERROR|Error|crash-|Traceback|Assertion|==[0-9]+==" \
+    grep -E "^#[0-9]+[[:space:]]+(DONE|NEW)|stat::|ERROR|Error|crash-|Traceback|Assertion|==[0-9]+==" \
         "/tmp/fuzz-$target.log" | tail -12
     # Any way a run can end badly: a non-zero exit, a saved crash, timeout,
     # out-of-memory or leak input, or no DONE line (it never really ran).
