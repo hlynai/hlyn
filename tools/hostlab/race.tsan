@@ -1,0 +1,5 @@
+# ThreadSanitizer suppressions for race.c. The flipping threads rewrite the
+# sockaddr while connect() reads it, on purpose: that race is what the
+# harness tests. Matched by library, since the sealed process can't read
+# race.so again to name its functions. Anything else TSan finds still halts.
+race:race.so

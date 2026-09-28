@@ -15,6 +15,7 @@ runtime sockets, by symlink and relative path), 23 (unix datagram to a path),
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import errno
 import ipaddress
@@ -58,6 +59,20 @@ AGENT = textwrap.dedent(f"""
 """)
 
 
+KEEP = 10_000  # connections the test proxy keeps whole
+
+
+class Events(list):
+    """The gate's events: every one counted, the first KEEP kept."""
+
+    total = 0
+
+    def tell(self, event: dict) -> None:
+        self.total += 1
+        if len(self) < KEEP:
+            self.append(event)
+
+
 class Proxy:
     """A stand-in for hlyn's proxy in gate mode: records headers, answers
     verdicts (`verdict[(address, port)]`, default 0), keeps what arrives."""
@@ -70,7 +85,10 @@ class Proxy:
         self.sock.bind((host, 0))
         self.sock.listen(4096)
         self.port = self.sock.getsockname()[1]
+        # Every connection's origin is counted; the first KEEP are kept whole.
+        # A 10-million-try race run kept them all and ran out of memory.
         self.seen: list[tuple[str | None, int | None, bytes]] = []
+        self.origins: collections.Counter[tuple[str | None, int | None]] = collections.Counter()
         self.verdict: dict[tuple[str, int], int] = {}
         self.done = False
         self.thread = threading.Thread(target=self._serve, daemon=True)
@@ -110,7 +128,9 @@ class Proxy:
                     rest += more
             except OSError:
                 pass
-            self.seen.append((address, origin.port, rest))
+            self.origins[address, origin.port] += 1
+            if len(self.seen) < KEEP:
+                self.seen.append((address, origin.port, rest))
         except OSError:
             return
         finally:
@@ -145,10 +165,10 @@ def gated(body: str, *, net: list[str], write: list[str] = (), read: list[str] =
         out, err = child.communicate(timeout=timeout)
         pytest.fail(f"the child never handed over a descriptor:\n{out}\n{err}")
     ours.send(b"k")
-    events: list[dict] = []
+    events = Events()
     config = guard.Config(port=proxy.port, rules=tuple(parse(item) for item in net),
                           writes=tuple(os.path.realpath(item) for item in write), reduced=reduced)
-    gate = guard.Guard(fds[0], config, tell=events.append)
+    gate = guard.Guard(fds[0], config, tell=events.tell)
     thread = threading.Thread(target=gate.serve, daemon=True)
     thread.start()
     out, err = child.communicate(timeout=timeout)
@@ -157,7 +177,7 @@ def gated(body: str, *, net: list[str], write: list[str] = (), read: list[str] =
     ours.close()
     time.sleep(0.2)  # let the fake proxy record the last connection
     print(out, err[-2000:])
-    print("gate answered", gate.served, "calls;", len(events), "events:", events[:6],
+    print("gate answered", gate.served, "calls;", events.total, "events:", events[:6],
           "..." if len(events) > 6 else "")
     print("proxy saw:", proxy.seen[:10], "..." if len(proxy.seen) > 10 else "")
     return out, events
@@ -655,7 +675,7 @@ def test_row_3_racing_the_address_never_connects_tcp_anywhere_but_the_proxy(prox
     good = int(ipaddress.IPv4Address("127.0.0.1")).to_bytes(4, "big")
     bad = int(ipaddress.IPv4Address("127.0.0.2")).to_bytes(4, "big")
     port = socket.htons(proxy.port)
-    out, _ = gated(f"""
+    out, events = gated(f"""
         out = (ctypes.c_int * 3)()
         began = __import__("time").monotonic()
         race.race_tcp(ctypes.c_uint32(int.from_bytes({good!r}, "little")), ctypes.c_uint16({port}),
@@ -678,8 +698,10 @@ def test_row_3_racing_the_address_never_connects_tcp_anywhere_but_the_proxy(prox
     connected, refused = int(counts[1]), int(counts[3])
     assert reached == 0
     assert connected + refused == iterations, out
+    assert events.total == refused, (events.total, refused)  # each refusal left a record
     assert connected > 0 and refused > 0, "the flipping never landed on both addresses"
-    assert all(seen[0] == "127.0.0.1" and seen[1] == proxy.port for seen in proxy.seen)
+    print("origins the proxy was told:", dict(proxy.origins))
+    assert set(proxy.origins) == {("127.0.0.1", proxy.port)}, proxy.origins
 
 
 @pytest.mark.skipif(not any(os.access(os.path.join(p, "cc"), os.X_OK)
@@ -719,7 +741,7 @@ def test_row_3_unix_race(proxy, where):
 
     drainer = threading.Thread(target=drain, daemon=True)
     drainer.start()
-    out, _ = gated(f"""
+    out, events = gated(f"""
         out = (ctypes.c_int * 3)()
         began = __import__("time").monotonic()
         race.race_unix({allowed.encode()!r}, {refused.encode()!r}, {TRIES}, 4, out)
@@ -742,6 +764,7 @@ def test_row_3_unix_race(proxy, where):
           f"(reached {refused}); must be 0")
     counts = out.split()
     assert int(counts[1]) > 0 and int(counts[3]) > 0
+    assert events.total == int(counts[3]), (events.total, out)  # each refusal left a record
     assert won == 0
 
 

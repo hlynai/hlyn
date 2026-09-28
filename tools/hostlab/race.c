@@ -8,9 +8,10 @@
  * CONTINUE) could be raced into connecting to the refused address. hlyn's
  * gate never lets a TCP connect run, so the refused listener must see nothing.
  *
- * The unix variant races an allowed path against a refused one. The gate
- * does let unix connects run (5.3's residual before Landlock RESOLVE_UNIX,
- * 7.1+), so there the harness measures how often the race is won.
+ * The unix variant races an allowed path against a refused one. Since
+ * 2026-09-28 the gate connects the socket file it checked itself and swaps
+ * the connection in, so that race must be won zero times too (it was won
+ * 611-781 times in 3,000 while the gate let the call run).
  *
  * Built as a shared library and called through ctypes from a sealed Python
  * process, so the threads run in parallel with no interpreter lock:
