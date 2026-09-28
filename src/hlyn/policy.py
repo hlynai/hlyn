@@ -483,8 +483,6 @@ TRUST: tuple[str, ...] = (
     "/usr/local/etc/ca-certificates/cert.pem",
     "/usr/local/etc/openssl@3/cert.pem",
     "/usr/local/etc/openssl@3/certs",
-    "/home/linuxbrew/.linuxbrew/etc/ca-certificates/cert.pem",
-    "/home/linuxbrew/.linuxbrew/etc/openssl@3/cert.pem",
 )
 
 # Which OS and version this is. Public, and read by programs as they start:
@@ -511,8 +509,17 @@ SSLCONF: tuple[str, ...] = (
     "/opt/homebrew/etc/openssl@1.1/openssl.cnf",
     "/usr/local/etc/openssl@3/openssl.cnf",               # Homebrew, Intel
     "/usr/local/etc/openssl@1.1/openssl.cnf",
-    "/home/linuxbrew/.linuxbrew/etc/openssl@3/openssl.cnf",
 )
+
+# Linuxbrew's, on Linux only. On macOS `/home` is an automount point, and
+# looking for a file under it asks automountd: 15-25 ms per path, which made
+# `on()` with a port 50 ms slower (measured 2026-09-28).
+if sys.platform == "linux":
+    TRUST += (
+        "/home/linuxbrew/.linuxbrew/etc/ca-certificates/cert.pem",
+        "/home/linuxbrew/.linuxbrew/etc/openssl@3/cert.pem",
+    )
+    SSLCONF += ("/home/linuxbrew/.linuxbrew/etc/openssl@3/openssl.cnf",)
 
 
 def network() -> tuple[str, ...]:

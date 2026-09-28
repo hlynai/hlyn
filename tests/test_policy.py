@@ -140,6 +140,31 @@ def test_the_real_openssl_configurations_are_on_the_list():
     assert "/opt/homebrew/etc/ca-certificates/cert.pem" in TRUST
 
 
+def test_linuxbrew_is_only_looked_for_on_linux(monkeypatch):
+    """On macOS `/home` is an automount point: looking for a file under it asks
+    automountd, 15-25 ms a path, which made `on()` with a port 50 ms slower."""
+    from hlyn import policy as module
+
+    looked: list[str] = []
+    real = os.stat
+
+    def stat(path, *args, **kwargs):
+        looked.append(os.fspath(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat)
+    runtime()
+    module.network()
+    home = sorted({item for item in looked if item.startswith("/home/")})
+    print(f"{len(looked)} paths looked at; under /home: {home}")
+    print("Linuxbrew entries:", [item for item in (*module.TRUST, *module.SSLCONF) if "linuxbrew" in item])
+    if sys.platform == "darwin":
+        assert home == []
+    else:
+        assert "/home/linuxbrew/.linuxbrew/etc/openssl@3/openssl.cnf" in module.SSLCONF
+        assert "/home/linuxbrew/.linuxbrew/etc/openssl@3/cert.pem" in module.TRUST
+
+
 def test_the_files_that_name_the_os_are_readable(monkeypatch, tmp_path):
     """Which OS and version this is: pip's user agent reads /etc/debian_version
     through `distro` and stops if it exists but can't be read; many installers

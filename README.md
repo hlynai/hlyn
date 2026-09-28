@@ -591,6 +591,20 @@ Files and connections that are already open are never re-checked, so throughput 
 | One connection's throughput (512 MB over loopback) | 2,717 MB/s, unconfined | 502 MB/s |
 | `hlyn.run(fn)` per call, after the first | — | +1-6 ms (+46-49 ms if the caller has threads) |
 
+**On macOS** (Apple Silicon, macOS 27; `tools/bench.py`, `tools/hostbench.py`):
+
+| Measure | Without hosts | With hosts |
+|---|---|---|
+| `hlyn.on()`, small policy / 64 paths | ~11 ms / ~16 ms (Seatbelt compiles the profile) | — |
+| `open` / `stat`, per call | +0.2-0.3 µs / +0.2 µs (Seatbelt also checks `stat`) | — |
+| `connect` to a listed port, per call | +1.5-2.6 µs | — |
+| `hlyn run -- true` | 82 ms, 90 ms with a port | 143 ms |
+| `connect()` to a local service, median / p99 | 48 µs / 190 µs, same as unconfined | 507 µs / 712 µs through the proxy (the CONNECT round trip included) |
+| One connection's throughput (512 MB over loopback) | 13,800 MB/s (15,200 unconfined) | 445 MB/s through the proxy |
+| `hlyn.run(fn)` per call | 13 ms, 20 ms with a port | 23 ms |
+
+On macOS, `localhost:PORT` entries are reached directly, not through the proxy, so a local service costs nothing extra; hosts go through it.
+
 **Reporting under `hlyn run`:** nothing measurable on successful calls and under 0.1 µs per refused call on Linux; about 50 ms per run on macOS.
 
 ---

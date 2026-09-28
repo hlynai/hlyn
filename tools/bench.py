@@ -39,7 +39,9 @@ Method, because a benchmark that can be argued with is worth nothing:
     python tools/bench.py seal    startup cost only
     python tools/bench.py calls   steady-state cost only
 
-Needs a kernel with Landlock; tools/bench.sh supplies one.
+Needs a kernel with Landlock (tools/bench.sh supplies one), or macOS, where
+Seatbelt does the same job: there `on()` is timed whole, since it is one call,
+and the syscall-filter check below does not apply.
 """
 
 from __future__ import annotations
@@ -63,6 +65,7 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 import hlyn  # noqa: E402
 from hlyn.policy import Policy  # noqa: E402
 
+LINUX = sys.platform == "linux"
 SAMPLES = 31  # processes per startup measurement
 SIZES = (1, 8, 64)  # granted paths, to see whether cost grows with the policy
 
@@ -87,6 +90,19 @@ WORK = {
     "bind": (20_000, 7),
     "connect": (4_000, 25),
 }
+if not LINUX:
+    # A socket costs ~10-90 us on macOS, not ~1, and the kernel frees closed
+    # ones slowly: 20,000 x 7 in a row ran out of buffers (ENOBUFS) for every
+    # program on the Mac for a few seconds (measured 2026-09-28). So fewer, and
+    # a pause after each (`settle`).
+    WORK.update({"socket+close": (2_000, 7), "bind": (2_000, 7), "connect": (500, 25)})
+SOCKETS = ("socket+close", "bind", "connect")
+
+
+def settle(name: str) -> None:
+    """On macOS, give the kernel time to free the sockets a call just closed."""
+    if not LINUX and name in SOCKETS:
+        time.sleep(1)
 
 
 # -- running a sample in its own process ------------------------------------
@@ -222,6 +238,9 @@ def enforced(denied: str, granted: int, shut: int) -> dict[str, bool]:
     out["an ungranted port is refused"] = not reached(shut)
     out["the timed port is permitted"] = reached(granted)
 
+    if not LINUX:  # no syscall filter to prove; Seatbelt is the one boundary
+        return out
+
     # AF_VSOCK is refused by the syscall filter with EPERM, and by a kernel
     # without vsock with EAFNOSUPPORT. seccomp runs before the kernel's own
     # handler, so EPERM arriving means the filter is loaded and nothing else
@@ -310,14 +329,17 @@ def startup() -> None:
 
     for size in SIZES:
         whole = [apart(one_seal, size) for _ in range(SAMPLES)]
-        halves = [apart(one_half, size) for _ in range(SAMPLES)]
         rules = whole[0]["grants"]
         totals = [s["whole"] / 1e6 for s in whole]
-        landlock = statistics.median(s["landlock"] for s in halves) / 1e6
-        seccomp = statistics.median(s["seccomp"] for s in halves) / 1e6
+        halves = "        n/a         n/a"  # Seatbelt is one call, sandbox_init
+        if LINUX:
+            parts = [apart(one_half, size) for _ in range(SAMPLES)]
+            landlock = statistics.median(s["landlock"] for s in parts) / 1e6
+            seccomp = statistics.median(s["seccomp"] for s in parts) / 1e6
+            halves = f"{landlock:>7.2f} ms  {seccomp:>7.2f} ms"
         said = f"{size} path" + ("s" if size != 1 else "")
         print(
-            f"{said:>12}  {rules:>6}  {landlock:>7.2f} ms  {seccomp:>7.2f} ms  "
+            f"{said:>12}  {rules:>6}  {halves}  "
             f"{statistics.median(totals):>7.2f} ms  {spread_of(totals):>6.2f} ms"
         )
 
@@ -469,7 +491,14 @@ def steady(size: int, seal: bool) -> dict:
     port, shut = spare()
     work = calls(box, port)
 
-    before = {name: timed(body, *WORK[name]) for name, body in work}
+    def measure() -> dict[str, float]:
+        out = {}
+        for name, body in work:
+            out[name] = timed(body, *WORK[name])
+            settle(name)
+        return out
+
+    before = measure()
 
     proof = {}
     if seal:
@@ -484,7 +513,7 @@ def steady(size: int, seal: bool) -> dict:
         hlyn.on(plan)
         proof = enforced(denied, port, shut)
 
-    after = {name: timed(body, *WORK[name]) for name, body in work}
+    after = measure()
     return {"before": before, "after": after, "proof": proof}
 
 
@@ -540,7 +569,8 @@ def main(argv: Sequence[str]) -> int:
     if not fit.get("enforce"):
         print(f"nothing to measure here: {fit.get('why', fit)}", file=sys.stderr)
         return 2
-    print(f"kernel {fit['kernel']} on {fit['machine']}, Landlock ABI {fit['landlock']}\n")
+    engine = f"Landlock ABI {fit['landlock']}" if LINUX else "Seatbelt"
+    print(f"{fit['platform']} {fit['kernel']} on {fit['machine']}, {engine}\n")
 
     what = argv[0] if argv else "all"
     if what in ("all", "seal"):
