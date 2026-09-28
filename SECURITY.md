@@ -46,8 +46,10 @@ docstrings, and in the error messages:
   close the network entirely.
 - **What naming hosts does not stop**, listed below: data sent to a host you
   allowed, domain fronting, the unix-socket race on Linux, and the rest.
-- **macOS has no isolation between agents.** Seatbelt has no equivalent of
-  Landlock's scoping. `hlyn probe` reports this.
+- **macOS agents share system services.** Signals stay within each agent's
+  sandbox, as Landlock scopes them on Linux, but macOS services such as the
+  pasteboard and notifications are shared: two agents on one Mac can pass data
+  through them. `hlyn probe` reports this.
 - **A kernel below Landlock ABI 6 cannot be used.** hlyn refuses to seal rather
   than enforcing part of the policy.
 - **A policy that grants something dangerous is doing as it was told.**

@@ -158,11 +158,14 @@ def probe() -> dict[str, object]:
         "kernel": system.release(),
         "seatbelt": ready(),
         "enforce": ready(),
-        # Seatbelt confines the filesystem, execution, and the network, but has
-        # no equivalent of Landlock's scoping, so isolation between agents on
-        # one machine is weaker here than on Linux. Said plainly rather than
-        # left for someone to discover.
+        # Signals are scoped to each agent's sandbox, as Landlock scopes them
+        # (`(target same-sandbox)`), and macOS has no abstract sockets. But the
+        # blanket `mach-lookup` grant leaves system services shared: two agents
+        # can pass data through the pasteboard or notifyd (measured, FINDINGS.md).
+        # So not isolated, and said plainly rather than left to be discovered.
         "scope": False,
+        "scope_why": "signals stay in each agent's sandbox, but macOS services such as the pasteboard "
+                     "are shared; use Linux where this matters",
         "ports": ready(),
         # Host names in `net`: the proxy (5.5) behind a profile that allows
         # only its port (5.4).

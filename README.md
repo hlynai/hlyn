@@ -551,7 +551,7 @@ Messages say what to do next, naming the field or flag that would change the out
 | Direct connections to address entries (`10.0.0.5:5432`) | ✅ | ❌ Only through the proxy. `localhost:PORT` entries work directly |
 | Local sockets only in write-granted folders | With hosts: checked by the gate (racy before 7.1; see [limits](#what-naming-hosts-does-not-stop)). From Linux 7.1, by the kernel whenever the network isn't open | ✅ |
 | All network off (TCP and UDP) | ✅ | ✅ |
-| Isolation between agents (signals, abstract sockets) | ✅ | ❌ No equivalent exists |
+| Isolation between agents (signals, abstract sockets) | ✅ | Signals ✅, as on Linux (macOS has no abstract sockets). ❌ System services such as the pasteboard are shared |
 | Dangerous syscalls blocked (`io_uring`, `ptrace`, `mount`, namespaces, kernel modules, `bpf`, …) | ✅ | n/a |
 | Secret environment variables removed | ✅ | ✅ |
 | Report of what was blocked | ✅ | ✅ Best-effort |
@@ -633,7 +633,9 @@ A sandbox that oversells itself is worse than one that doesn't, so here is exact
 | **Writable folders others execute** | Writing into a folder that cron, git hooks or CI later runs is running code outside the sandbox. | Don't grant write to folders something else executes from. |
 | **Hardlinks** | A hardlink planted inside a granted folder beforehand reaches the file it points at. | Don't share granted folders with untrusted writers, and don't run as root. |
 | **GPU workloads** | CUDA writes under `/proc`, which is closed by default because it exposes the environment. | Grant `write=["/proc"]` and remove secrets at the source. |
-| **macOS isolation between agents** | Seatbelt has no way to stop one agent signalling another. | Use Linux where cross-agent isolation matters. |
+| **macOS: shared system services** | Signals stay within each agent's sandbox, as on Linux, but macOS services are shared: two agents on one Mac can pass data through the pasteboard or notifications, and an agent can read or replace what you copied. | Use Linux where cross-agent isolation matters. |
+| **macOS: the working folder** | macOS reports a folder's path only to a program that may read the folder, so `os.getcwd()`, Node, git and shells fail with `Operation not permitted` when the folder they start in isn't granted. Linux doesn't need it. | `--read .`, or a preset that grants the folder (`-p coder`). |
+| **macOS: browsers, Electron and `open`** | Chromium registers system services and sandbox extensions of its own, which hlyn's sandbox refuses, so Chrome, Electron apps and browser automation built on them don't run under hlyn on macOS. `open` can't start apps or open URLs in any mode (the app would run outside the sandbox). | Run them outside hlyn. |
 | **Reports are not complete** | Linux can't see inside static binaries; macOS drops a few percent of reports. | Neither affects enforcement, only the explanation. |
 
 ### What naming hosts stops, and what it doesn't

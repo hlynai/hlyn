@@ -441,6 +441,7 @@ def runtime() -> tuple[str, ...]:
         out.add(os.path.abspath(sys.executable))
     out.update(_lib())
     out.update(_dev())
+    out.update(item for item in SSLCONF if os.path.isfile(item))
     if sys.platform == "darwin":
         # CoreFoundation reads this one-line encoding preference in every
         # process that uses it. The file itself only, not the home directory.
@@ -474,10 +475,32 @@ TRUST: tuple[str, ...] = (
     "/usr/share/ca-certificates",       # Debian: where /etc/ssl/certs points
     "/usr/local/share/ca-certificates",
     "/var/lib/ca-certificates",         # SUSE
-    # OpenSSL's configuration, which LibreSSL and OpenSSL both read before a
-    # handshake. The file only: its directory is the one holding `private/`.
-    "/etc/ssl/openssl.cnf",
-    "/etc/pki/tls/openssl.cnf",
+    # Homebrew's bundle, which its OpenSSL's cert.pem points at, for programs
+    # linked against Homebrew's OpenSSL rather than the system's.
+    "/opt/homebrew/etc/ca-certificates/cert.pem",
+    "/opt/homebrew/etc/openssl@3/cert.pem",
+    "/opt/homebrew/etc/openssl@3/certs",
+    "/usr/local/etc/ca-certificates/cert.pem",
+    "/usr/local/etc/openssl@3/cert.pem",
+    "/usr/local/etc/openssl@3/certs",
+    "/home/linuxbrew/.linuxbrew/etc/ca-certificates/cert.pem",
+    "/home/linuxbrew/.linuxbrew/etc/openssl@3/cert.pem",
+)
+
+# OpenSSL's configuration files. A program linked against OpenSSL (or
+# LibreSSL) reads its one when it starts, network or not, and some won't start
+# if it exists but can't be read: Homebrew's Node exits with "OpenSSL
+# configuration error". Public configuration, granted whatever the policy;
+# the files only, since the folders that hold them also hold `private/`.
+SSLCONF: tuple[str, ...] = (
+    "/etc/ssl/openssl.cnf",                               # Debian, Ubuntu, Alpine, macOS
+    "/etc/pki/tls/openssl.cnf",                           # Fedora, RHEL
+    "/usr/lib/ssl/openssl.cnf",                           # Debian's OPENSSLDIR, a link to the first
+    "/opt/homebrew/etc/openssl@3/openssl.cnf",            # Homebrew, Apple silicon
+    "/opt/homebrew/etc/openssl@1.1/openssl.cnf",
+    "/usr/local/etc/openssl@3/openssl.cnf",               # Homebrew, Intel
+    "/usr/local/etc/openssl@1.1/openssl.cnf",
+    "/home/linuxbrew/.linuxbrew/etc/openssl@3/openssl.cnf",
 )
 
 

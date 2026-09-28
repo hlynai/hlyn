@@ -407,7 +407,8 @@ def _machine(out: dict[str, object]) -> str:
         ("network ports", out.get("ports"), ""),
         ("host names in net (api.openai.com)", out.get("hosts"),
          f": {out['why']}" if out.get("enforce") and out.get("why") else ""),
-        ("isolation between agents on this machine", out.get("scope"), ""),
+        ("isolation between agents on this machine", out.get("scope"),
+         f" ({out['scope_why']})" if out.get("scope_why") else ""),
         ("local sockets only in write-granted folders, checked by the kernel", out.get("sockets"),
          " (Linux 7.1 or newer; until then host mode's gate checks them, and a racing agent "
          "can get past it)" if linux else ""),

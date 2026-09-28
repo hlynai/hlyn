@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .policy import Policy, under
-from .secret import credential, secret
+from .secret import credential, secret, secret_file
 
 __all__ = [
     "HOSTED", "SERVICES", "WHY", "Denial", "Entry", "Listener", "Quiet", "Report",
@@ -498,7 +498,7 @@ class Report:
             listing = self._listing(path, target, denial.source)
             if listing is not None:
                 return listing
-        if credential(path):
+        if secret_file(path):  # by name, and for .pem and .key by what the file holds
             return Entry(
                 kind, target, None,
                 "a credential: not suggested. Grant it yourself only if the agent should have it",

@@ -108,6 +108,38 @@ def test_runtime_excludes_ssh_keys():
     assert not any(under(secret, item) for item in runtime())
 
 
+def test_openssl_configuration_is_readable_but_never_its_private_folder(monkeypatch, tmp_path):
+    """A program linked against OpenSSL reads its configuration when it starts,
+    network or not: Homebrew's Node exits ("OpenSSL configuration error") if
+    it can't. The files are public; the folders beside them hold `private/`."""
+    from hlyn import policy as module
+
+    brew = tmp_path / "etc" / "openssl@3"
+    (brew / "private").mkdir(parents=True)
+    (brew / "private" / "server.key").write_text("-----BEGIN PRIVATE KEY-----\n")
+    (brew / "openssl.cnf").write_text("# config\n")
+    (brew / "cert.pem").write_text("-----BEGIN CERTIFICATE-----\n")
+    missing = tmp_path / "missing" / "openssl.cnf"
+    monkeypatch.setattr(module, "SSLCONF", (str(brew / "openssl.cnf"), str(missing)))
+    monkeypatch.setattr(module, "TRUST", (*module.TRUST, str(brew / "cert.pem")))
+    everywhere = runtime()
+    online = module.network()
+    print("runtime:", [item for item in everywhere if str(tmp_path) in item])
+    print("network:", [item for item in online if str(tmp_path) in item])
+    assert str(brew / "openssl.cnf") in everywhere
+    assert str(brew / "cert.pem") in online and str(brew / "cert.pem") not in everywhere
+    for item in (*everywhere, *online):
+        assert not under(str(brew / "private"), item) and item != str(brew)
+
+
+def test_the_real_openssl_configurations_are_on_the_list():
+    from hlyn.policy import SSLCONF, TRUST
+
+    print(SSLCONF)
+    assert "/opt/homebrew/etc/openssl@3/openssl.cnf" in SSLCONF and "/etc/ssl/openssl.cnf" in SSLCONF
+    assert "/opt/homebrew/etc/ca-certificates/cert.pem" in TRUST
+
+
 def test_runtime_is_pruned():
     items = runtime()
     for item in items:

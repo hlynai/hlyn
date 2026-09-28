@@ -53,6 +53,22 @@ def test_a_refused_read_suggests_exactly_that_path(tmp_path):
     assert not entry.credential
 
 
+def test_a_public_certificate_is_suggested_and_a_private_key_is_not(tmp_path):
+    """A `.pem` or `.key` file is a credential only if it holds a private key
+    (README, "Secrets in granted folders"); a CA bundle such as Homebrew's
+    cert.pem is public, and the report suggests the flag for it."""
+    public = tmp_path / "cert.pem"
+    public.write_text("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+    private = tmp_path / "server.pem"
+    private.write_text("-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n")
+    report = book(tmp_path)
+    shown = [one(report, kind="read", target=str(path), op="open") for path in (public, private)]
+    for entry in shown:
+        print(entry.target, "|", entry.allow, "|", entry.note, "| credential" if entry.credential else "")
+    assert shown[0].allow == f"--read {public}" and not shown[0].credential
+    assert shown[1].allow is None and shown[1].credential
+
+
 def test_creating_a_file_suggests_its_folder(tmp_path):
     # A path that does not exist cannot be granted at all, so the only grant
     # that helps is the folder it would be made in.

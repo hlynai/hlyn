@@ -134,6 +134,14 @@ def test_probe_says_why_a_no_is_a_no_and_what_to_do():
     assert f"no  {sockets} (Linux 7.1 or newer;" in old
     assert "yes local sockets only in write-granted folders, checked by the kernel\n" in new
     assert "7.1 or newer" not in new
+    mac = _machine({
+        "platform": "darwin", "kernel": "27.0.0", "enforce": True, "ports": True, "hosts": True,
+        "scope": False, "sockets": True, "report": True,
+        "scope_why": "signals stay in each agent's sandbox, but macOS services such as the pasteboard "
+                     "are shared; use Linux where this matters",
+    })
+    print(mac)
+    assert "no  isolation between agents on this machine (signals stay in each agent's sandbox" in mac
 
 
 def test_probe_tells_whether_this_kernel_checks_socket_files():

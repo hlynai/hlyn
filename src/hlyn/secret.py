@@ -22,7 +22,7 @@ from collections.abc import Iterator
 
 from .policy import Policy, prune, under
 
-__all__ = ["Exposed", "credential", "exposed", "secret"]
+__all__ = ["Exposed", "credential", "exposed", "secret", "secret_file"]
 
 
 class Exposed(UserWarning):
@@ -163,7 +163,7 @@ def _holds_key(path: str) -> bool:
     return b"PRIVATE KEY" in head
 
 
-def _secret_file(path: str) -> bool:
+def secret_file(path: str) -> bool:
     """`credential`, sharpened for warnings: ambiguous extensions are opened."""
     if not credential(path):
         return False
@@ -211,7 +211,7 @@ def exposed(plan: Policy) -> list[str]:
             found.append(root)  # the grant is itself a credential folder
             continue
         for path in _walk(root, budget):
-            if _secret_file(path) and _within(path, roots) and os.path.exists(path):
+            if secret_file(path) and _within(path, roots) and os.path.exists(path):
                 found.append(path)
                 if len(found) >= 20:
                     return found
