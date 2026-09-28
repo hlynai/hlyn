@@ -339,6 +339,8 @@ def test_an_early_proxy_that_dies_before_it_is_ready_refuses_connections_and_say
             except ConnectionRefusedError:
                 refused = True
                 break
+            except ConnectionResetError:
+                pass  # queued on the listener as the dying proxy closed it: try again
             time.sleep(0.05)
         said = settled(way)
         print(f"after SIGKILL: connection refused: {refused}; problem: {said!r}")
