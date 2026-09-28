@@ -18,4 +18,14 @@ These apply to the lead session and to every agent it starts.
 - **Test output is shown in full, never as pass/fail alone.** Run tests with `pytest -vv -rA` (the project config adds `-q`, so a single `-v` only cancels it), so every test's name, result and captured output appear, and paste that output when reporting. Tests print what they observed (the confined program's output, the report text, the errno) so the log shows the behaviour, not just a verdict. A pass whose output shows the wrong behaviour is a failure; a count of passes is not evidence.
 - **The lead checks every agent's work by hand before merging.** Read the whole diff, re-run the tests and the demonstration, and look for corner cutting: skipped or weakened tests, checks that can't fail, claims without output behind them, TODOs left in place of work, anything short of the design doc. Work that isn't state of the art goes back to the agent, or gets fixed, before it is merged.
 - **Done means shown running.** Before calling work finished, run the real thing (the CLI command, the library call, the reproduction from FINDINGS.md) and show its full output next to the test log. Code that was only read, or only unit-tested, is not done.
+- **Triple-check every test before trusting it.** A weak test that passes is worse than no test: it gets reported as proof. Before counting any test, fuzz target or harness as evidence, check it three ways:
+  1. **It can fail.** Plant the bug it is meant to catch, in a copy, and watch it fail. Then remove the bug and watch it pass. `tools/fuzzcheck.sh` does this for the fuzz targets.
+  2. **No check passes without testing anything.** Look for:
+     - `all(...)` over a list that can be empty;
+     - a check the input can never reach (a limit larger than the inputs ever get);
+     - a check the types already guarantee (a 16-bit port "within 0-65535");
+     - a runner that watches only one way of failing.
+  3. **It measures the real thing, at the real scale.** It checks exact values against the input, not just a plausible range. Long runs are bounded in memory. The logged output shows the behaviour itself.
+
+  Do this when writing a test, when reviewing an agent's test, and before quoting a run's numbers. A weak test found this way gets fixed, and its earlier results are re-run rather than reported.
 - **Linux runs use `tools/linuxtest.sh`** (Docker Desktop's 6.12 kernel; builds both native crates, then runs pytest with the arguments given). macOS runs use the host's `python3 -m pytest`.
