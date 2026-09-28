@@ -654,9 +654,66 @@ def _prepare(cmd: Sequence[str] | str, plan: Policy) -> tuple[str, list[str], Po
     from . import interpreter
 
     plan, run = interpreter.grants(interpreter.ask(cmd[0], where), plan, where)
-    if run == where:
-        return named, list(cmd), plan
-    return run, [run, *cmd[1:]], plan  # a launcher, followed: see interpreter.py
+    # The same goes for the script a Python command runs: `hlyn run -- python
+    # agent.py` asks for agent.py to run, so it may be read. That file only.
+    source = interpreter.runs(cmd) if interpreter.python(cmd[0], where) else None
+    if source and plan.read is not True:
+        plan = plan.with_(read=[*(plan.read or ()), source])
+    if run != where:
+        return run, [run, *cmd[1:]], plan  # a launcher, followed: see interpreter.py
+    line = interpreter.shebang(where)
+    if line is not None:
+        return _script(plan, list(cmd), named, where, *line)
+    return named, list(cmd), plan
+
+
+def _script(
+    plan: Policy, cmd: list[str], named: str, where: str, program: str, args: list[str]
+) -> tuple[str, list[str], Policy]:
+    """How to run the script `where`, and `plan` widened to let it. The
+    kernel would start the interpreter its first line names, which then
+    reads the script: asking to run the script asks for both, as a binary's
+    execute permission comes with asking to run it. `#!/usr/bin/env NAME` is
+    followed to the NAME it starts.
+
+    A Python interpreter is handled as a Python command is (interpreter.py):
+    asked where its files are, followed past a launcher (Apple's
+    `/usr/bin/python3`, pyenv's shims), and run directly with the script, as
+    the kernel would have started it. Anything else is started by the kernel
+    from the script, with its interpreter allowed to run.
+
+    Raises `Invalid`, before anything is sealed, when the interpreter the
+    line names doesn't exist."""
+    from . import interpreter
+    from .policy import companion
+
+    typed = cmd[0]
+    if not os.path.isfile(program):
+        raise Invalid(
+            f"can't start {typed}: its first line names {program}, which doesn't exist. Fix that line, "
+            f"or name the interpreter yourself: hlyn run -- INTERPRETER {typed}"
+        )
+    if plan.read is not True:
+        plan = plan.with_(read=[*(plan.read or ()), where])
+    target, words = program, list(args)
+    if os.path.basename(program) == "env":
+        command = interpreter.env_command(args)
+        found = shutil.which(command[0]) if command else None
+        if command and found:
+            target, words = os.path.abspath(found), command[1:]
+    real = os.path.realpath(target)
+    if interpreter.python(target, real):
+        plan, run = interpreter.grants(interpreter.ask(target, real), plan, real)
+        options = [word for arg in words for word in arg.split()]
+        return run, [run, *options, named, *cmd[1:]], plan
+    runs: list[str] = []
+    for item in (program, os.path.realpath(program), target, real, companion(real)):
+        if item and item not in runs:
+            runs.append(item)
+    if plan.exec is not True:
+        granted = list(plan.exec) if isinstance(plan.exec, tuple) else []
+        plan = plan.with_(exec=[*granted, *(item for item in runs if item not in granted)])
+    return named, cmd, plan
 
 
 def _spawn(

@@ -351,7 +351,8 @@ def loader() -> tuple[str, ...]:
 def companion(program: str) -> str | None:
     """A second program that `program` needs to run, or None.
 
-    macOS framework Python again (see `loader`): `.../Versions/X.Y/bin/pythonX.Y`
+    macOS's `/bin/sh` runs the shell the system selects. And macOS framework
+    Python again (see `loader`): `.../Versions/X.Y/bin/pythonX.Y`
     re-execs `.../Versions/X.Y/Resources/Python.app`. `loader` covers the
     interpreter hlyn itself runs on; this covers the one a command names,
     which can be a different installation entirely.
@@ -359,6 +360,11 @@ def companion(program: str) -> str | None:
     if sys.platform != "darwin":
         return None
     real = os.path.realpath(program)
+    if real == "/bin/sh":
+        # A stub that runs the shell /private/var/select/sh points at (bash
+        # unless the machine was changed), and fails if it may not.
+        shell = os.path.realpath("/private/var/select/sh")
+        return shell if os.path.isfile(shell) and shell != real else None
     version, sep, _ = real.partition("/bin/")  # .../Python.framework/Versions/X.Y
     frame = os.path.dirname(version).rsplit("/", 2)[-2:]
     # Python.framework from python.org and Homebrew; Python3.framework from

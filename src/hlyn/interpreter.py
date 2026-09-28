@@ -32,12 +32,13 @@ import select
 import shutil
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .policy import Policy, companion, under
 from .secret import credential
 
-__all__ = ["Answer", "ask", "sane"]
+__all__ = ["Answer", "ask", "env_command", "env_program", "runs", "sane", "script", "shebang"]
 
 # Interpreter names: python, python3, python3.12, python3.13t, pypy3.10.
 NAME = re.compile(r"^(python|pypy)(\d+(\.\d+)*)?t?$")
@@ -72,6 +73,98 @@ class Answer:
 
     reads: tuple[str, ...] = ()  # folders to grant for reading
     exe: str | None = None  # the real interpreter, when the command was a launcher
+
+
+# CPython's options that take a value as the next argument (or attached:
+# `-Wignore`). `-c` and `-m` take one too, but end the options: what follows
+# belongs to the command or module, and no script file is run.
+VALUED = frozenset("WX")
+LONG_VALUED = frozenset({"--check-hash-based-pycs"})
+
+
+def script(argv: Sequence[str]) -> str | None:
+    """The script a Python command line runs, as written: its first argument
+    that isn't an option. None for `-c`, `-m`, `-` (standard input) or no
+    script at all (the interactive prompt)."""
+    args = list(argv[1:])
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            return args[i + 1] if i + 1 < len(args) else None
+        if arg == "-":
+            return None
+        if not arg.startswith("-"):
+            return arg
+        if arg.startswith("--"):
+            i += 2 if arg in LONG_VALUED else 1
+            continue
+        for j, letter in enumerate(arg[1:]):
+            if letter in "cm":
+                return None
+            if letter in VALUED:
+                if j == len(arg) - 2:  # the value is the next argument
+                    i += 1
+                break
+        i += 1
+    return None
+
+
+def runs(argv: Sequence[str]) -> str | None:
+    """The file to grant for reading so a Python command line can run its
+    script: the script's real path, if it is an existing regular file that
+    isn't a credential. Only that file -- never a folder, which would grant
+    everything in it, and never anything else on the line."""
+    named = script(argv)
+    if not named:
+        return None
+    real = os.path.realpath(os.path.join(os.getcwd(), named))
+    if not os.path.isfile(real) or credential(real):
+        return None
+    return real
+
+
+def shebang(path: str) -> tuple[str, list[str]] | None:
+    """A script's first line: the interpreter it names (an absolute path) and
+    what follows it on the line, as one argument, the way Linux passes it.
+    None when `path` isn't a script that names one."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(256)
+    except OSError:
+        return None
+    if not head.startswith(b"#!"):
+        return None
+    text = head[2:].split(b"\n", 1)[0].rstrip(b"\r").decode(errors="surrogateescape").strip(" \t")
+    parts = text.split(None, 1)
+    if not parts or not os.path.isabs(parts[0]):
+        return None
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    return parts[0], [rest] if rest else []
+
+
+def env_command(args: Sequence[str]) -> list[str] | None:
+    """What a `#!/usr/bin/env ARGS` line runs: the program's name and the
+    words after it. The program is the first word that is neither `-S` nor a
+    NAME=value setting. None when `env` is given any other option (they
+    change where or how it finds the program, so it isn't followed) or names
+    no program."""
+    words = [word for arg in args for word in arg.split()]
+    for i, word in enumerate(words):
+        if word in ("-S", "--split-string"):
+            continue
+        if word.startswith("-"):
+            return None
+        if "=" in word:
+            continue
+        return words[i:]
+    return None
+
+
+def env_program(args: Sequence[str]) -> str | None:
+    """The program a `#!/usr/bin/env ARGS` line starts (`env_command`)."""
+    found = env_command(args)
+    return found[0] if found else None
 
 
 def python(cmd0: str, where: str) -> bool:

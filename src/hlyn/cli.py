@@ -556,6 +556,10 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
                                     proxy=(port, way.pid))
                 except Error as exc:
                     print(f"hlyn: {exc}", file=sys.stderr)
+                except OSError as exc:
+                    # The exec itself, after the seal: what it refused is in
+                    # the report that follows, with the flag to allow it.
+                    print(f"hlyn: can't start {cmd[0]}: {exc.strerror or exc}.", file=sys.stderr)
                 except BaseException:  # noqa: BLE001 - anything at all, reported, then the child exits
                     import traceback
 

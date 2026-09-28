@@ -176,7 +176,7 @@ hlyn run --read ./src --net 443 --env OPENAI_API_KEY -- python agent.py
 hlyn run -f policy.toml -- ./my-agent
 ```
 
-`hlyn run` confines the command and everything it starts, whatever language it is written in.
+`hlyn run` confines the command and everything it starts, whatever language it is written in. The command itself is always allowed to run, and so is the script it is asked to run: `python agent.py` may read `agent.py`, and `./tool` may start the interpreter its `#!` line names. Nothing beside them is.
 
 **Any Python works**, not just the one hlyn is installed in: a project venv, Homebrew's, pyenv's, `uv`'s, or Apple's `/usr/bin/python3`. Before sealing, hlyn asks that interpreter (itself confined: no writing, no network) where its standard library and packages are, and grants reading them. Launchers such as pyenv shims are followed to the real interpreter.
 

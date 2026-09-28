@@ -206,3 +206,142 @@ def test_a_launcher_script_runs_the_interpreter_it_names(tmp_path, venv):
     done = hlyn("run", "--no-log", "--no-report", "--read", str(tmp_path), "--", str(shim), str(agent),
                 cwd=str(tmp_path))
     assert "UP venv" in done.stdout, done.stderr
+
+
+# ---------------------------------------------------------------------------
+# the script it is asked to run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("argv", "found"), [
+    (["python", "agent.py"], "agent.py"),
+    (["python", "agent.py", "--flag", "-c"], "agent.py"),
+    (["python", "-u", "agent.py"], "agent.py"),
+    (["python", "-uB", "agent.py"], "agent.py"),
+    (["python", "-I", "-S", "agent.py"], "agent.py"),
+    (["python", "-W", "ignore", "agent.py"], "agent.py"),
+    (["python", "-Wignore", "agent.py"], "agent.py"),
+    (["python", "-X", "dev", "agent.py"], "agent.py"),
+    (["python", "-uX", "dev", "agent.py"], "agent.py"),
+    (["python", "--check-hash-based-pycs", "never", "agent.py"], "agent.py"),
+    (["python", "--", "agent.py"], "agent.py"),
+    (["python", "--", "-odd-name.py"], "-odd-name.py"),
+    (["python", "-c", "print(1)", "agent.py"], None),
+    (["python", "-uc", "print(1)"], None),
+    (["python", "-m", "pkg", "agent.py"], None),
+    (["python", "-mpkg"], None),
+    (["python", "-"], None),
+    (["python", "-i"], None),
+    (["python"], None),
+])
+def test_the_script_is_the_first_argument_that_is_not_an_option(argv, found):
+    print(argv, "->", interpreter.script(argv))
+    assert interpreter.script(argv) == found
+
+
+def test_only_an_existing_file_that_is_not_a_credential_is_granted(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "agent.py").write_text("print('hi')\n")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "id_ed25519").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+    (tmp_path / "link.py").symlink_to(tmp_path / "agent.py")
+    cases = {
+        "agent.py": os.path.realpath(tmp_path / "agent.py"),
+        str(tmp_path / "agent.py"): os.path.realpath(tmp_path / "agent.py"),
+        "link.py": os.path.realpath(tmp_path / "agent.py"),  # what the kernel checks
+        "missing.py": None,
+        "pkg": None,  # a folder: granting it would grant everything in it
+        ".ssh/id_ed25519": None,
+    }
+    for name, want in cases.items():
+        got = interpreter.runs(["python3", name])
+        print(f"python3 {name!r:40} grants {got}")
+        assert got == want, name
+
+
+@here
+@functional
+def test_hlyn_run_python_agent_py_needs_no_flag_for_the_script(tmp_path):
+    """`hlyn run -- python agent.py` runs: the file Python was asked to run
+    is readable, as the program itself is runnable. Only that file."""
+    (tmp_path / "agent.py").write_text(textwrap.dedent("""
+        print("agent ran")
+        try:
+            open("beside.txt").read()
+            print("beside.txt: READ")
+        except OSError as exc:
+            print("beside.txt:", exc.strerror)
+    """))
+    (tmp_path / "beside.txt").write_text("not granted")
+    done = hlyn("run", "--no-log", "--json", "--", sys.executable, "agent.py", cwd=str(tmp_path))
+    print(f"exit {done.returncode}\nstdout:\n{done.stdout}stderr:\n{done.stderr}")
+    assert done.returncode == 0
+    ran, beside = done.stdout.splitlines()
+    assert ran == "agent ran"
+    assert beside in ("beside.txt: Operation not permitted", "beside.txt: Permission denied")  # macOS, Linux
+    done = hlyn("run", "--no-log", "--no-report", "--", sys.executable, "-c", "open('agent.py')",
+                cwd=str(tmp_path))
+    print(f"with -c: exit {done.returncode}\n{done.stderr}")
+    assert done.returncode == 1 and "PermissionError" in done.stderr
+
+
+@pytest.mark.parametrize(("line", "found"), [
+    (b"#!/bin/sh\n", ("/bin/sh", [])),
+    (b"#!/bin/sh -e\n", ("/bin/sh", ["-e"])),
+    (b"#! /usr/bin/env python3\n", ("/usr/bin/env", ["python3"])),
+    (b"#!/usr/bin/env -S python3 -u\n", ("/usr/bin/env", ["-S python3 -u"])),
+    (b"#!/usr/bin/env\tnode\r\n", ("/usr/bin/env", ["node"])),
+    (b"print('no line')\n", None),
+    (b"#!\n", None),
+    (b"#!relative/python\n", None),
+])
+def test_a_scripts_first_line_names_its_interpreter(tmp_path, line, found):
+    tool = tmp_path / "tool"
+    tool.write_bytes(line + b"echo body\n")
+    print(line, "->", interpreter.shebang(str(tool)))
+    assert interpreter.shebang(str(tool)) == found
+
+
+@pytest.mark.parametrize(("args", "found"), [
+    (["python3"], "python3"),
+    (["-S python3 -u"], "python3"),
+    (["-S", "python3"], "python3"),
+    (["-i", "python3"], None),  # env -i: a program found with a cleared environment; not followed
+    (["NAME=value", "python3"], "python3"),
+    ([], None),
+])
+def test_env_in_a_first_line_names_the_program_it_starts(args, found):
+    print(args, "->", interpreter.env_program(args))
+    assert interpreter.env_program(args) == found
+
+
+@here
+@functional
+@pytest.mark.parametrize("line", [
+    "#!/bin/sh", "#!/usr/bin/env python3", "#!/usr/bin/env -S python3 -u", f"#!{sys.executable}",
+])
+def test_a_script_runs_by_name_like_any_program(tmp_path, line):
+    """`hlyn run -- ./tool` for a script: the kernel runs its interpreter,
+    which must read the script. Both come with asking to run it, the way a
+    binary's own execute permission does; nothing else does."""
+    body = "echo script ran" if line.endswith("sh") else "print('script ran')"
+    tool = tmp_path / "tool"
+    tool.write_text(f"{line}\n{body}\n")
+    tool.chmod(0o755)
+    (tmp_path / "beside.txt").write_text("not granted")
+    done = hlyn("run", "--no-log", "--json", "--", "./tool", cwd=str(tmp_path))
+    print(f"{line}: exit {done.returncode}\nstdout:\n{done.stdout}stderr:\n{done.stderr}")
+    assert done.returncode == 0 and done.stdout == "script ran\n"
+
+
+@here
+@functional
+def test_a_program_that_cannot_start_is_explained_not_a_traceback(tmp_path):
+    tool = tmp_path / "tool"
+    tool.write_text("#!/no/such/interpreter\necho unreachable\n")
+    tool.chmod(0o755)
+    done = hlyn("run", "--no-log", "--no-report", "--", "./tool", cwd=str(tmp_path))
+    print(f"exit {done.returncode}\nstderr:\n{done.stderr}")
+    assert done.returncode != 0 and "Traceback" not in done.stderr
+    assert "hlyn: can't start ./tool" in done.stderr and "/no/such/interpreter" in done.stderr
