@@ -377,7 +377,8 @@ def _cannot(why: str) -> str:
             text += (f" sys.executable is {exe}, not Python. "
                      f'Call multiprocessing.set_executable("/path/to/python") first.')
     else:
-        text += " In a frozen app, call hlyn.helper() first thing in main()."
+        text += (" In a frozen app, call hlyn.helper() first thing in main(), and build it with hlyn "
+                 "installed, so PyInstaller uses hlyn's hook (other freezers: include hlyn/core/*.so).")
     return text + " Nothing was sealed."
 
 

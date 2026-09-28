@@ -33,7 +33,8 @@ __all__ = ["MARKER", "command", "helper", "interpreter", "main"]
 # The argument a frozen app is re-run with to become a helper.
 MARKER = "--hlyn-helper"
 
-# The helpers, by name, and the module whose `main(argv)` each one runs.
+# The helpers, by name, and the module whose `main(argv)` each one runs
+# (imported by name in `main`, so a freezer bundles them).
 NAMES = {"proxy": "hlyn.proxy", "gate": "hlyn.gate"}
 
 
@@ -62,8 +63,6 @@ def command(name: str, *args: str) -> list[str]:
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Run the helper named first in `argv` (default: `sys.argv[1:]`), then exit."""
-    import importlib
-
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] not in NAMES:
         print(f"hlyn: helper: expected one of {', '.join(NAMES)}, got {args[:1]}", file=sys.stderr)
@@ -79,8 +78,16 @@ def main(argv: Sequence[str] | None = None) -> None:
             os._exit(0)
         print(f'{{"pid": {os.getpid()}}}', flush=True)
         rest = [item for item in rest if item not in ("--early", "--detach")]
-    module = importlib.import_module(NAMES[args[0]])
-    sys.exit(module.main(rest))
+    # Import statements, not a name looked up at run time: freezers bundle
+    # what a program's imports reach, and a frozen app starts its helpers
+    # through `hlyn.helper()`, which lands here.
+    if args[0] == "proxy":
+        from . import proxy
+
+        sys.exit(proxy.main(rest))
+    from . import gate
+
+    sys.exit(gate.main(rest))
 
 
 def helper() -> None:

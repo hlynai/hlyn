@@ -37,6 +37,10 @@ classifiers = [
 [project.scripts]
 hlyn = "hlyn.cli:main"
 
+# PyInstaller finds hlyn's hook here, which bundles its native libraries.
+[project.entry-points.pyinstaller40]
+hook-dirs = "hlyn.__pyinstaller:get_hook_dirs"
+
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6", "mutmut>=3"]
 
@@ -112,6 +116,9 @@ ignore = [
 python_version = "3.10"
 strict = true
 files = ["src/hlyn"]
+# PyInstaller's hook: named for PyInstaller (`hook-hlyn`, not an importable
+# module) and run only inside it.
+exclude = ["src/hlyn/__pyinstaller/hook-hlyn\\.py$"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

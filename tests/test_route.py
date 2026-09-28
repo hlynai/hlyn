@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 from conftest import SRC, enforces
@@ -345,3 +346,70 @@ def test_an_early_proxy_that_dies_before_it_is_ready_refuses_connections_and_say
         assert said and said.startswith("the proxy stopped before it was ready")
     finally:
         way.close()
+
+
+def reached(start: str) -> set[str]:
+    """hlyn's modules reachable from `start` by import statements anywhere in
+    each file, functions included: what a freezer's bytecode scan bundles."""
+    import ast
+
+    root = os.path.join(SRC, "hlyn")
+
+    def path(name: str) -> str | None:
+        parts = name.split(".")[1:]
+        base = os.path.join(root, *parts)
+        for candidate in (base + ".py", os.path.join(base, "__init__.py")):
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    seen: set[str] = set()
+    todo = [start]
+    while todo:
+        name = todo.pop()
+        if name in seen or path(name) is None:
+            continue
+        seen.add(name)
+        package = name if path(name).endswith("__init__.py") else name.rpartition(".")[0]
+        for node in ast.walk(ast.parse(Path(path(name)).read_text())):
+            if isinstance(node, ast.Import):
+                todo += [alias.name for alias in node.names if alias.name.startswith("hlyn")]
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    base = package.rsplit(".", node.level - 1)[0] if node.level > 1 else package
+                    module = f"{base}.{node.module}" if node.module else base
+                else:
+                    module = node.module or ""
+                if module.startswith("hlyn"):
+                    todo.append(module)
+                    todo += [f"{module}.{alias.name}" for alias in node.names]
+    return seen
+
+
+def test_a_freezer_finds_the_helpers_from_hlyn_helper():
+    """Freezers (PyInstaller, Nuitka, cx_Freeze) bundle what a program's
+    import statements reach. A frozen app starts its helpers through
+    `hlyn.helper()`, so the proxy and the gate, and what they import, must be
+    reachable by import statements from there, not only by a module name
+    computed at run time (which is what failed: `No module named hlyn.proxy`)."""
+    found = reached("hlyn.helpers")
+    print(sorted(found))
+    for name in ("hlyn.proxy", "hlyn.gate", "hlyn.listen", "hlyn.wire", "hlyn.chain", "hlyn.core.guard"):
+        assert name in found, name
+
+
+def test_pyinstaller_finds_hlyns_hook_and_the_hook_bundles_the_native_libraries():
+    """The hook is found through the `pyinstaller40` entry point, and names
+    the libraries hlyn opens by path (checked on the source, since PyInstaller
+    itself needn't be installed to run this suite)."""
+    import tomllib
+
+    with open(os.path.join(os.path.dirname(SRC), "pyproject.toml"), "rb") as fh:
+        points = tomllib.load(fh)["project"]["entry-points"]["pyinstaller40"]
+    from hlyn.__pyinstaller import get_hook_dirs
+
+    hooks = get_hook_dirs()
+    hook = Path(hooks[0], "hook-hlyn.py").read_text()
+    print(points, hooks, hook, sep="\n")
+    assert points == {"hook-dirs": "hlyn.__pyinstaller:get_hook_dirs"}
+    assert 'binaries = collect_dynamic_libs("hlyn")' in hook
