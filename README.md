@@ -280,7 +280,7 @@ hlyn: warning: the agent can read 1 secret file and reach the network, so it cou
 | Granting a secret file on its own | No warning. Naming it is a decision. |
 | Where it looks | Up to 4 folders deep, for at most half a second, skipping `.git`, `node_modules`, `.venv` and build output. Links are followed only as far as the kernel would. Files that live only in iCloud/Dropbox are never downloaded to be checked. |
 | In Python | Raised as a `hlyn.Exposed` warning, so the standard filters apply |
-| Make it an error | `PYTHONWARNINGS=error::hlyn.Exposed` refuses the run (exit 2), which keeps leaky policies out of CI. In Python, `warnings.simplefilter("error", hlyn.Exposed)` raises before anything is sealed. |
+| Make it an error | `PYTHONWARNINGS=error::hlyn.Exposed` refuses the run (exit 2), which keeps leaky policies out of CI. In Python, `warnings.simplefilter("error", hlyn.Exposed)` raises before anything is sealed. With hlyn installed from PyPI, Python first prints `Invalid -W option ignored: invalid module name: 'hlyn'`, because it reads the setting before it can import hlyn; hlyn applies it anyway. |
 | Check a policy yourself | `hlyn.exposed(policy)` returns the list |
 
 ### Policy files

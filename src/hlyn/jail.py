@@ -363,6 +363,44 @@ def reaches(plan: Policy) -> list[str]:
     return out
 
 
+_OPTIONS = False  # whether `options()` has run
+
+
+def options() -> None:
+    """Apply the `-W` / `PYTHONWARNINGS` entries that name hlyn's warnings
+    (`error::hlyn.Exposed`, `ignore::hlyn.Reach`), once, before hlyn first
+    warns.
+
+    Python reads those options at startup, before site-packages is on its
+    path, so for an installed hlyn it can't import the category: it prints
+    "Invalid -W option ignored" and drops the entry. Here each such entry is
+    applied with Python's own parser, in the order given -- unless a filter
+    for that warning exists already: then Python applied it (hlyn was on
+    PYTHONPATH), or the program set its own, which should win as it would
+    have over an entry applied at startup."""
+    global _OPTIONS
+    if _OPTIONS:
+        return
+    _OPTIONS = True
+    import warnings
+
+    from .hosts import Reach
+    from .secret import Exposed
+
+    ours: dict[str, type[Warning]] = {
+        "hlyn.Exposed": Exposed, "hlyn.secret.Exposed": Exposed,
+        "hlyn.Reach": Reach, "hlyn.hosts.Reach": Reach,
+    }
+    have = {item[2] for item in warnings.filters}
+    for option in sys.warnoptions:
+        fields = option.split(":")
+        category = ours.get(fields[2].strip()) if len(fields) > 2 else None
+        if category is None or category in have:
+            continue
+        with contextlib.suppress(Exception):  # malformed: Python has said so already
+            warnings._setoption(option)  # type: ignore[attr-defined]  # Python's own -W parser, 3.9-3.14
+
+
 def _warn(plan: Policy) -> list[str]:
     """Say, before sealing, if the policy lets secrets out. See `secret.py`.
 
@@ -378,6 +416,7 @@ def _warn(plan: Policy) -> list[str]:
     from .hosts import Reach
     from .secret import Exposed, exposed, warning
 
+    options()
     for said in reaches(plan):
         warnings.warn(said, Reach, stacklevel=3)
     found = exposed(plan)

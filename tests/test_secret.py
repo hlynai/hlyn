@@ -234,6 +234,59 @@ def test_the_cli_refuses_when_warnings_are_errors(project):
     assert "Traceback" not in done.stderr
 
 
+# hlyn installed from a wheel isn't importable when Python reads -W and
+# PYTHONWARNINGS (before site-packages is on the path), so Python drops an
+# entry naming hlyn's warnings. Putting hlyn on sys.path only after startup
+# reproduces exactly that; PYTHONPATH, as the tests above use, hides it.
+INSTALLED = (f"import runpy, sys; sys.path.insert(0, {SRC!r}); "
+             "runpy.run_module('hlyn.cli', run_name='__main__')")
+
+
+@pytest.mark.parametrize("action", ["error", "ignore", "default"])
+def test_pythonwarnings_naming_hlyns_warning_works_for_an_installed_hlyn(project, action):
+    env = {"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"),
+           "PYTHONWARNINGS": f"{action}::hlyn.Exposed"}
+    done = subprocess.run(
+        [sys.executable, "-c", INSTALLED, "run", "--no-log", "--read", str(project), "--net", "443", "--",
+         sys.executable, "-c", "print('RAN')"],
+        capture_output=True, text=True, env=env, check=False, cwd=str(project),
+    )
+    print(f"PYTHONWARNINGS={action}::hlyn.Exposed: exit {done.returncode}\nstdout:\n{done.stdout}"
+          f"stderr:\n{done.stderr}")
+    assert "Traceback" not in done.stderr
+    if action == "error":
+        assert done.returncode == 2 and "RAN" not in done.stdout and "hlyn: refused:" in done.stderr
+    elif action == "ignore":
+        assert done.returncode == 0 and "RAN" in done.stdout and "secret file" not in done.stderr
+    else:
+        assert done.returncode == 0 and "RAN" in done.stdout and "hlyn: warning:" in done.stderr
+
+
+def test_pythonwarnings_naming_reach_works_for_an_installed_hlyn(tmp_path):
+    env = {"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"), "PYTHONWARNINGS": "error::hlyn.Reach"}
+    done = subprocess.run(
+        [sys.executable, "-c", INSTALLED, "run", "--no-log", "--net", "localhost:2375", "--",
+         sys.executable, "-c", "print('RAN')"],
+        capture_output=True, text=True, env=env, check=False, cwd=str(tmp_path),
+    )
+    print(f"exit {done.returncode}\nstdout:\n{done.stdout}stderr:\n{done.stderr}")
+    assert done.returncode == 2 and "RAN" not in done.stdout and "hlyn: refused:" in done.stderr
+
+
+def test_a_program_filter_still_beats_pythonwarnings(project):
+    """An entry applied late must not override what the program itself set
+    for the warning: code runs after startup, so its filter wins, as it would
+    have if Python could have applied the entry itself."""
+    code = (f"import sys, warnings; sys.path.insert(0, {SRC!r}); import hlyn\n"
+            "warnings.simplefilter('ignore', hlyn.Exposed)\n"
+            f"hlyn.run(lambda: None, read=[{str(project)!r}], net=[443], log=False)\n"
+            "print('RAN')\n")
+    env = {"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"), "PYTHONWARNINGS": "error::hlyn.Exposed"}
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, check=False)
+    print(f"exit {done.returncode}\nstdout:\n{done.stdout}stderr:\n{done.stderr}")
+    assert done.returncode == 0 and "RAN" in done.stdout
+
+
 def test_a_keynote_file_or_a_public_certificate_is_not_a_secret(tmp_path):
     (tmp_path / "Slides.key").write_bytes(b"PK\x03\x04 zip of a presentation")
     (tmp_path / "ca.pem").write_text("-----BEGIN CERTIFICATE-----\nMIIB\n")

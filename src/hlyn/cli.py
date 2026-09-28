@@ -663,6 +663,7 @@ def _exposed(plan: Policy) -> bool:
     if not found:
         return True
     text = warning(found, cli=True)
+    jail.options()
     try:
         with warnings.catch_warnings(record=True) as heard:
             warnings.warn(text, Exposed, stacklevel=1)
@@ -684,6 +685,7 @@ def _reach(plan: Policy) -> bool:
     from .hosts import Reach
     from .jail import reaches
 
+    jail.options()
     for text in reaches(plan):
         try:
             with warnings.catch_warnings(record=True) as heard:
