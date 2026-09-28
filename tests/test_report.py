@@ -778,6 +778,22 @@ def test_repeats_reported_by_the_gate_add_up_on_one_line(tmp_path):
     assert "[7 times]" in text
 
 
+def test_on_macos_a_direct_connect_with_no_address_says_what_would_allow_a_local_one(tmp_path, monkeypatch):
+    """Seatbelt reports a refused connect as `remote:*:PORT`, without the
+    address (measured on macOS 27), so the report can't tell a local service
+    from anywhere else: no flag is suggested, and the note says which one to
+    add if it was a service on this machine. With an address, the flag."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    report = book(tmp_path, net=["example.com"])
+    unknown = one(report, kind="net", target="55432", op="network-outbound", source="kernel")
+    local = one(report, kind="net", target="55433 127.0.0.1", op="network-outbound", source="kernel")
+    for entry in (unknown, local):
+        print(entry.target, "|", entry.allow, "|", entry.note)
+    assert unknown.allow is None
+    assert unknown.note.endswith("if it was a service on this machine, allow it with --net localhost:55432")
+    assert local.allow == "--net localhost:55433"
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="the gate reports direct connects on Linux only")
 def test_on_linux_the_preload_copy_of_a_direct_connect_is_left_to_the_gate(tmp_path):
     """The preloaded reporter hears the same refused connect from inside the

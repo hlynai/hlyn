@@ -608,9 +608,13 @@ class Report:
             if local:
                 return Entry("net", shown, f"--net localhost:{port}", WHY["direct"], source=denial.source)
             if sys.platform == "darwin":
+                # Seatbelt reports `remote:*:PORT` without the address, so a
+                # local service can't be told from anywhere else: no flag, but
+                # the one that would help if it was local.
                 return Entry("net", shown, None,
                              WHY["direct"] + "; on macOS a program must use the proxy for anything but "
-                             "localhost entries", source=denial.source)
+                             "localhost entries: if it was a service on this machine, allow it with "
+                             f"--net localhost:{port}", source=denial.source)
             if port == 53:
                 return Entry("net", shown, None, WHY["dns"], source=denial.source)
             from .error import Invalid
