@@ -747,6 +747,11 @@ def test_row_3_unix_race(proxy, where):
         race.race_unix({allowed.encode()!r}, {refused.encode()!r}, {TRIES}, 4, out)
         took = __import__("time").monotonic() - began
         print("connected", out[0], "refused", out[1], "other", out[2], f"in {{took:.1f}} s", flush=True)
+        errors = (ctypes.c_int * 256)()
+        race.race_errors(errors, 256)
+        names = __import__("errno").errorcode
+        print("other by errno", {{names.get(n, n): errors[n] for n in range(256) if errors[n]}},
+              "total", sum(errors), flush=True)
     """, net=["example.com"], write=[box], proxy=proxy, preload=f"race = ctypes.CDLL({library!r})",
        timeout=max(600, TRIES / 50), env=_runtime())
     served.set()
@@ -765,6 +770,7 @@ def test_row_3_unix_race(proxy, where):
     counts = out.split()
     assert int(counts[1]) > 0 and int(counts[3]) > 0
     assert events.total == int(counts[3]), (events.total, out)  # each refusal left a record
+    assert int(out.split("total ")[1].split()[0]) == int(counts[5]), out  # every "other" has its errno
     assert won == 0
 
 

@@ -30,6 +30,7 @@
 static union { struct sockaddr_in in; struct sockaddr_un un; } addr, good, evil;
 static socklen_t size;
 static atomic_int stop;
+static int errors[256]; /* errno of each "anything else", counted by the connecting thread */
 
 static void *flip(void *unused)
 {
@@ -41,20 +42,28 @@ static void *flip(void *unused)
     return 0;
 }
 
-/* out[0]: connects that returned 0; out[1]: EACCES; out[2]: anything else. */
+static void other(int *out)
+{
+    out[2]++;
+    errors[errno > 0 && errno < 256 ? errno : 0]++;
+}
+
+/* out[0]: connects that returned 0; out[1]: EACCES; out[2]: anything else,
+ * by errno in race_errors(). */
 static int loop(int family, int iterations, int flippers, int *out)
 {
     pthread_t threads[64];
     if (flippers > 64)
         flippers = 64;
     memcpy(&addr, &good, size);
+    memset(errors, 0, sizeof errors);
     atomic_store(&stop, 0);
     for (int i = 0; i < flippers; i++)
         pthread_create(&threads[i], 0, flip, 0);
     for (int i = 0; i < iterations; i++) {
         int s = socket(family, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (s < 0) {
-            out[2]++;
+            other(out);
             continue;
         }
         if (connect(s, (struct sockaddr *)&addr, size) == 0) {
@@ -63,7 +72,7 @@ static int loop(int family, int iterations, int flippers, int *out)
         } else if (errno == EACCES) {
             out[1]++;
         } else {
-            out[2]++;
+            other(out);
         }
         close(s);
     }
@@ -97,4 +106,12 @@ int race_unix(const char *good_path, const char *evil_path, int iterations, int 
     strncpy(evil.un.sun_path, evil_path, sizeof evil.un.sun_path - 1);
     size = sizeof(struct sockaddr_un);
     return loop(AF_UNIX, iterations, flippers, out);
+}
+
+/* The last run's "anything else" count for each errno (0: out of range). */
+int race_errors(int *out, int count)
+{
+    for (int i = 0; i < count && i < 256; i++)
+        out[i] = errors[i];
+    return 0;
 }
