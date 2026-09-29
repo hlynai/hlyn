@@ -92,6 +92,24 @@ STREAM = 1
 KINDS = 0xF
 TCP = 6
 
+# Unix sockets before Landlock ABI 9 (residual 3 of the design, closed
+# 2026-09-29). A datagram socket can name where each message goes in
+# sendmsg()'s msg_name, inside a struct in memory the filter can't read, and
+# no unprivileged kernel facility checks that name before Linux 7.1's
+# LANDLOCK_ACCESS_FS_RESOLVE_UNIX. Measured on 6.12: under net=False and
+# [443] the gate refused connect() and sendto() to a socket outside the write
+# grants, and sendmsg() delivered anyway, as did one end of a datagram
+# socketpair (a named send ignores the pair's own peer) and AF_UNIX SOCK_RAW,
+# which the kernel turns into SOCK_DGRAM. So while the gate checks unix
+# sockets on such a kernel, AF_UNIX sockets are stream or seqpacket only:
+# unix_stream_sendmsg refuses a name and unix_seqpacket_sendmsg ignores it.
+# Registers only, so nothing to race (the kernel's own advice for pointer
+# arguments: seccomp.h, SECCOMP_USER_NOTIF_FLAG_CONTINUE). The domain is
+# compared on its low 32 bits, the half the kernel reads. RESEARCH-host-
+# allowlisting.md, "Unix datagram sockets", has how other sandboxes do this.
+SEQPACKET = 5
+UNIX_KINDS = (STREAM, SEQPACKET)
+
 # Two ways to open a TCP connection that Landlock's port rules do not see.
 # Landlock checks connect(). TCP Fast Open connects from a send call instead,
 # and Landlock only covers it from Linux 7.2 and 6.18.54 (commit 33cb713db016,
@@ -418,10 +436,12 @@ def busy() -> bool:
     return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2
 
 
-def _build(policy: Policy, watch: bool = False) -> int:
+def _build(policy: Policy, watch: bool = False, datagrams: bool = False) -> int:
     """The compiled filter for `policy`, as a libseccomp context the caller
     releases. Nothing is loaded. `watch`: send unix connects to a gate
-    without naming hosts (see `load`)."""
+    without naming hosts (see `load`). `datagrams`: refuse unix datagram
+    sockets (see UNIX_KINDS); `linux.load` asks for it while a gate checks
+    unix sockets on a kernel before Landlock ABI 9."""
     named = bool(policy.hosts())
     api = lib()
     ctx = api.seccomp_init(ALLOW)
@@ -487,6 +507,15 @@ def _build(policy: Policy, watch: bool = False) -> int:
                 _rule(ctx, ERROR | EPERM, "socket", [Arg(0, EQ, domain, 0)])
         _rule(ctx, ERROR | EPERM, "socket", [Arg(0, GE, FAMILIES, 0)])
         _rule(ctx, ERROR | EPERM, "socket", [Arg(0, EQ, NETLINK, 0), Arg(2, NE, ROUTE, 0)])
+
+        if datagrams:
+            # See UNIX_KINDS. Disjoint from every notify rule: those name the
+            # IP families, whose low 32 bits are never AF_UNIX's.
+            for name in ("socket", "socketpair"):
+                for kind in range(KINDS + 1):
+                    if kind not in UNIX_KINDS:
+                        _rule(ctx, ERROR | EPERM, name,
+                              [Arg(0, MASKED, LOW, UNIX), Arg(1, MASKED, KINDS, kind)])
 
         if policy.net is False:
             for domain in (INET, INET6):
@@ -567,14 +596,14 @@ def _build(policy: Policy, watch: bool = False) -> int:
     return int(ctx)
 
 
-def program(policy: Policy, watch: bool = False) -> bytes:
+def program(policy: Policy, watch: bool = False, datagrams: bool = False) -> bytes:
     """The BPF program `load` would install for `policy`, for inspection:
     what the filter answers is read from here in tests, including paths no
     kernel here can take (a foreign architecture)."""
     import tempfile
 
     api = lib()
-    ctx = _build(policy, watch)
+    ctx = _build(policy, watch, datagrams)
     try:
         with tempfile.TemporaryFile() as out:
             rc = api.seccomp_export_bpf(ctx, out.fileno())
@@ -586,7 +615,7 @@ def program(policy: Policy, watch: bool = False) -> bytes:
         api.seccomp_release(ctx)
 
 
-def load(policy: Policy, watch: bool = False) -> int | None:
+def load(policy: Policy, watch: bool = False, datagrams: bool = False) -> int | None:
     """Compile and install the syscall filter for `policy`.
 
     One-way. Once loaded the filter applies to this process and every thread
@@ -596,13 +625,13 @@ def load(policy: Policy, watch: bool = False) -> int | None:
     `watch` (unix sockets checked by a gate, before Landlock ABI 9): every
     `connect()` then waits for an answer on it, so it must be handed to the
     gate at once and this process's copy closed (5.2, step 5). Otherwise
-    returns None.
+    returns None. `datagrams`: refuse unix datagram sockets (UNIX_KINDS).
     """
     named = bool(policy.hosts()) or watch
     api = lib()
     if named:
         notify._lib()  # raises, naming the fix, before anything is loaded
-    ctx = _build(policy, watch)
+    ctx = _build(policy, watch, datagrams)
     try:
         ctypes.set_errno(0)
         rc = api.seccomp_load(ctx)

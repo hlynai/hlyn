@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import platform
+from collections.abc import Callable
 
 from ..error import Invalid, Unsupported
 from ..policy import Policy
@@ -148,6 +149,21 @@ def wired() -> list[int]:
     which is the exact bug `WIRE` in the syscall filter was emptied to fix.
     Every wrapper below is therefore detached before it is dropped.
     """
+    return _held(lambda domain, kind: domain in INET)
+
+
+def datagrams() -> list[int]:
+    """Unix datagram sockets this process already holds (any type but stream
+    and seqpacket, as `seccomp.UNIX_KINDS`). Such a socket can send to any
+    socket file by naming it in sendmsg(), which nothing checks before
+    Landlock ABI 9, so a new one is refused while the gate checks unix
+    sockets there (`load`); one opened before sealing would keep that reach.
+    Only looks, as `wired` does."""
+    return _held(lambda domain, kind: domain == seccomp.UNIX and kind not in seccomp.UNIX_KINDS)
+
+
+def _held(match: Callable[[int, int], bool]) -> list[int]:
+    """This process's socket descriptors whose (family, type) `match` accepts."""
     import socket
 
     out: list[int] = []
@@ -165,12 +181,13 @@ def wired() -> list[int]:
         except (OSError, ValueError):
             continue  # not a socket, or already gone
         try:
-            kind = sock.getsockopt(socket.SOL_SOCKET, DOMAIN)
+            domain = sock.getsockopt(socket.SOL_SOCKET, DOMAIN)
+            kind = sock.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
         except OSError:
             continue
         finally:
             sock.detach()  # hand the descriptor back; never close it
-        if kind in INET:
+        if match(domain, kind):
             out.append(fd)
     return out
 
@@ -247,6 +264,22 @@ def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int
     if watch:
         config = guard.Config(port=0, rules=(), writes=policy.writes(), connect=CONNECT,
                               mode="off" if policy.net is False else "ports")
+    # Unix datagram sockets while a gate checks unix sockets, before Landlock
+    # ABI 9 (seccomp.UNIX_KINDS). From ABI 9 the kernel checks each send's
+    # path itself, so they are left alone there.
+    refuse = bool(named or watch) and landlock.abi() < 9
+    if refuse:
+        open_datagrams = datagrams()
+        if open_datagrams:
+            raise Unsupported(
+                f"{len(open_datagrams)} unix datagram socket(s) are already open "
+                f"(fd {', '.join(map(str, sorted(open_datagrams)))}), and the network is limited. "
+                f"On Linux before 7.1 a datagram socket can send to any socket file by naming it, "
+                f"which nothing can check, so hlyn refuses new ones; an open one would keep that "
+                f"reach. Close them before sealing (a logging SysLogHandler: handler.close(); "
+                f"the syslog module: syslog.closelog()), or allow the whole network (net=True). "
+                f"Nothing was sealed."
+            )
     if policy.net is False:
         open_sockets = wired()
         if open_sockets:
@@ -259,7 +292,7 @@ def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int
                 f"through it. Close them before calling hlyn.on(), or use hlyn.run(fn)."
             )
     abi = landlock.load(policy)
-    fd = seccomp.load(policy, watch=watch)
+    fd = seccomp.load(policy, watch=watch, datagrams=refuse)
     if fd is not None:
         gate.hand(fd, config)
     return abi

@@ -1436,7 +1436,8 @@ def _detach() -> None:
 
 
 class _Control:
-    """Per-run ports, asked for over a unix datagram socket (design 5.8).
+    """Per-run ports, asked for over a unix seqpacket socket (a datagram
+    one on macOS; route.start says why) (design 5.8).
 
     One datagram per request, one per answer, so a descriptor sent with a
     request can never be mistaken for another's:
@@ -1462,6 +1463,10 @@ class _Control:
         except (BlockingIOError, InterruptedError):
             return
         except OSError:
+            self.loop.remove_reader(self.sock.fileno())
+            return
+        if not data and not fds:
+            # Seqpacket: the caller closed its end. Nothing more will come.
             self.loop.remove_reader(self.sock.fileno())
             return
         task = self.loop.create_task(self._answer(data, fds))

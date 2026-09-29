@@ -932,3 +932,14 @@ pub unsafe extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> 
     }
     rc
 }
+
+// A datagram socketpair is refused like a datagram socket (seccomp.UNIX_KINDS).
+#[no_mangle]
+pub unsafe extern "C" fn socketpair(domain: c_int, kind: c_int, protocol: c_int, fds: *mut c_int) -> c_int {
+    let real = next!(SOCKETPAIR, fn(c_int, c_int, c_int, *mut c_int) -> c_int, -1);
+    let rc = real(domain, kind, protocol, fds);
+    if rc < 0 {
+        refused(NET, b"socketpair", Target::Family(domain));
+    }
+    rc
+}

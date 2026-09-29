@@ -37,14 +37,14 @@ def test_the_threat_model_is_copied_word_for_word(doc):
     assert nots in text, f"{doc}'s 'It does not stop' list differs from design section 6"
 
 
-def test_section_6_lists_nine_residuals_and_ten_things_it_stops():
+def test_section_6_lists_nine_residuals_and_eleven_things_it_stops():
     # Guards the extraction above: an edit that broke the markers would make
     # the copy test compare empty strings and pass.
     stops, nots = _section6()
     said = [line for line in stops.splitlines() if line.startswith("- ")]
     numbered = re.findall(r"^\d+\. \*\*", nots, flags=re.MULTILINE)
     print(len(said), "stops;", len(numbered), "residuals")
-    assert len(said) == 10 and len(numbered) == 9
+    assert len(said) == 11 and len(numbered) == 9
 
 
 def test_no_doc_still_says_hosts_are_not_enforced():

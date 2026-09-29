@@ -86,6 +86,7 @@ reals! {
     CONNECT = "connect";
     BIND = "bind";
     SOCKET = "socket";
+    SOCKETPAIR = "socketpair";
     SENDTO = "sendto";
     SENDMSG = "sendmsg";
 }

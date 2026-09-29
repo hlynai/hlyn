@@ -231,7 +231,13 @@ def start(
         args += ["--log", str(copy)]
     ours = theirs = None
     if control:
-        ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        # One message per request, with its descriptor. Seqpacket on Linux:
+        # the kernel ignores an address given to sendmsg() on it, where a
+        # datagram end could send to any socket file by name, and a sealed
+        # `hlyn.on()` process keeps its end (seccomp.UNIX_KINDS). macOS has
+        # no unix seqpacket, and Seatbelt checks a datagram's path itself.
+        kind = socket.SOCK_SEQPACKET if sys.platform.startswith("linux") else socket.SOCK_DGRAM
+        ours, theirs = socket.socketpair(socket.AF_UNIX, kind)
         keep.append(theirs.fileno())
         args += ["--control", str(theirs.fileno())]
     bound: list[socket.socket] = []

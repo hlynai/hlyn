@@ -690,6 +690,14 @@ class Report:
         except ValueError:
             return None
         name = FAMILY.get(family, f"family {family}")
+        if family == 1:
+            # The only unix sockets refused are datagram ones, while the
+            # network is limited on Linux before 7.1 (seccomp.UNIX_KINDS).
+            if self.plan.net is True:
+                return None
+            return Entry("net", "a unix datagram socket (system log, sd_notify)", "--net-any",
+                         "its sends can't be checked before Linux 7.1; from 7.1 it may reach "
+                         "sockets in write-granted folders", source=denial.source)
         if family in (2, 10) and self.plan.hosts():
             # Host mode allows only TCP (5.3), so a refused IP socket is UDP:
             # a name looked up by the program itself, or QUIC (5.6, 5.7).
