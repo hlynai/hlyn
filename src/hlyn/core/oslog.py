@@ -21,7 +21,7 @@ Four things about reading it were found by measurement, not documentation
   for the command and for every process it starts, since they inherit the
   environment. That scopes the stream to this run exactly, with no process-tree
   bookkeeping, and the tag is written by the kernel: the agent cannot forge a
-  report from the `Environment` sender.
+  report from the `Sandbox` sender.
 - **It is best-effort.** A few percent of reports never arrive, more when the
   log daemon is busy. When the end marker is late, the report says the list
   may be incomplete; a report that simply went missing cannot be detected.

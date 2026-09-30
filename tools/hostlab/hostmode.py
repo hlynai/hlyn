@@ -36,7 +36,7 @@ def profile(port, tag, extra=()):
 
 
 def denials(tag, run):
-    """Run `run()` while streaming the log; return the Environment lines tagged `tag`."""
+    """Run `run()` while streaming the log; return the `Sandbox` log lines tagged `tag`."""
     stream = subprocess.Popen(["/usr/bin/log", "stream", "--style", "ndjson", "--predicate",
                                'sender == "Sandbox"'], stdout=subprocess.PIPE, text=True)
     time.sleep(1.5)  # crude: oslog.py proves readiness with a marker; enough for a lab

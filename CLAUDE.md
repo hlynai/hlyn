@@ -69,24 +69,75 @@ I do this when writing a test, when reviewing one, and before quoting a run's nu
 
 ## FINDINGS.md: memory that has been measured
 
-- Before touching an area, read its section in FINDINGS.md. A dead end listed there stays dead unless its premise has changed.
-- If debugging took more than one attempt, add an entry before committing:
-  - the symptom;
-  - the root cause;
-  - what didn't work, and why;
-  - what worked;
-  - how to verify it.
+FINDINGS.md is where this project remembers what it has *proven*, and the dead ends too. Sessions and agents start cold. A lesson that lives only in a chat transcript is lost, and the next session pays for it again.
 
-  Mark anything not measured *(unverified)*.
-- Keep entries factual and short. Retire a stale entry with a strike-through and a note; never delete it silently.
+**Read before you act.**
+- Before changing an area, or debugging anything, search FINDINGS.md for it (`grep -n -i <area> FINDINGS.md`) and read the whole entry.
+- A listed dead end stays dead unless its premise has changed. If you retry one, say which premise changed.
+
+**Write an entry when you learned something the code doesn't show:**
+- debugging that took more than one attempt;
+- a measurement that decided something, such as a benchmark, a kernel behaviour or a race count;
+- research that changed a decision, especially one that overturned an earlier belief;
+- a test or harness that turned out weak, and what exposed it.
+
+Write it before the commit that it explains. A first-try fix belongs in the commit message, not here.
+
+**Use this shape**, matching the existing entries:
+```
+## <Area>: <what went wrong or was measured, in plain words> (<fixed|measured|found> YYYY-MM-DD; REMAINING #n if any)
+- **Symptom:** what was seen, with the exact error, errno or output.
+- **Root cause:** the mechanism, not a guess. Name the file and function, or the kernel feature.
+- **Didn't work:** each attempt, and why it failed. This is the most valuable part; keep it.
+- **Fix:** what changed, and where.
+- **Where measured:** OS, kernel, architecture and machine (for example Docker Desktop 6.12.76 aarch64). Results differ between them.
+- **Verify:** a command someone can paste, and the output that proves it. Name the test that pins it.
+```
+
+**Keep it trustworthy:**
+- Only what was run goes in as fact. Mark anything read, inferred or reported by someone else *(unverified)*. Replace the mark once it's measured.
+- Give exact numbers and outputs, not "works now" or "much faster". Include the scale ("0 of 10,000,000 tries").
+- If a later entry changes an earlier one, link them both ways.
+- When a finding stops being true, strike it through and say what changed and when. Never delete it silently; the history is part of the lesson.
+- Leave out anything the code, git history or design doc already says.
 
 ## Agents
 
-These are defaults, not fixed limits. The user can change them for a task, and a task that clearly needs more can ask for it.
-- **By default, agents research and I write the code.** An agent reads, searches, measures and reports back, and code changes go through the lead session, which sees the whole diff. When an agent does write code (because the user asked, or the work splits cleanly), it gets its own git worktree and files no other agent touches, and I review its diff before merging.
-- **About five agents at a time** is the usual ceiling. Go above it when the user says so. Each brief says:
-  - the question to answer;
-  - the files, docs and FINDINGS.md sections to read;
-  - the evidence to bring back: command output, not a summary of it.
-- **The shared docs belong to the lead.** Only the lead edits FINDINGS.md, TODO.md, REMAINING.md and the design doc, using text the agents return.
-- **An agent's result is a claim until I've checked it.** Re-run its commands. Look for shortcuts: skipped or weakened tests, checks that can't fail, conclusions with no output behind them.
+These are defaults, not fixed limits. The user can change them for any task, and a task that clearly needs more can ask for it.
+
+**When to use them.** Use agents for work that splits into independent parts:
+- broad searches across the codebase or the web;
+- research questions that don't depend on each other;
+- long measurements that can run in parallel.
+
+Do small or tightly connected work in the lead session. A brief that costs more than the work is waste.
+
+**Who writes the code.**
+- By default, agents research and the lead writes the code, so one session sees and checks the whole diff.
+- When an agent does write code (the user asked, or the work splits cleanly), it gets its own git worktree and files no other agent touches.
+- The lead edits the shared docs (FINDINGS.md, TODO.md, REMAINING.md, the design doc) from text the agents return.
+
+**How many.** About five at a time is the usual ceiling. Go above it when the user says so. Give each agent a separate question; two agents answering the same one is duplicate spend unless the aim is an independent check.
+
+**The brief.** An agent knows nothing about this conversation, so the brief carries everything:
+1. **Goal:** the one question to answer, or the change to make, and why it matters.
+2. **What's already known:** the FINDINGS.md sections, design-doc sections and files to read first, and the dead ends not to retry.
+3. **Scope:** the files the agent owns or may read, and what is out of bounds.
+4. **Rules it inherits:** every rule in this file applies to agents too. That includes environment, not sandbox; battle-tested first; no user-global state; no pushing; tests with `-vv -rA` and triple-checked.
+5. **What to bring back:**
+   - commands with their full output;
+   - sources with a URL or `file:line`;
+   - each claim marked as *measured* or *read*;
+   - what was tried and failed;
+   - open questions.
+
+   A summary on its own isn't evidence.
+6. **When to stop:** what counts as done, and when to come back and report instead of guessing.
+
+**Checking the result.** An agent's report is a claim until the lead has checked it:
+- Re-run its key commands.
+- Read every line of any diff.
+- Triple-check its tests.
+- Look for shortcuts: skipped or weakened tests, checks that can't fail, conclusions with no output behind them, TODOs left where work should be.
+
+When agents or sources disagree, measure; don't vote. The unix datagram decision is an example: most of the research said "document the gap", and one measurement showed its main premise was false.
