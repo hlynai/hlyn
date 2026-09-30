@@ -13,6 +13,16 @@ Where things are:
 - `DESIGN-host-allowlisting.md` is the design and the contract. `RESEARCH-…` holds the evidence behind decisions.
 - `FINDINGS.md` is the verified engineering memory. `REMAINING.md` lists what's left.
 
+## Use what's battle-tested; don't rebuild it
+
+This rule comes before the others. hlyn is security software, and bugs hide in code that only we have run. A kernel facility, a standard or a widely deployed library has been attacked, fuzzed and debugged by thousands of people in production. A copy we write ourselves has been tested by nobody.
+
+- **Search first.** Before building anything non-trivial, look for a proven, maintained solution: a kernel facility, a standard, or a widely used library or tool. For anything security-critical, this search is required.
+- **If one exists, use it as it is.** Don't rewrite it, don't port it, and don't rebuild "the same thing, but ours". Copying its pattern is only the fallback when it truly can't be used directly.
+- **Write custom code only for the gap it leaves.** Keep that code small, and build it on top of the proven piece, not beside it.
+- **Record why.** Put in the design doc or the commit what was considered and why it didn't fit. "It was easier to write our own" is not a reason.
+- **When in doubt, ask the user** before building instead of reusing.
+
 ## What the product must feel like
 
 1. **One line gives a safe minimum.** `hlyn.on()` or `hlyn run -- cmd` works with no docs and strict defaults. Each further need is one more obvious argument.
@@ -23,7 +33,6 @@ Where things are:
    - What hlyn creates is "the agent's environment". Things are "inside" or "outside the environment".
    - The adjective is "confined", not "sandboxed".
    - Keep other people's names exactly as they are: Apple's `sandbox_init`, `sandbox-exec`, `(target same-sandbox)`, the macOS log sender `Sandbox`, Docker Sandboxes, Anthropic's sandbox-runtime, URLs, and verbatim quotes.
-6. **Proven before custom.** Before building anything non-trivial, look for a kernel facility, a standard, or a widely deployed library, and always do this for security code. Use it or copy its pattern. Write your own code only for the gap it leaves, and record why in the design doc or the commit.
 
 ## How I work here
 
