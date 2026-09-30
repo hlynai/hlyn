@@ -1,32 +1,82 @@
-## Product rules
-- **Names are plain English, one word where possible.** Commands, flags, fields, functions: a developer should guess what it does from the name alone.
-- **Usable without reading docs.** One line (`hlyn.on()` / `hlyn run -- cmd`) must give a safe, working minimum. Defaults stay strict and sensible; every extra need is one more simple, obvious argument. Easy by default, fully configurable when wanted.
-- **Every message tells the user what to do next.** Errors and refusals name the flag or field that would change the outcome.
-- **Human output by default, `--json` for machines**, on every command that prints data.
-- **Never say "sandbox"; say "environment".** In code, comments, docs, messages, tests, commits and anything written about hlyn, what hlyn creates is an *environment*: "the agent's environment", "outside the environment", "confined" for the adjective (never "sandboxed"). The only exceptions are names that belong to someone else and must match exactly: Apple's API and profile syntax (`sandbox_init`, `sandbox-exec`, `(target same-sandbox)`), the macOS log sender `Sandbox`, other products' names (Docker Sandboxes, Anthropic's sandbox-runtime), URLs and verbatim quotes.
-- **Prefer battle-tested over custom.** Before building anything non-trivial, and always for anything security-critical, look for a proven, maintained solution: a kernel facility, a standard, a widely deployed library or tool. Use it, or follow its pattern. Write custom code only for the gap it leaves, and record in the design doc or commit why the proven option didn't fit.
+# hlyn
 
-## Findings (engineering memory)
-[FINDINGS.md](file://<repo>/FINDINGS.md) records what has been *verified* about how this codebase behaves: root causes, dead ends, and how to measure each fix.
-- Before touching an area it covers, read that section. Listed dead ends are not to be retried unless the premise has changed.
-- After any debugging that took more than one attempt, append an entry *before* committing: symptom → root cause → what didn't work and why → what worked → how to verify. Mark anything not measured as *(unverified)*.
-- A fix is not done until its "verify" step has been run. Never claim "fixed" from reading code alone.
-- Keep it factual and terse. Retire stale entries with a strike-through and a note; don't silently delete.
+hlyn confines an AI agent to what it was allowed: files it may read or write, programs it may run, hosts it may reach. The kernel enforces it:
+- **Linux:** Landlock, seccomp, and a user-notify gate for connections.
+- **macOS:** Seatbelt.
 
-## Working with agents
-These apply to the lead session and to every agent it starts.
-- **One orchestrator, at most five agents at a time.** When work is split across agents, the lead plans, briefs, reviews and merges. It writes code itself only when an agent is blocked (for example by a safety filter) or the change is too small to be worth a brief. Every brief names the files the agent owns, the docs and FINDINGS.md sections to read, and the evidence to bring back. Agents working at the same time get separate git worktrees and disjoint files; shared docs (FINDINGS.md, TODO.md, the design doc) are edited by the lead, from text the agents return.
-- **Test output is shown in full, never as pass/fail alone.** Run tests with `pytest -vv -rA` (the project config adds `-q`, so a single `-v` only cancels it), so every test's name, result and captured output appear, and paste that output when reporting. Tests print what they observed (the confined program's output, the report text, the errno) so the log shows the behaviour, not just a verdict. A pass whose output shows the wrong behaviour is a failure; a count of passes is not evidence.
-- **The lead checks every agent's work by hand before merging.** Read the whole diff, re-run the tests and the demonstration, and look for corner cutting: skipped or weakened tests, checks that can't fail, claims without output behind them, TODOs left in place of work, anything short of the design doc. Work that isn't state of the art goes back to the agent, or gets fixed, before it is merged.
-- **Done means shown running.** Before calling work finished, run the real thing (the CLI command, the library call, the reproduction from FINDINGS.md) and show its full output next to the test log. Code that was only read, or only unit-tested, is not done.
-- **Triple-check every test before trusting it.** A weak test that passes is worse than no test: it gets reported as proof. Before counting any test, fuzz target or harness as evidence, check it three ways:
-  1. **It can fail.** Plant the bug it is meant to catch, in a copy, and watch it fail. Then remove the bug and watch it pass. `tools/fuzzcheck.sh` does this for the fuzz targets.
-  2. **No check passes without testing anything.** Look for:
-     - `all(...)` over a list that can be empty;
-     - a check the input can never reach (a limit larger than the inputs ever get);
-     - a check the types already guarantee (a 16-bit port "within 0-65535");
-     - a runner that watches only one way of failing.
-  3. **It measures the real thing, at the real scale.** It checks exact values against the input, not just a plausible range. Long runs are bounded in memory. The logged output shows the behaviour itself.
+A proxy checks hostnames. Everything not allowed is refused, and a report says what was refused and which flag would allow it.
 
-  Do this when writing a test, when reviewing an agent's test, and before quoting a run's numbers. A weak test found this way gets fixed, and its earlier results are re-run rather than reported.
-- **Linux runs use `tools/linuxtest.sh`** (Docker Desktop's 6.12 kernel; builds both native crates, then runs pytest with the arguments given). macOS runs use the host's `python3 -m pytest`.
+Where things are:
+- `src/hlyn/`: the library and CLI. The OS layers are in `core/` (`linux.py`, `landlock.py`, `seccomp.py`, `notify.py`, `mac.py`).
+- `native/`: Rust crates, including the `LD_PRELOAD` reporter.
+- `tests/`: pytest. `tools/`: test runners, fuzzing and race harnesses (`tools/hostlab/`).
+- `DESIGN-host-allowlisting.md` is the design and the contract. `RESEARCH-…` holds the evidence behind decisions.
+- `FINDINGS.md` is the verified engineering memory. `REMAINING.md` lists what's left.
+
+## What the product must feel like
+
+1. **One line gives a safe minimum.** `hlyn.on()` or `hlyn run -- cmd` works with no docs and strict defaults. Each further need is one more obvious argument.
+2. **Names are plain English**, one word where possible. A developer should guess what a command, flag, field or function does from its name.
+3. **Every message says what to do next.** A refusal names the flag or field that would change the outcome. A bare "no" is a bug.
+4. **Humans by default, `--json` for machines**, on every command that prints data.
+5. **It's an "environment", never a "sandbox".** This applies everywhere: code, comments, docs, messages, tests, commits.
+   - What hlyn creates is "the agent's environment". Things are "inside" or "outside the environment".
+   - The adjective is "confined", not "sandboxed".
+   - Keep other people's names exactly as they are: Apple's `sandbox_init`, `sandbox-exec`, `(target same-sandbox)`, the macOS log sender `Sandbox`, Docker Sandboxes, Anthropic's sandbox-runtime, URLs, and verbatim quotes.
+6. **Proven before custom.** Before building anything non-trivial, look for a kernel facility, a standard, or a widely deployed library, and always do this for security code. Use it or copy its pattern. Write your own code only for the gap it leaves, and record why in the design doc or the commit.
+
+## How I work here
+
+**Evidence over claims.** Nothing is "done" or "fixed" until it has been shown running:
+- the real CLI command or library call, or the FINDINGS.md reproduction;
+- its full output shown next to the test log.
+
+Code that was only read, or only unit-tested, doesn't count.
+
+**Tests print what they saw, and I show all of it:**
+- Run `pytest -vv -rA`. The project config adds `-q`, so one `-v` only cancels it.
+- Tests print what they observed: the confined program's output, the report text, the errno.
+- A pass whose output shows the wrong behaviour is a failure. A count of passes is not evidence.
+
+**Before trusting any test, fuzz target or harness, I check it three ways.** A weak test that passes is worse than none, because it gets quoted as proof.
+1. **It can fail.** Plant the bug it's meant to catch, in a copy, and watch it fail. Remove the bug and watch it pass. `tools/fuzzcheck.sh` does this for the fuzz targets.
+2. **Nothing passes without testing anything.** Look for:
+   - `all(...)` over a list that may be empty;
+   - a limit the inputs never reach;
+   - a check the types already guarantee;
+   - a runner that watches only one way of failing.
+3. **It measures the real thing, at the real scale.** It checks exact values derived from the input, not a plausible range. Long runs stay bounded in memory.
+
+I do this when writing a test, when reviewing one, and before quoting a run's numbers. If a test turns out weak, I fix it and re-run it. I don't report its old results.
+
+**Where tests run:**
+- **Linux:** `tools/linuxtest.sh -vv -rA`, on Docker Desktop's 6.12 kernel. It builds both native crates first, and Docker Desktop must be running.
+- **macOS:** `python3 -m pytest -vv -rA` on the host.
+- **Real x86_64 and Linux 7.x:** these wait for the Kali VM, and the REMAINING.md items say what to run there.
+
+**Experiments never touch the user's global state.** Tests act only on objects they create: their own files, keychains, sockets and processes. This rule exists because a test once locked the real login keychain.
+
+**Git:** I commit locally as checkpoints and never push without asking. Commit messages say what changed and why.
+
+## FINDINGS.md: memory that has been measured
+
+- Before touching an area, read its section in FINDINGS.md. A dead end listed there stays dead unless its premise has changed.
+- If debugging took more than one attempt, add an entry before committing:
+  - the symptom;
+  - the root cause;
+  - what didn't work, and why;
+  - what worked;
+  - how to verify it.
+
+  Mark anything not measured *(unverified)*.
+- Keep entries factual and short. Retire a stale entry with a strike-through and a note; never delete it silently.
+
+## Agents
+
+- **Agents research; I write the code.** An agent reads, searches, measures and reports back. Code changes go through the lead session, which can see and check the whole diff.
+- **At most five agents at a time.** Each brief says:
+  - the question to answer;
+  - the files, docs and FINDINGS.md sections to read;
+  - the evidence to bring back: command output, not a summary of it.
+- **The shared docs belong to the lead.** Only the lead edits FINDINGS.md, TODO.md, REMAINING.md and the design doc, using text the agents return.
+- **An agent's result is a claim until I've checked it.** Re-run its commands. Look for shortcuts: skipped or weakened tests, checks that can't fail, conclusions with no output behind them.
