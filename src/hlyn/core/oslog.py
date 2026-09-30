@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Hearing refusals on macOS: the environment's own reports, from the system log.
+"""Hearing refusals on macOS: Seatbelt's own reports, from the system log.
 
 Seatbelt writes every refusal to the unified log, from the kernel, naming the
 process, the operation and the path:
@@ -98,7 +98,7 @@ def parse(line: str, tag: str) -> Denial | None:
     sender = event.get("senderImagePath")
     if not isinstance(message, str) or not isinstance(sender, str):
         return None
-    # Only the environment itself, never a process that wrote something similar.
+    # Only Seatbelt itself, never a process that wrote something similar.
     if not sender.endswith("/Sandbox") or event.get("processImagePath") != "/kernel":
         return None
     body, _, last = message.rpartition("\n")
@@ -131,7 +131,7 @@ def parse(line: str, tag: str) -> Denial | None:
 
 
 class Listener:
-    """Streams the environment's reports for one tagged run."""
+    """Streams Seatbelt's reports for one tagged run."""
 
     source = "kernel"
 
