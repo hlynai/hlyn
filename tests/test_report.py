@@ -155,10 +155,42 @@ def test_sockets_hlyn_never_allows_get_no_flag(tmp_path):
     assert entry.allow is None
 
 
-def test_an_abstract_socket_outside_the_agent_gets_no_flag(tmp_path):
+def test_an_abstract_socket_outside_the_agent_gets_no_flag(tmp_path, monkeypatch):
+    # From Landlock ABI 9 the gate lets an abstract name run, so a refusal is
+    # Landlock's scope: a socket of a process outside this agent.
+    from hlyn.core import landlock
+
+    monkeypatch.setattr(landlock, "abi", lambda: 9)
     entry = one(book(tmp_path), kind="net", target="unix:@other-agent", op="connect")
+    print(entry)
     assert entry.allow is None
     assert "outside this agent" in entry.note
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the gate and abstract names are Linux's")
+@pytest.mark.parametrize(("net", "abi", "kept"), [(False, None, False), ([443], None, False),
+                                                   (True, None, True), (False, 9, True)])
+def test_an_abstract_name_the_gate_refused_is_reported_once(tmp_path, monkeypatch, net, abi, kept):
+    """Before ABI 9, with the network not open, the gate refuses every
+    abstract name before it runs and reports it itself (`unix-abstract`); the
+    program's copy of the same refusal would call it another agent's socket.
+    With an open network, or from ABI 9, Landlock's scope refused it, and
+    the program's report is the only one. `abi` None: this machine's."""
+    from conftest import enforces
+
+    from hlyn.core import landlock, linux
+
+    if abi is not None:
+        monkeypatch.setattr(landlock, "abi", lambda: abi)
+    elif not (enforces() and landlock.abi() < 9 and linux.watched(Policy(net=False))):
+        pytest.skip("needs a kernel before Landlock ABI 9 where a gate can run")
+    report = book(tmp_path, net=net)
+    gate = report.add(Denial("net", "@own-agent", op="unix-abstract", allow="--net-any", source="gate"))
+    program = one(report, kind="net", target="unix:@own-agent", op="connect")
+    print(f"net={net} abi={abi or landlock.abi()}: gate {gate}; program {program}")
+    assert (program is not None) is kept
+    if net is not True:
+        assert gate is not None and gate.target == "local socket @own-agent" and "7.1" in gate.note
 
 
 def test_a_socket_file_refusal_from_inside_the_program_is_not_believed(tmp_path, monkeypatch):

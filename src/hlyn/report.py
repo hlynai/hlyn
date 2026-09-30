@@ -401,6 +401,7 @@ class Report:
         self._reads = plan.reads()
         self._writes = plan.writes()
         self._runs = plan.runs()
+        self._gated: bool | None = None  # see `_gate_names`
 
     # -- taking denials in -------------------------------------------------
 
@@ -593,14 +594,18 @@ class Report:
                 return Entry("net", shown, None, LOOKUP if lookup else REFUSED_NOTE, source="gate")
             return Entry("net", shown, flag("--write", os.path.dirname(where) or "/"),
                          "a local socket needs write access to its folder", source="gate")
-        if why in ("unix-send", "unix-bound"):
+        if why in ("unix-send", "unix-bound", "unix-abstract"):
             shown = f"local socket {safe(tilde(where))[:300]}"
-            note = ("a datagram sent to a path can't be checked race-free while the network is limited: "
-                    "the program must connect the socket first (--net-any if you trust it)"
-                    if why == "unix-send" else
-                    "a socket bound before connecting can't be connected race-free while the network "
-                    "is limited: hlyn connects a new one, which would lose the address "
-                    "(--net-any if you trust it)")
+            note = {
+                "unix-send": "a datagram sent to a path can't be checked race-free while the network is "
+                             "limited: the program must connect the socket first (--net-any if you trust it)",
+                "unix-bound": "a socket bound before connecting can't be connected race-free while the "
+                              "network is limited: hlyn connects a new one, which would lose the address "
+                              "(--net-any if you trust it)",
+                "unix-abstract": "a local socket named without a file (an abstract name) can't be checked "
+                                 "race-free before Linux 7.1 while the network is limited: use a socket "
+                                 "file in a folder you grant with --write (--net-any if you trust it)",
+            }[why]
             return Entry("net", shown, None, note, source="gate")
         if why == "udp":
             return Entry("net", f"a name lookup or QUIC ({safe(where)[:20]})", None, LOOKUP, source="gate")
@@ -714,6 +719,8 @@ class Report:
     def _local(self, denial: Denial) -> Entry | None:
         where = denial.target[len("unix:"):]
         if where.startswith("@"):
+            if denial.source == "program" and self._gate_names():
+                return None  # the gate refused it before it ran, and says so itself (`_gate`)
             return Entry("other", f"local socket {safe(where)}", None,
                          "belongs to a process outside this agent; hlyn never allows reaching it",
                          source=denial.source)
@@ -732,6 +739,20 @@ class Report:
                          "a local socket needs write access to its folder", source=denial.source)
         return Entry("net", f"local socket {safe(tilde(where))}", "--net-any",
                      "on macOS only the whole network allows local sockets", source=denial.source)
+
+    def _gate_names(self) -> bool:
+        """Whether a gate checks this run's unix sockets and refuses every
+        abstract name (Linux before Landlock ABI 9, the network not open:
+        `guard.Guard._nameless`). Then a refused abstract name the program
+        reports is the gate's refusal, not Landlock's scope, and the gate
+        reports it itself. Asked once per report."""
+        if self._gated is None:
+            self._gated = False
+            if sys.platform == "linux" and self.plan.net is not True:
+                from .core import landlock, linux
+
+                self._gated = landlock.abi() < 9 and (bool(self.plan.hosts()) or linux.watched(self.plan))
+        return self._gated
 
     def _socket_file(self, where: str, denial: Denial) -> Entry | None:
         """A unix socket file the preloaded reporter heard refused (Linux).

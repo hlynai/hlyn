@@ -45,7 +45,7 @@ AGENT = textwrap.dedent(f"""
     PRELOAD
     policy = Policy(net=NET, write=WRITE, read=READ)
     landlock.load(policy)
-    fd = seccomp.load(policy)
+    fd = seccomp.load(policy, watch=WATCH, datagrams=DATAGRAMS)
     socket.send_fds(chan, [b"fd"], [fd])
     os.close(fd)
     assert chan.recv(1) == b"k"
@@ -142,15 +142,23 @@ class Proxy:
         self.sock.close()
 
 
-def gated(body: str, *, net: list[str], write: list[str] = (), read: list[str] = (), proxy: Proxy,
-          reduced: bool = False, preload: str = "", timeout: float = 60, env: dict | None = None):
+def gated(body: str, *, net: list[str] | bool, write: list[str] = (), read: list[str] = (), proxy: Proxy,
+          reduced: bool = False, preload: str = "", timeout: float = 60, env: dict | None = None,
+          mode: str = "hosts", datagrams: bool = False):
     """Run `body` sealed for `net`; the real Guard answers. Returns the
-    child's output and the events the gate reported."""
-    from hlyn.core import guard
+    child's output and the events the gate reported.
+
+    `mode` "off" or "ports" seals as `linux.load` does without hosts on a
+    kernel before Landlock ABI 9 (`net` is then False or a list of ports).
+    `datagrams` refuses unix datagram sockets, as `linux.load` does whenever
+    a gate checks unix sockets before ABI 9. `events.continued` counts the
+    calls the gate let run, by system call number."""
+    from hlyn.core import guard, notify
     from hlyn.hosts import parse
 
     ours, theirs = socket.socketpair()
-    code = (AGENT.replace("NET", repr(net)).replace("WRITE", repr(list(write)))
+    code = (AGENT.replace("WATCH", repr(mode != "hosts")).replace("DATAGRAMS", repr(datagrams))
+            .replace("NET", repr(net)).replace("WRITE", repr(list(write)))
             .replace("READ", repr([SRC, *read])).replace("PRELOAD", preload) + textwrap.dedent(body))
     child = subprocess.Popen([sys.executable, "-c", code, str(theirs.fileno())], pass_fds=[theirs.fileno()],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -166,18 +174,34 @@ def gated(body: str, *, net: list[str], write: list[str] = (), read: list[str] =
         pytest.fail(f"the child never handed over a descriptor:\n{out}\n{err}")
     ours.send(b"k")
     events = Events()
-    config = guard.Config(port=proxy.port, rules=tuple(parse(item) for item in net),
-                          writes=tuple(os.path.realpath(item) for item in write), reduced=reduced)
+    hosts = mode == "hosts"
+    config = guard.Config(port=proxy.port if hosts else 0,
+                          rules=tuple(parse(item) for item in net) if hosts else (),
+                          writes=tuple(os.path.realpath(item) for item in write), reduced=reduced, mode=mode)
     gate = guard.Guard(fds[0], config, tell=events.tell)
+    # Every answer that lets the agent's own call run, counted by system call.
+    events.continued = collections.Counter()
+    answer = notify.answer
+
+    def counted(notice, call, **how):
+        if how.get("go"):
+            events.continued[call.nr] += 1
+        return answer(notice, call, **how)
+
+    notify.answer = counted
     thread = threading.Thread(target=gate.serve, daemon=True)
     thread.start()
-    out, err = child.communicate(timeout=timeout)
-    thread.join(timeout)
+    try:
+        out, err = child.communicate(timeout=timeout)
+        thread.join(timeout)
+    finally:
+        notify.answer = answer
     os.close(fds[0])
     ours.close()
     time.sleep(0.2)  # let the fake proxy record the last connection
     print(out, err[-2000:])
-    print("gate answered", gate.served, "calls;", events.total, "events:", events[:6],
+    print("gate answered", gate.served, "calls; let run:", dict(events.continued), ";", events.total,
+          "events:", events[:6],
           "..." if len(events) > 6 else "")
     print("proxy saw:", proxy.seen[:10], "..." if len(proxy.seen) > 10 else "")
     return out, events
@@ -624,6 +648,110 @@ def test_reduced_mode_swaps_tcp_as_unknown_and_refuses_unix(proxy):
     assert got["tcp anywhere"] == "OK"
     assert got["unix, granted"] == "EACCES"
     assert (None, None, b"CONNECT example.com:443") in proxy.seen
+
+
+CONNECT_NR = {"aarch64": 203, "arm64": 203, "x86_64": 42}.get(os.uname().machine)
+SENDTO_NR = {"aarch64": 206, "arm64": 206, "x86_64": 44}.get(os.uname().machine)
+
+# Every connect() the gate used to let run, each with the answer the kernel
+# gives it (measured by letting it run: FINDINGS.md, "The gate lets no
+# connect run"). Raw sockaddrs, so nothing in Python's socket module stands
+# between the agent and the call.
+EVERY_ROW = """
+    import struct
+    libc = ctypes.CDLL(None, use_errno=True)
+    def raw(fd, data):
+        buf = ctypes.create_string_buffer(data, max(len(data), 1))
+        if libc.connect(fd, buf, len(data)) != 0:
+            raise OSError(ctypes.get_errno(), "connect")
+    UNSPEC = bytes(16)
+    nl = lambda family, pid, groups: struct.pack("=HHII", family, 0, pid, groups)
+    u = socket.socket(socket.AF_UNIX)
+    attempt("unix stream, AF_UNSPEC", lambda: raw(u.fileno(), UNSPEC))
+    attempt("unix stream, unnamed", lambda: raw(u.fileno(), struct.pack("=H", 1)))
+    q = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    attempt("unix seqpacket, AF_UNSPEC", lambda: raw(q.fileno(), UNSPEC))
+    attempt("unix seqpacket, unnamed", lambda: raw(q.fileno(), struct.pack("=H", 1)))
+    own = socket.socket(socket.AF_UNIX); own.bind("\\0hlyn-guard-own-%d" % os.getpid()); own.listen(1)
+    attempt("unix abstract, the agent's own listener",
+            lambda: socket.socket(socket.AF_UNIX).connect("\\0hlyn-guard-own-%d" % os.getpid()))
+    n = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0)
+    attempt("netlink, the kernel", lambda: raw(n.fileno(), nl(16, 0, 0)))
+    attempt("netlink, AF_UNSPEC", lambda: raw(n.fileno(), bytes(12)))
+    attempt("netlink, another socket", lambda: raw(n.fileno(), nl(16, 4242, 0)))
+    attempt("netlink, a group", lambda: raw(n.fileno(), nl(16, 0, 1)))
+    attempt("netlink, too short", lambda: raw(n.fileno(), struct.pack("=HH", 16, 0)))
+    attempt("netlink, another family", lambda: raw(n.fileno(), nl(2, 0, 0)))
+    attempt("interfaces through netlink", lambda: str(len(socket.if_nameindex()) > 0))
+"""
+
+TCP_ROWS = """
+    t = socket.socket()
+    attempt("tcp, AF_UNSPEC before connecting", lambda: raw(t.fileno(), UNSPEC))
+    attempt("tcp, connect", lambda: t.connect(("127.0.0.1", PORT)))
+    t.sendall(b"first")
+    attempt("tcp, AF_UNSPEC when connected", lambda: raw(t.fileno(), UNSPEC))
+    attempt("tcp, peer after", lambda: repr(t.getpeername()))
+    attempt("tcp, connect again", lambda: t.connect(("127.0.0.1", PORT)))
+    t.sendall(b"second")
+    attempt("tcp, AF_UNSPEC too short", lambda: raw(t.fileno(), UNSPEC[:2]))
+    w = socket.socket(); w.connect(("127.0.0.1", PORT))
+    attempt("tcp, sendto naming another address", lambda: str(w.sendto(b"sent-to", ("203.0.113.1", 9))))
+"""
+
+# What the kernel answers each row with (the measured answers above), except
+# where the gate's answer is stricter on purpose.
+KERNEL = {
+    "unix stream, AF_UNSPEC": "EINVAL", "unix stream, unnamed": "EINVAL",
+    "unix seqpacket, AF_UNSPEC": "EINVAL", "unix seqpacket, unnamed": "EINVAL",
+    "netlink, the kernel": "OK", "netlink, AF_UNSPEC": "OK",
+    "netlink, too short": "EINVAL", "netlink, another family": "EINVAL",
+    "interfaces through netlink": "True",
+    "tcp, AF_UNSPEC before connecting": "OK", "tcp, connect": "OK", "tcp, AF_UNSPEC when connected": "OK",
+    "tcp, peer after": "ENOTCONN", "tcp, connect again": "OK", "tcp, AF_UNSPEC too short": "EINVAL",
+    "tcp, sendto naming another address": "7",
+}
+STRICTER = {
+    # Before Landlock ABI 9 an abstract name can't be let run (the kernel
+    # reads the address again, and nothing then checks a path), and the gate
+    # can't connect it for the agent without losing Landlock's scope.
+    "unix abstract, the agent's own listener": "EACCES",
+    # What a process without CAP_NET_ADMIN is told; the gate can't set
+    # another destination on the agent's socket without running the call.
+    "netlink, another socket": "EPERM", "netlink, a group": "EPERM",
+}
+
+
+@pytest.mark.skipif(CONNECT_NR is None, reason="system call numbers for aarch64 and x86_64 only")
+@pytest.mark.parametrize("mode", ["hosts", "off"])
+def test_the_gate_lets_no_connect_run_before_abi_9(proxy, mode):
+    """The kernel reads a let-run call's address, and finds its descriptor,
+    again after the gate answers (seccomp_unotify(2)), so every connect() the
+    gate lets run could end as a connect to a socket file, which nothing but
+    the gate checks before Linux 7.1. So no connect() runs: the gate gives
+    the kernel's own answer, swaps, or refuses. Sends still run: on every
+    socket the agent can hold here, a send's address reaches no socket file
+    (the kernel ignores it, or refuses it; unix datagram sockets can't be
+    made). Host mode, and the network off (no IP sockets: TCP rows skipped)."""
+    body = EVERY_ROW + (TCP_ROWS.replace("PORT", str(proxy.port)) if mode == "hosts" else "")
+    out, events = gated(body, net=["example.com"] if mode == "hosts" else False, proxy=proxy,
+                        mode=mode, datagrams=True)
+    got = lines(out)
+    want = {row: answer for row, answer in {**KERNEL, **STRICTER}.items()
+            if mode == "hosts" or not row.startswith("tcp")}
+    for row, answer in want.items():
+        print(f"{row}: {got.get(row)} (want {answer})")
+    assert {row: got.get(row) for row in want} == want
+    print("let run:", dict(events.continued))
+    assert events.continued[CONNECT_NR] == 0
+    assert events.continued[SENDTO_NR] >= 1  # the count works: glibc's netlink request is a send
+    if mode == "hosts":
+        sent = [seen[2] for seen in proxy.seen if seen[:2] == ("127.0.0.1", proxy.port)]
+        print("proxy got:", sent)
+        assert sorted(sent) == [b"first", b"second", b"sent-to"]
+    refused = [event for event in events if event["why"] == "unix-abstract"]
+    print("reported:", refused)
+    assert refused and refused[0]["allow"] == "--net-any"
 
 
 RACE = os.path.join(ROOT, "tools", "hostlab", "race.c")

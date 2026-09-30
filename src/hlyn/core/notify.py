@@ -21,8 +21,9 @@ them; `guard.py` decides. Nothing here decides anything.
 Every read of the agent's state must be followed by `valid()` before the
 answer acts on it: the notification, and with it the pid, may have gone
 (seccomp_unotify(2), NOTES). That check does not make the bytes race-free --
-another thread can rewrite them -- which is why the gate never lets a TCP
-connect continue (5.3, "why this is race-free").
+another thread can rewrite them, or put another socket at the descriptor --
+which is why the gate lets no connect continue while it checks socket files
+(5.3, "why this is race-free").
 
 Linux only. Standard library plus libseccomp.
 """
@@ -37,6 +38,7 @@ import ipaddress
 import os
 import socket
 import struct
+import sys
 from dataclasses import dataclass
 
 from ..error import Failed
@@ -53,6 +55,7 @@ __all__ = [
     "inode",
     "netlink",
     "pin",
+    "proto",
     "read",
     "receive",
     "sockaddr",
@@ -63,7 +66,8 @@ __all__ = [
 ]
 
 # `SECCOMP_USER_NOTIF_FLAG_CONTINUE`: let the call run as the agent made it.
-# Only ever used where a race gains nothing (5.3's table).
+# The kernel then reads the call's memory and finds its descriptor again, so
+# only where whatever the agent puts there instead gains nothing (5.3).
 CONTINUE = 1
 
 # `SECCOMP_ADDFD_FLAG_SETFD`: install at the number given, replacing it.
@@ -300,6 +304,22 @@ def inode(pid: int, fd: int) -> int | None:
         return int(link[8:-1])
     except ValueError:
         return None
+
+
+def proto(pid: int, fd: int) -> str | None:
+    """The protocol of the socket behind descriptor `fd` of thread `pid`, as
+    the kernel names it (the `system.sockprotoname` attribute every socket
+    has): `UNIX-STREAM` or `UNIX`, `TCP`, `TCPv6`, `UDP`, `NETLINK` and so
+    on. `None` if it is not a socket, or gone. The same read-level access as
+    `inode`. Unlike the /proc/PID/net tables it names a socket before it is
+    bound: an unbound netlink socket is in none of them (measured)."""
+    if sys.platform != "linux":
+        return None
+    try:
+        name: bytes = os.getxattr(f"/proc/{pid}/fd/{fd}", "system.sockprotoname")
+    except OSError:
+        return None
+    return name.rstrip(b"\0").decode("ascii", "replace")
 
 
 def unix(pid: int) -> set[int]:

@@ -256,14 +256,16 @@ def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int
             raise Unsupported("net names hosts, but no gate was started to answer this process's "
                               "connections (hlyn.on, run, spawn and hlyn run start one). Nothing was sealed.")
         writes = policy.writes()
-        config = guard.Config(port=port, rules=named, writes=writes, connect=CONNECT)
+        config = guard.Config(port=port, rules=named, writes=writes, connect=CONNECT,
+                              socket_check="kernel" if landlock.abi() >= 9 else "gate")
     # Unix sockets without hosts (`watched`): the entry point started a gate
     # when it was needed and possible; that decision is read here, from
     # whether there is a gate to hand to.
     watch = not named and policy.net is not True and gate._handoff is not None
     if watch:
+        # Only before Landlock ABI 9 (`watched`): the gate checks socket files.
         config = guard.Config(port=0, rules=(), writes=policy.writes(), connect=CONNECT,
-                              mode="off" if policy.net is False else "ports")
+                              mode="off" if policy.net is False else "ports", socket_check="gate")
     # Unix datagram sockets while a gate checks unix sockets, before Landlock
     # ABI 9 (seccomp.UNIX_KINDS). From ABI 9 the kernel checks each send's
     # path itself, so they are left alone there.

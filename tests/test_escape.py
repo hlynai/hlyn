@@ -431,6 +431,26 @@ def test_tcp_fast_open_cannot_reach_a_port_the_policy_does_not_name(send):
     assert "LISTENER GOT" not in done.stdout
 
 
+def test_tcp_fastopen_connect_without_the_flag_reaches_nothing():
+    """`TCP_FASTOPEN_CONNECT` makes a later send carry the connect, but only
+    after a real connect() (which Landlock checks) set the socket up: the
+    option alone leaves a send unconnected (tcp.c, do_tcp_setsockopt sets
+    `fastopen_connect`, not the deferred-connect bit). Research on 2026-09-30
+    claimed otherwise; measured, the send is EPIPE and nothing arrives, even
+    unconfined (FINDINGS.md, "The gate lets no connect run")."""
+    send = ('s = socket.socket(); s.setsockopt(socket.IPPROTO_TCP, socket.TCP_FASTOPEN_CONNECT, 1)\n'
+            '        print("option set:", s.getsockopt(socket.IPPROTO_TCP, socket.TCP_FASTOPEN_CONNECT), '
+            'flush=True)\n'
+            '        s.sendto(b"leak", dst)')
+    done = boot(FAST_OPEN.replace("SEND", send))
+    print(done.stdout, done.stderr[-500:])
+    if "option set:" not in done.stdout:
+        pytest.skip(f"TCP_FASTOPEN_CONNECT is off on this machine: {done.stdout} {done.stderr}")
+    assert "option set: 1" in done.stdout, done.stdout + done.stderr
+    assert "INCONCLUSIVE BrokenPipeError" in done.stdout, done.stdout + done.stderr
+    assert "listener got nothing" in done.stdout, done.stdout + done.stderr
+
+
 def test_ordinary_sends_still_work_with_named_ports():
     """The refusal is on the Fast Open flag, not on sending: UDP and TCP sends are untouched."""
     done = boot(

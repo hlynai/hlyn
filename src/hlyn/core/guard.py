@@ -11,18 +11,20 @@ gate. `Guard` answers them from one loop:
 | TCP to the proxy (127.0.0.1:P, [::1]:P, mapped)        | swap, answer 0               |
 | TCP to an address the policy lists (IP, CIDR, localhost) | swap, wait for the proxy's verdict, answer it |
 | TCP anywhere else                                     | `EACCES`                     |
+| TCP `AF_UNSPEC` (a disconnect)                         | install a new unconnected socket, answer 0 |
 | an IP socket other than TCP (UDP: a name lookup)       | `EPERM`, and say so          |
 | unix connect, path in a write-granted folder, not refused | pinned swap                |
 | unix path anywhere else, or on the refused list        | `EACCES`                     |
 | unix `sendto` naming a path                            | `EACCES`                     |
-| unix abstract or unnamed, `AF_UNSPEC`, netlink         | let it run                   |
+| unix `AF_UNSPEC` or unnamed (stream, seqpacket)        | `EINVAL`, as the kernel would |
+| unix abstract name, before Landlock ABI 9              | `EACCES`, and say so         |
+| route netlink connect                                  | the kernel's answer (0, `EPERM`, `EINVAL`) |
+| a send on any socket that names no socket file         | let it run                   |
 | anything unreadable or unknown                        | `EACCES` (fail closed)       |
 
 A *swap* is the gate opening its own connection to the proxy, writing the
 PROXY v2 header naming what the agent dialled, and installing that socket at
-the agent's descriptor number (`notify.addfd`). A TCP connect is never let
-run: if another thread rewrites the address after the gate read it, the only
-effect is which row applied, and the proxy re-checks every claim.
+the agent's descriptor number (`notify.addfd`).
 
 A *pinned swap* does the same for a unix socket: the gate opens the socket
 file it checked with no symlink allowed on the way (`notify.pin`), checks
@@ -34,9 +36,21 @@ symlink after the check reaches anything else (CVE-2026-79994's pattern;
 FINDINGS.md, "Checking the eight decisions"). What it costs: the listener
 sees the gate as the connecting process (same user), options set before
 `connect` are lost, and a socket bound before connecting is refused (its
-address would be lost). The rows that still let a call run are disconnects,
-abstract names (Landlock's scope applies) and route netlink; a race that
-turns one into a TCP connect meets Landlock's zero TCP ports.
+address would be lost).
+
+**No connect is let run** while the gate checks socket files (before Landlock
+ABI 9). The kernel reads a call's address, and finds its descriptor, again
+when a call it was told to continue runs (seccomp_unotify(2)): whatever
+another thread has written, or put at that descriptor number, by then is
+what runs. Any connect could then be a connect to a socket file, which
+nothing but the gate checks there. So the gate answers every connect itself,
+from its own copy of the address, acting only on objects it made or checked:
+if another thread changes the address, the only effect is which row applied,
+and the proxy re-checks every claim. Only sends run, where no address can
+reach a socket file (`_decide`). From ABI 9 the kernel checks what a
+continued call reaches (Landlock's socket-file rule, abstract-socket scope and
+zero TCP ports), so a nameless unix connect runs there. Ports mode, before
+ABI 9, still lets IP connects run (REMAINING.md, part 2 #16d).
 
 **Reduced mode**: when the gate may not read the agent's memory (Yama
 `ptrace_scope` 2 or 3, or a child of `hlyn.on()` at 1), it still knows the
@@ -58,6 +72,7 @@ import select
 import shlex
 import socket
 import stat
+import struct
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -176,7 +191,12 @@ class Config:
     `mode` is what `net` is: `"hosts"` (all of the table above), or `"off"`
     and `"ports"`, where the gate only checks unix sockets, on kernels
     whose Landlock can't (before ABI 9): IP sockets go on to Landlock's port
-    rules, and there is no proxy (`port` 0)."""
+    rules, and there is no proxy (`port` 0).
+
+    `socket_check` is who checks a unix connect's socket file, as `hlyn
+    probe` says it: `"gate"` before Landlock ABI 9 (Linux 7.1), `"kernel"`
+    from it. Where it is the gate, nothing else would check a call the gate
+    let run, so no connect runs (the module's docstring)."""
 
     port: int
     rules: tuple[Rule, ...]
@@ -184,6 +204,7 @@ class Config:
     connect: float = 10.0
     reduced: bool = False
     mode: str = "hosts"
+    socket_check: str = "gate"
 
     def dumps(self) -> bytes:
         return json.dumps({
@@ -193,6 +214,7 @@ class Config:
             "connect": self.connect,
             "reduced": self.reduced,
             "mode": self.mode,
+            "socket_check": self.socket_check,
         }).encode()
 
     @classmethod
@@ -206,6 +228,8 @@ class Config:
             connect=float(raw.get("connect", 10.0)),
             reduced=bool(raw.get("reduced", False)),
             mode=str(raw.get("mode", "hosts")),
+            # Missing means the stricter answer: the gate checks.
+            socket_check="kernel" if raw.get("socket_check") == "kernel" else "gate",
         )
 
 
@@ -344,6 +368,7 @@ class Guard:
             return
         target = call.args[0] & 0xFFFFFFFF
         size &= 0xFFFFFFFF
+        sending = call.nr == self.sendto_nr
         ino = notify.inode(call.pid, target)
         if ino is None:
             # Not a socket, or no such descriptor: the kernel's own answers,
@@ -351,39 +376,50 @@ class Guard:
             exists = os.path.lexists(f"/proc/{call.pid}/fd/{target}")
             self._no(call, errno.ENOTSOCK if exists else errno.EBADF)
             return
-        kind = "unix" if ino in notify.unix(call.pid) else (
-            "netlink" if ino in notify.netlink(call.pid) else "ip")
-        if kind != "unix" and self.config.mode != "hosts":
-            # Ports, or the network off: Landlock checks TCP ports when the
-            # call runs, whatever a racing thread writes meanwhile, and with
-            # the network off no IP socket can exist. Only unix is the gate's.
+        # What the socket is, by the kernel's own name for its protocol. The
+        # /proc/PID/net tables miss an unbound netlink socket (measured).
+        proto = notify.proto(call.pid, target)
+        if proto is None or notify.inode(call.pid, target) != ino:
+            self._no(call, errno.EACCES)  # gone, or replaced while being looked at
+            return
+        kind = "unix" if proto.startswith("UNIX") else "netlink" if proto == "NETLINK" else "ip"
+        if kind == "ip" and self.config.mode != "hosts":
+            if self.config.mode == "off" and not sending:
+                # No IP socket can be made with the network off, so this one
+                # came from outside: refused, as Landlock refuses TCP here.
+                self._no(call, errno.EACCES)
+                return
+            # Ports: Landlock checks TCP ports when the call runs, whatever
+            # a racing thread writes meanwhile. (Its descriptor can be
+            # replaced meanwhile too: REMAINING.md, part 2 #16d.)
             self._go(call)
             return
         data = None if self.config.reduced else notify.read(call.pid, pointer, size)
         if not notify.valid(self.fd, call):
             return  # gone: the thread was interrupted or killed
         address = notify.sockaddr(data) if data is not None else None
-        sending = call.nr == self.sendto_nr
 
+        if sending and kind != "unix":
+            # On every socket the agent can hold, a send's address reaches no
+            # socket file, whatever is written there or put at the descriptor
+            # by the time it runs: TCP ignores it (Fast Open is refused by
+            # the filter), route netlink reaches only the kernel without
+            # CAP_NET_ADMIN, a unix stream socket refuses it and a seqpacket
+            # one ignores it, and while the gate checks socket files no unix
+            # datagram socket can be made (seccomp.UNIX_KINDS). From Landlock
+            # ABI 9 the kernel checks a datagram's path itself.
+            self._go(call)
+            return
         if kind == "netlink":
-            self._go(call)  # route netlink only (the filter); it can't leave the machine
+            self._netlink(call, data, size)
             return
         if kind == "unix":
             self._unix(call, address, data is None, target, ino)
             return
 
         # An IP socket: TCP, since the filter allows no other kind.
-        if sending:
-            # A TCP send ignores its address unless it is Fast Open (refused
-            # above), so this connects nothing.
-            self._go(call)
-            return
         if address is not None and address.family == socket.AF_UNSPEC:
-            # A disconnect. The socket may be ours; after this it isn't
-            # connected, and the next connect is swapped afresh.
-            self.mine.discard(ino)
-            self.owed.discard(ino)
-            self._go(call)
+            self._disconnect(call, target, ino, proto, size)
             return
         if ino in self.owed:
             # The gate installed this socket, then a signal interrupted the
@@ -425,18 +461,15 @@ class Guard:
         """Unix sockets: a path needs a write grant on its folder and must
         not be one of the refused sockets; the gate then connects the object
         it checked and swaps it in (the module's pinned swap). Reduced mode
-        refuses them all."""
+        refuses them all. A connect that names no path never runs while the
+        gate checks socket files (see `_nameless`)."""
         if reduced or address is None:
             self._event(call, "unix", "(unknown path)", None,
                         detail="reduced mode: the gate can't read addresses here")
             self._no(call, errno.EACCES)
             return
         if address.family == socket.AF_UNSPEC or (address.family == socket.AF_UNIX and address.path is None):
-            # A disconnect, an abstract name (Landlock's abstract-socket
-            # scope applies) or an unnamed address (the kernel refuses it).
-            if address.family == socket.AF_UNSPEC:
-                self.mine.discard(ino)
-            self._go(call)
+            self._nameless(call, address, ino)
             return
         if address.family != socket.AF_UNIX or address.path is None:
             self._no(call, errno.EINVAL)
@@ -517,6 +550,96 @@ class Guard:
             self._install(call, sock, target, bool(flags & os.O_CLOEXEC), flags)
         finally:
             os.close(pinned)
+
+    def _nameless(self, call: notify.Call, address: notify.Address, ino: int) -> None:
+        """A unix connect or send that names no socket file: `AF_UNSPEC`, an
+        unnamed address, or an abstract name.
+
+        A send runs (see `_decide`). A connect is answered here while the
+        gate checks socket files: a call let run is read again when it runs,
+        and could name a socket file by then, which nothing else checks
+        before Landlock ABI 9. The kernel's answer is fixed for most: a
+        stream or seqpacket socket refuses `AF_UNSPEC` and an unnamed
+        address with `EINVAL` (`unix_validate_addr`), and while the gate
+        checks socket files no datagram socket can be made. An abstract name
+        is refused: the gate can't connect one for the agent, since
+        Landlock's abstract-socket scope applies to whoever connects, and
+        the gate is outside the agent's domain. From ABI 9 each runs: the
+        kernel then checks a socket file itself, and the scope an abstract
+        name."""
+        sending = call.nr == self.sendto_nr
+        if sending or self.config.socket_check == "kernel":
+            if address.family == socket.AF_UNSPEC and not sending:
+                self.mine.discard(ino)  # a datagram socket's disconnect
+            self._go(call)
+            return
+        if address.abstract is None:
+            found = notify.unixsock(call.pid, ino)
+            if found is not None and found[0] != socket.SOCK_DGRAM:
+                self._no(call, errno.EINVAL)
+                return
+            # A datagram socket, which only a process outside can have
+            # handed in here, or one no longer listed: refused.
+            self._no(call, errno.EACCES)
+            return
+        shown = "@" + address.abstract.split(b"\0", 1)[0][:100].decode("utf-8", "replace")
+        self._event(call, "unix-abstract", shown, "--net-any",
+                    detail="a local socket named without a file can't be checked race-free before "
+                           "Linux 7.1: name a socket file instead")
+        self._no(call, errno.EACCES)
+
+    def _netlink(self, call: notify.Call, data: bytes | None, size: int) -> None:
+        """A route netlink connect, answered as the kernel answers it
+        (`netlink_connect`), so it never runs. Naming the kernel, or
+        `AF_UNSPEC` (which names it again), changes nothing a send can reach
+        and is answered 0. Naming another socket or a group needs
+        CAP_NET_ADMIN, and is refused as it is without it: the gate can't set
+        a destination on the agent's socket without running the call. The
+        one thing lost: the kernel binds an unbound socket here, which its
+        first send then does instead."""
+        if data is None:
+            self._no(call, errno.EPERM)  # reduced mode: the address can't be read
+            return
+        if size >= 1 << 31 or size > notify.MOST or size < 2:
+            self._no(call, errno.EINVAL)
+            return
+        if len(data) < size:
+            self._no(call, errno.EFAULT)  # not all of it readable: the kernel's copy fails
+            return
+        (family,) = struct.unpack_from("=H", data)
+        if family == socket.AF_UNSPEC:
+            notify.answer(self.notice, call, value=0)
+            return
+        if family != seccomp.NETLINK or size < 12:
+            self._no(call, errno.EINVAL)
+            return
+        portid, groups = struct.unpack_from("=II", data, 4)
+        if portid or groups:
+            self._no(call, errno.EPERM)
+            return
+        notify.answer(self.notice, call, value=0)
+
+    def _disconnect(self, call: notify.Call, target: int, ino: int, proto: str, size: int) -> None:
+        """A TCP `AF_UNSPEC` connect, which disconnects the socket. The gate
+        does it without running the call: it installs a new, unconnected
+        socket of the same family at the agent's descriptor, as it installs
+        a connection. Every TCP connection here was installed by the gate
+        (`mine`); any other TCP socket is unconnected, which a disconnect
+        leaves as it is. As with any swap, options set on the old socket are
+        lost. Landlock refuses an `AF_UNSPEC` shorter than a `sockaddr_in`
+        (security/landlock/net.c), so the gate does too."""
+        if size < 16:
+            self._no(call, errno.EINVAL)
+            return
+        if ino not in self.mine and ino not in self.owed:
+            notify.answer(self.notice, call, value=0)
+            return
+        self.mine.discard(ino)
+        self.owed.discard(ino)
+        family = socket.AF_INET6 if proto.endswith("v6") else socket.AF_INET
+        flags = notify.fdflags(call.pid, target) or 0
+        self._install(call, socket.socket(family, socket.SOCK_STREAM), target,
+                      bool(flags & os.O_CLOEXEC), flags, remember=False)
 
     def _refuse(self, call: notify.Call, real: str) -> None:
         self._event(call, "unix", real, "--net-any",
@@ -599,8 +722,11 @@ class Guard:
         return socket.create_connection(("127.0.0.1", port))
 
     def _install(
-        self, call: notify.Call, sock: socket.socket, target: int, cloexec: bool, flags: int
+        self, call: notify.Call, sock: socket.socket, target: int, cloexec: bool, flags: int,
+        remember: bool = True,
     ) -> None:
+        """Install `sock` at the agent's descriptor `target` and answer 0.
+        `remember`: it is a connection (a second connect is `EISCONN`)."""
         try:
             if flags & os.O_NONBLOCK:
                 # Status flags belong to the open file, which the agent now
@@ -613,12 +739,14 @@ class Guard:
                 notify.addfd(self.fd, call, sock.fileno(), target, cloexec)
             except OSError:
                 return  # interrupted or killed before the install: nothing installed
-            if notify.answer(self.notice, call, value=0):
-                self._remember(ino, call.pid)
-            else:
+            if not notify.answer(self.notice, call, value=0):
                 # Installed, then interrupted before the answer: the call
-                # restarts on a socket that is already connected.
-                self.owed.add(ino)
+                # restarts on a socket that is already connected (or, for a
+                # disconnect, on one the restart finds unconnected).
+                if remember:
+                    self.owed.add(ino)
+            elif remember:
+                self._remember(ino, call.pid)
         finally:
             sock.close()
 
