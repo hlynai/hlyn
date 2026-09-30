@@ -73,8 +73,9 @@ I do this when writing a test, when reviewing one, and before quoting a run's nu
 
 ## Agents
 
-- **Agents research; I write the code.** An agent reads, searches, measures and reports back. Code changes go through the lead session, which can see and check the whole diff.
-- **At most five agents at a time.** Each brief says:
+These are defaults, not fixed limits. The user can change them for a task, and a task that clearly needs more can ask for it.
+- **By default, agents research and I write the code.** An agent reads, searches, measures and reports back, and code changes go through the lead session, which sees the whole diff. When an agent does write code (because the user asked, or the work splits cleanly), it gets its own git worktree and files no other agent touches, and I review its diff before merging.
+- **About five agents at a time** is the usual ceiling. Go above it when the user says so. Each brief says:
   - the question to answer;
   - the files, docs and FINDINGS.md sections to read;
   - the evidence to bring back: command output, not a summary of it.
