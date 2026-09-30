@@ -11,8 +11,10 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = []
+# "sandbox" is what people type into PyPI's search; it's the one place hlyn
+# uses the word for itself (CLAUDE.md, "Product rules").
 keywords = [
-    "environment", "ai-agents", "llm", "security", "containment",
+    "environment", "sandbox", "ai-agents", "llm", "security", "containment",
     "landlock", "seccomp", "seatbelt", "prompt-injection",
 ]
 classifiers = [

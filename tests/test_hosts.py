@@ -249,11 +249,33 @@ def test_a_range_matches_addresses_inside_it_only():
     ("64:ff9b::a9fe:a9fe", "link-local"),
     ("2002:7f00:1::", "loopback"),
     ("::ffff:10.0.0.5", "private"),
+    # Local-use NAT64 can't be unwrapped (its layout is the network's choice).
+    ("64:ff9b:1::a00:5", "reserved"),
+    ("64:ff9b:1:a00:0:500::", "reserved"),
 ])
 def test_special_addresses_are_never_reached_by_name(address, reason):
     found = hosts.classify(address)
     print(f"{address} -> {found}")
     assert found == reason
+
+
+@pytest.mark.parametrize("address", [
+    "127.0.0.1", "10.1.2.3", "100.100.100.200", "169.254.169.254", "192.0.0.192", "0.0.0.0",  # noqa: S104
+    "::1", "::", "fc00::1", "fe80::1", "ff02::1", "fd00:ec2::254",
+    "64:ff9b:1::a00:5", "64:ff9b:1:a00:0:500::",
+])
+def test_appendix_b_is_refused_by_hlyns_own_table_alone(address, monkeypatch):
+    # classify() checks its own table *and* ipaddress's properties, because
+    # the properties alone have been wrong (CVE-2024-4032) and differ between
+    # Python versions. So every appendix B range must be caught with them off.
+    for cls in (ipaddress.IPv4Address, ipaddress.IPv6Address):
+        for name in ("is_unspecified", "is_loopback", "is_link_local", "is_multicast",
+                     "is_reserved", "is_private"):
+            monkeypatch.setattr(cls, name, property(lambda self: False))
+    assert not ipaddress.ip_address(address).is_reserved
+    found = hosts.classify(address)
+    print(f"{address}, ipaddress's properties all False -> {found}")
+    assert found is not None
 
 
 @pytest.mark.parametrize("address", ["93.184.215.14", "1.1.1.1", "2606:4700:4700::1111"])

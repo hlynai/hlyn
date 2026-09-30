@@ -505,18 +505,6 @@ def _server_name(block: _Reader) -> str:
 
 
 # ---------------------------------------------------------------------------
-# this machine's own addresses (appendix B's last row)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# chaining through the user's own proxy (5.5, "a corporate proxy")
-# ---------------------------------------------------------------------------
-
-
-
-
-# ---------------------------------------------------------------------------
 # limits and the server
 # ---------------------------------------------------------------------------
 
@@ -1288,7 +1276,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--events", type=int, metavar="FD",
                         help="write denial events as JSON lines to this descriptor")
     parser.add_argument("--control", type=int, metavar="FD",
-                        help="take requests for per-run ports on this unix datagram socket")
+                        help="take requests for per-run ports on this unix socket "
+                             "(seqpacket on Linux, datagram on macOS)")
     parser.add_argument("--quiet", action="store_true", help="print nothing for each block")
     parser.add_argument("--connect", type=float, default=default.connect, metavar="SECONDS",
                         help=f"connect timeout (default {default.connect:g})")

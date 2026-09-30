@@ -573,6 +573,10 @@ _TABLE: tuple[tuple[IPNetwork, str], ...] = (
     (ipaddress.ip_network("172.16.0.0/12"), "private"),
     (ipaddress.ip_network("192.168.0.0/16"), "private"),
     (ipaddress.ip_network("fc00::/7"), "private"),
+    # Local-use NAT64 (RFC 8215). Unlike 64:ff9b::/96 it can't be unwrapped:
+    # where the IPv4 address sits depends on the prefix length the local
+    # network chose (RFC 6052, /32 to /96), so the whole prefix is refused.
+    (ipaddress.ip_network("64:ff9b:1::/48"), "reserved"),
     (ipaddress.ip_network("100.64.0.0/10"), "cgnat"),  # includes 100.100.100.200, Alibaba metadata
     (ipaddress.ip_network("169.254.0.0/16"), "link-local"),  # includes 169.254.169.254
     (ipaddress.ip_network("fe80::/10"), "link-local"),
