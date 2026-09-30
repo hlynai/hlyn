@@ -49,8 +49,9 @@ if another thread changes the address, the only effect is which row applied,
 and the proxy re-checks every claim. Only sends run, where no address can
 reach a socket file (`_decide`). From ABI 9 the kernel checks what a
 continued call reaches (Landlock's socket-file rule, abstract-socket scope and
-zero TCP ports), so a nameless unix connect runs there. Ports mode, before
-ABI 9, still lets IP connects run (REMAINING.md, part 2 #16d).
+zero TCP ports), so a nameless unix connect runs there. In ports mode the
+gate connects the agent's own socket itself (`_ports`); where it can't take
+a copy of it, it lets the call run as before (`hlyn probe` says so).
 
 **Reduced mode**: when the gate may not read the agent's memory (Yama
 `ptrace_scope` 2 or 3, or a child of `hlyn.on()` at 1), it still knows the
@@ -63,7 +64,9 @@ Nothing here parses anything but fixed-layout kernel structures and sockaddrs.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import errno
+import fcntl
 import ipaddress
 import json
 import os
@@ -193,6 +196,9 @@ class Config:
     whose Landlock can't (before ABI 9): IP sockets go on to Landlock's port
     rules, and there is no proxy (`port` 0).
 
+    `ports` are the TCP ports `net` names in ports mode, which the gate
+    checks as Landlock would when it connects for the agent (`_ports`).
+
     `socket_check` is who checks a unix connect's socket file, as `hlyn
     probe` says it: `"gate"` before Landlock ABI 9 (Linux 7.1), `"kernel"`
     from it. Where it is the gate, nothing else would check a call the gate
@@ -205,6 +211,7 @@ class Config:
     reduced: bool = False
     mode: str = "hosts"
     socket_check: str = "gate"
+    ports: tuple[int, ...] = ()
 
     def dumps(self) -> bytes:
         return json.dumps({
@@ -215,6 +222,7 @@ class Config:
             "reduced": self.reduced,
             "mode": self.mode,
             "socket_check": self.socket_check,
+            "ports": list(self.ports),
         }).encode()
 
     @classmethod
@@ -230,6 +238,7 @@ class Config:
             mode=str(raw.get("mode", "hosts")),
             # Missing means the stricter answer: the gate checks.
             socket_check="kernel" if raw.get("socket_check") == "kernel" else "gate",
+            ports=tuple(int(port) for port in raw.get("ports", [])),
         )
 
 
@@ -246,6 +255,17 @@ class _Wait:
 
 
 @dataclass
+class _Dial:
+    """A connect the gate is making on the agent's own socket, for a
+    blocking socket: answered when the socket connects or fails (`_ports`)."""
+
+    call: notify.Call
+    sock: socket.socket
+    until: float | None
+    data: bytes
+
+
+@dataclass
 class Guard:
     """Answers the notifications on `fd` until every task using the filter
     has exited. `tell(event)` receives each denial (5.9); it must not block.
@@ -257,6 +277,7 @@ class Guard:
     mine: set[int] = field(default_factory=set)
     owed: set[int] = field(default_factory=set)
     waits: dict[int, _Wait] = field(default_factory=dict)
+    dialing: dict[int, _Dial] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.notice = notify.Notice(self.fd)
@@ -283,6 +304,8 @@ class Guard:
         poll.register(self.fd, select.POLLIN)
         for fd in self.waits:
             poll.register(fd, select.POLLIN)
+        for fd in self.dialing:
+            poll.register(fd, select.POLLOUT)
         if wake is not None:
             poll.register(wake, select.POLLIN)
         try:
@@ -293,6 +316,8 @@ class Guard:
                     if fd == wake:
                         with contextlib.suppress(OSError):
                             os.read(wake, 512)
+                    elif fd in self.dialing:
+                        self._dialed(fd)
                     elif fd != self.fd:
                         self._verdict(fd)
                     elif event & select.POLLIN:
@@ -310,6 +335,9 @@ class Guard:
                 for pending in self.waits.values():
                     pending.sock.close()
                 self.waits.clear()
+                for dial in self.dialing.values():
+                    dial.sock.close()
+                self.dialing.clear()
                 self.notice.close()
 
     def finish(self) -> None:
@@ -318,11 +346,12 @@ class Guard:
             self.tell.flush(final=True)
 
     def _next(self) -> int:
-        """Milliseconds until the nearest verdict deadline, or 1 s."""
-        if not self.waits:
+        """Milliseconds until the nearest deadline, at most 1 s."""
+        deadlines = [pending.until for pending in self.waits.values()]
+        deadlines += [dial.until for dial in self.dialing.values() if dial.until is not None]
+        if not deadlines:
             return 1000
-        soonest = min(pending.until for pending in self.waits.values())
-        return max(0, int((soonest - time.monotonic()) * 1000)) + 1
+        return min(1000, max(0, int((min(deadlines) - time.monotonic()) * 1000)) + 1)
 
     def step(self) -> None:
         """Receive one notification and answer it (or start its verdict wait)."""
@@ -384,15 +413,14 @@ class Guard:
             return
         kind = "unix" if proto.startswith("UNIX") else "netlink" if proto == "NETLINK" else "ip"
         if kind == "ip" and self.config.mode != "hosts":
-            if self.config.mode == "off" and not sending:
+            if sending:
+                self._go(call)  # see below: a send's address reaches no socket file
+            elif self.config.mode == "off":
                 # No IP socket can be made with the network off, so this one
                 # came from outside: refused, as Landlock refuses TCP here.
                 self._no(call, errno.EACCES)
-                return
-            # Ports: Landlock checks TCP ports when the call runs, whatever
-            # a racing thread writes meanwhile. (Its descriptor can be
-            # replaced meanwhile too: REMAINING.md, part 2 #16d.)
-            self._go(call)
+            else:
+                self._ports(call, target, ino, pointer, size)
             return
         data = None if self.config.reduced else notify.read(call.pid, pointer, size)
         if not notify.valid(self.fd, call):
@@ -641,6 +669,79 @@ class Guard:
         self._install(call, socket.socket(family, socket.SOCK_STREAM), target,
                       bool(flags & os.O_CLOEXEC), flags, remember=False)
 
+    def _ports(self, call: notify.Call, target: int, ino: int, pointer: int, size: int) -> None:
+        """Ports mode before Landlock ABI 9: an IP connect, which Landlock
+        would check when it runs, but which can't be let run (the module's
+        docstring). The gate makes it itself, on the agent's own socket:
+        it takes a copy of the descriptor (`notify.grab`, pidfd_getfd(2)),
+        checks that copy is the socket it looked at, checks the port against
+        `net` as Landlock does (`_landlock`), and connects the copy with its
+        own copy of the address. The agent's socket is then connected, with
+        its options, bound address and flags as they were.
+
+        Landlock can't check the gate's connect: the gate is outside the
+        agent's domain, and confining the gate would also take away the
+        access it reads the agent with (Landlock limits ptrace across
+        domains). Where the copy can't be had -- Docker's default seccomp
+        profile refuses pidfd_getfd without CAP_SYS_PTRACE, and Yama or a
+        successor gate may refuse it -- or the address can't be read, the
+        call is let run as before, and Landlock checks its port."""
+        data = None if self.config.reduced else notify.read(call.pid, pointer, size)
+        if not notify.valid(self.fd, call):
+            return  # gone: the thread was interrupted or killed
+        if data is None:
+            self._go(call)
+            return
+        if size >= 1 << 31 or size > notify.MOST:
+            self._no(call, errno.EINVAL)  # the kernel refuses it before any check
+            return
+        if len(data) < size:
+            self._no(call, errno.EFAULT)
+            return
+        try:
+            copy = notify.grab(call.pid, target)
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                self._no(call, errno.EBADF)  # closed since it was looked at
+            elif exc.errno != errno.ESRCH:
+                self._go(call)  # no copy to be had here: as before (see above)
+            return
+        sock = socket.socket(fileno=copy)
+        kept = False
+        try:
+            if os.fstat(copy).st_ino != ino:
+                self._no(call, errno.EACCES)  # replaced while being looked at
+                return
+            code = _landlock(sock, data, size, self.config.ports)
+            if code:
+                self._no(call, code)
+                return
+            flags = fcntl.fcntl(copy, fcntl.F_GETFL)
+            blocking = not flags & os.O_NONBLOCK
+            if blocking:
+                # The status flags belong to the open file, which the agent
+                # shares: non-blocking only for this one call.
+                fcntl.fcntl(copy, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            try:
+                code = _connect(copy, data, size)
+            finally:
+                if blocking:
+                    fcntl.fcntl(copy, fcntl.F_SETFL, flags)
+            if blocking and code in (errno.EINPROGRESS, errno.EALREADY):
+                # Answered when the connect finishes (`_dialed`), or at the
+                # socket's send timeout, as the kernel would.
+                timeout = struct.unpack("=qq", sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, 16))
+                wait = timeout[0] + timeout[1] / 1e6
+                self.dialing[copy] = _Dial(call, sock, time.monotonic() + wait if wait else None, data[:size])
+                if self._poll is not None:
+                    self._poll.register(copy, select.POLLOUT)
+                kept = True
+                return
+            self._reply(call, code)
+        finally:
+            if not kept:
+                sock.close()
+
     def _refuse(self, call: notify.Call, real: str) -> None:
         self._event(call, "unix", real, "--net-any",
                     detail="never allowed unless the network is open: "
@@ -676,6 +777,13 @@ class Guard:
 
     def _no(self, call: notify.Call, code: int) -> None:
         notify.answer(self.notice, call, error=code)
+
+    def _reply(self, call: notify.Call, code: int) -> None:
+        """Answer 0, or fail with errno `code`."""
+        if code:
+            self._no(call, code)
+        else:
+            notify.answer(self.notice, call, value=0)
 
     def _go(self, call: notify.Call) -> None:
         notify.answer(self.notice, call, go=True)
@@ -789,6 +897,48 @@ class Guard:
                 pending.sock.close()
                 with contextlib.suppress(OSError):
                     self._no(pending.call, errno.ETIMEDOUT)
+        for fd, dial in list(self.dialing.items()):
+            if dial.until is not None and dial.until <= now:
+                # The socket's send timeout passed: a blocking connect's
+                # answer then, as the kernel gives it (`__inet_stream_connect`).
+                del self.dialing[fd]
+                self._forget(fd)
+                dial.sock.close()
+                with contextlib.suppress(OSError):
+                    self._no(dial.call, errno.EINPROGRESS)
+            elif not notify.valid(self.fd, dial.call):
+                # The thread was interrupted or killed: its call is gone, and
+                # the gate's copy of the socket shouldn't keep it alive.
+                del self.dialing[fd]
+                self._forget(fd)
+                dial.sock.close()
+
+    def _dialed(self, fd: int) -> None:
+        """A connect the gate made for a blocking socket has finished (or
+        failed). The gate connects once more, as the kernel's blocking
+        connect does after its wait (`__inet_stream_connect`): that answers
+        0 or the connect's error, and leaves the socket connected, or
+        unconnected, as the agent's own blocking call would have. Without
+        it the socket stays "connecting", and the agent's next connect is
+        answered 0 instead of `EISCONN` (measured)."""
+        dial = self.dialing.pop(fd, None)
+        self._forget(fd)
+        if dial is None:
+            return
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        try:
+            code = _connect(fd, dial.data, len(dial.data))
+        finally:
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags)
+        if code in (errno.EINPROGRESS, errno.EALREADY):
+            self.dialing[fd] = dial  # not finished after all: wait on
+            if self._poll is not None:
+                self._poll.register(fd, select.POLLOUT)
+            return
+        dial.sock.close()
+        with contextlib.suppress(OSError):
+            self._reply(dial.call, code)
 
     def _event(self, call: notify.Call, why: str, target: str, allow: str | None, **more: object) -> None:
         if self.tell is None:
@@ -927,6 +1077,43 @@ def _flag(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, port: int) -> str |
         return hosts.parse(shown).flag()
     except Exception:  # noqa: BLE001 - no flag is better than a wrong one
         return None
+
+
+def _landlock(sock: socket.socket, data: bytes, size: int, ports: Sequence[int]) -> int:
+    """Landlock's check of a TCP connect, `current_check_access_socket` in
+    security/landlock/net.c (v6.12), for a connect the gate makes for the
+    agent in ports mode: 0, or the errno Landlock would give. Only stream
+    sockets are checked; `AF_UNSPEC` (a disconnect) is always allowed; the
+    address must be long enough for its family and of the socket's family;
+    the port must be one `net` names."""
+    if sock.type != socket.SOCK_STREAM:
+        return 0
+    if size < 2:
+        return errno.EINVAL
+    (family,) = struct.unpack_from("=H", data)
+    if family in (socket.AF_UNSPEC, socket.AF_INET):
+        if size < 16:
+            return errno.EINVAL
+    elif family == socket.AF_INET6:
+        if size < 24:
+            return errno.EINVAL
+    else:
+        return 0
+    if family == socket.AF_UNSPEC:
+        return 0
+    if family != sock.family:
+        return errno.EINVAL
+    (port,) = struct.unpack_from("!H", data, 2)
+    return 0 if port in ports else errno.EACCES
+
+
+def _connect(fd: int, data: bytes, size: int) -> int:
+    """connect(2) on this process's descriptor `fd` with exactly the
+    address bytes given: 0, or its errno."""
+    buf = ctypes.create_string_buffer(data[:size], max(size, 1))
+    if notify._libc().connect(fd, buf, ctypes.c_uint32(size)) != 0:
+        return ctypes.get_errno() or errno.EIO
+    return 0
 
 
 def rules(items: Sequence[str]) -> tuple[Rule, ...]:

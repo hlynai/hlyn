@@ -416,6 +416,12 @@ def _machine(out: dict[str, object]) -> str:
     lines = [head, *(f"    {'yes' if yes else 'no':<4}{name}{'' if yes else why}" for name, yes, why in rows)]
     if out.get("reduced"):
         lines.append(f"    note: host names work in reduced mode here: {out['reduced']}.")
+    if out.get("grab") is False:
+        lines.append("    note: with --net PORTS, a program that races its own threads may reach a local "
+                     "socket here: hlyn's gate can't take a copy of the program's socket (pidfd_getfd is "
+                     "refused; in Docker, --cap-add SYS_PTRACE allows it), so it lets each connect run for "
+                     "Landlock to check. Linux 7.1 or newer, host names in --net, or the network off don't "
+                     "have this.")
     return "\n".join(lines) + "\n"
 
 

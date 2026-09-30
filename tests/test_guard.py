@@ -177,7 +177,8 @@ def gated(body: str, *, net: list[str] | bool, write: list[str] = (), read: list
     hosts = mode == "hosts"
     config = guard.Config(port=proxy.port if hosts else 0,
                           rules=tuple(parse(item) for item in net) if hosts else (),
-                          writes=tuple(os.path.realpath(item) for item in write), reduced=reduced, mode=mode)
+                          writes=tuple(os.path.realpath(item) for item in write), reduced=reduced, mode=mode,
+                          ports=tuple(net) if mode == "ports" else ())
     gate = guard.Guard(fds[0], config, tell=events.tell)
     # Every answer that lets the agent's own call run, counted by system call.
     events.continued = collections.Counter()
@@ -752,6 +753,107 @@ def test_the_gate_lets_no_connect_run_before_abi_9(proxy, mode):
     refused = [event for event in events if event["why"] == "unix-abstract"]
     print("reported:", refused)
     assert refused and refused[0]["allow"] == "--net-any"
+
+
+PORTS_ROWS = """
+    import select
+    s = socket.socket()
+    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    attempt("tcp, listed port", lambda: s.connect(("127.0.0.1", PORT_OK)))
+    attempt("tcp, the agent's own socket after",
+            lambda: repr((s.getpeername() == ("127.0.0.1", PORT_OK),
+                          s.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0,
+                          s.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0)))
+    s.sendall(b"ports-mode")
+    attempt("tcp, connect again", lambda: s.connect(("127.0.0.1", PORT_OK)))
+    attempt("tcp, unlisted port", lambda: socket.socket().connect(("127.0.0.1", PORT_NO)))
+    attempt("tcp, listed, nothing listening", lambda: socket.socket().connect(("127.0.0.1", PORT_DEAD)))
+    n = socket.socket(); n.setblocking(False)
+    attempt("tcp, non-blocking", lambda: errno.errorcode.get(n.connect_ex(("127.0.0.1", PORT_OK)), "0"))
+    attempt("tcp, non-blocking, then", lambda: repr((bool(select.select([], [n], [], 5)[1]),
+                                                     n.getpeername() == ("127.0.0.1", PORT_OK))))
+    attempt("tcp, still non-blocking", lambda: str(n.getblocking()))
+    attempt("tcp, AF_UNSPEC", lambda: raw(s.fileno(), UNSPEC))
+    attempt("tcp, AF_UNSPEC too short", lambda: raw(s.fileno(), UNSPEC[:2]))
+    v4 = socket.socket()
+    attempt("tcp, another family", lambda: raw(v4.fileno(), struct.pack("=H", socket.AF_INET6)
+                                               + struct.pack("!H", PORT_OK) + bytes(20)))
+    attempt("tcp6, unlisted port", lambda: socket.socket(socket.AF_INET6).connect(("::1", PORT_NO)))
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    attempt("udp, any port", lambda: u.connect(("127.0.0.1", PORT_NO)))
+    attempt("udp, send", lambda: str(u.send(b"x")))
+"""
+
+PORTS_WANT = {
+    "tcp, listed port": "OK", "tcp, the agent's own socket after": "(True, True, True)",
+    "tcp, connect again": "EISCONN", "tcp, unlisted port": "EACCES",
+    "tcp, listed, nothing listening": "ECONNREFUSED", "tcp, non-blocking": "EINPROGRESS",
+    "tcp, non-blocking, then": "(True, True)", "tcp, still non-blocking": "False",
+    "tcp, AF_UNSPEC": "OK", "tcp, AF_UNSPEC too short": "EINVAL", "tcp, another family": "EINVAL",
+    "tcp6, unlisted port": "EACCES", "udp, any port": "OK", "udp, send": "1",
+}
+
+
+@pytest.mark.skipif(CONNECT_NR is None, reason="system call numbers for aarch64 and x86_64 only")
+@pytest.mark.parametrize("grab", ["works", "refused"])
+def test_ports_mode_connects_on_the_agents_own_socket(proxy, monkeypatch, grab):
+    """Ports mode before Landlock ABI 9: the gate takes a copy of the
+    agent's socket (pidfd_getfd), checks the port as Landlock does, and
+    connects the copy, so no connect runs; the socket keeps its options
+    and flags (ports mode refuses bind, so none is bound). "refused":
+    pidfd_getfd refused (Docker's
+    default profile), so each call runs and the kernel and Landlock answer:
+    the reference the gate's own answers must match row for row."""
+    from hlyn.core import notify
+
+    if grab == "works" and not notify.grabbable():
+        pytest.skip("pidfd_getfd is refused here (a stock docker run): the gate lets the call run instead")
+    if grab == "refused":
+        def refused(pid, fd):
+            raise PermissionError(errno.EPERM, "pidfd_getfd refused")
+        monkeypatch.setattr(notify, "grab", refused)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    unlisted = socket.socket()
+    unlisted.bind(("127.0.0.1", 0))
+    unlisted.listen(8)
+    unlisted.settimeout(0.5)
+    dead = socket.socket()
+    dead.bind(("127.0.0.1", 0))  # bound, never listening: ECONNREFUSED
+    ports = {"PORT_OK": listener.getsockname()[1], "PORT_NO": unlisted.getsockname()[1],
+             "PORT_DEAD": dead.getsockname()[1]}
+    body = EVERY_ROW + PORTS_ROWS
+    for name, port in ports.items():
+        body = body.replace(name, str(port))
+    out, events = gated(body, net=[ports["PORT_OK"], ports["PORT_DEAD"]], proxy=proxy, mode="ports",
+                        datagrams=True)
+    listener.settimeout(2)
+    conn, _ = listener.accept()
+    conn.settimeout(2)
+    heard = conn.recv(64)
+    try:
+        unlisted.accept()
+        reached = True
+    except OSError:
+        reached = False
+    print(f"listener heard {heard!r}; unlisted port reached: {reached}")
+    for item in (listener, unlisted, dead, conn):
+        item.close()
+    got = lines(out)
+    want = {**PORTS_WANT, **{row: answer for row, answer in {**KERNEL, **STRICTER}.items()
+                             if not row.startswith("tcp")}}
+    for row, answer in want.items():
+        print(f"{row}: {got.get(row)} (want {answer})")
+    assert {row: got.get(row) for row in want} == want
+    assert heard == b"ports-mode" and not reached
+    print("let run:", dict(events.continued))
+    if grab == "works":
+        assert events.continued[CONNECT_NR] == 0
+    else:
+        assert events.continued[CONNECT_NR] >= 10  # every IP connect ran, as before
+    assert events.continued[SENDTO_NR] >= 1
 
 
 RACE = os.path.join(ROOT, "tools", "hostlab", "race.c")

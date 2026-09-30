@@ -525,7 +525,7 @@ def _serve(child: int, forward: bool, guard: Guard) -> int | None:
             os.setsid()
         # Its refusals still go to the log and the report's pipe.
         told = [getattr(guard.tell, name, None) for name in ("log", "events")]
-        _only({guard.fd, *guard.waits, *(fd for fd in told if isinstance(fd, int))})
+        _only({guard.fd, *guard.waits, *guard.dialing, *(fd for fd in told if isinstance(fd, int))})
         guard.serve()
         os._exit(0)
     return status[0]

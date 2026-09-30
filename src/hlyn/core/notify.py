@@ -52,6 +52,8 @@ __all__ = [
     "answer",
     "cwd",
     "fdflags",
+    "grab",
+    "grabbable",
     "inode",
     "netlink",
     "pin",
@@ -320,6 +322,59 @@ def proto(pid: int, fd: int) -> str | None:
     except OSError:
         return None
     return name.rstrip(b"\0").decode("ascii", "replace")
+
+
+# pidfd_getfd(2), the same number on every architecture (Linux 5.6), and
+# pidfd_open(2)'s flag for a pidfd naming one thread (Linux 6.9;
+# asm-generic's O_EXCL, the same on x86_64 and aarch64).
+PIDFD_GETFD = 438
+PIDFD_THREAD = 0o200
+
+
+def grab(pid: int, fd: int) -> int:
+    """A copy, in this process, of thread `pid`'s descriptor `fd`
+    (pidfd_getfd(2)): the same open file, so what is done to the copy is
+    done to the agent's socket. Its commit names seccomp supervisors as the
+    use. Needs the ptrace-attach access `read` needs. Raises `OSError`:
+    `EPERM` where Yama or a seccomp profile refuses it (Docker's default
+    does without CAP_SYS_PTRACE), `EBADF` for no such descriptor, `ESRCH`
+    for a thread that has gone. The caller closes the copy."""
+    if sys.platform != "linux":
+        raise OSError(errno.ENOSYS, os.strerror(errno.ENOSYS))
+    pidfd = os.pidfd_open(pid, PIDFD_THREAD)
+    try:
+        got = _libc().syscall(ctypes.c_long(PIDFD_GETFD), ctypes.c_long(pidfd), ctypes.c_long(fd),
+                              ctypes.c_long(0))
+        if got < 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code))
+        return int(got)
+    finally:
+        os.close(pidfd)
+
+
+def grabbable() -> bool:
+    """Whether this process may take copies of its children's descriptors
+    (`grab`), asked of a child forked for it, which exits at once. False
+    where a seccomp profile refuses pidfd_getfd (a stock `docker run`,
+    measured) or the kernel lacks it."""
+    if sys.platform != "linux":
+        return False
+    read, write = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(write)
+        os.read(read, 1)  # until the parent is done
+        os._exit(0)
+    os.close(read)
+    try:
+        os.close(grab(pid, read))
+    except OSError:
+        return False
+    finally:
+        os.close(write)
+        os.waitpid(pid, 0)
+    return True
 
 
 def unix(pid: int) -> set[int]:

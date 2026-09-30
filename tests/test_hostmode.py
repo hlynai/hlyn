@@ -677,7 +677,7 @@ def test_probe_says_when_only_reduced_mode_is_possible(monkeypatch):
             assert got["reduced"].startswith(f"kernel.yama.ptrace_scope is {scope}")
             assert "note: host names work in reduced mode here" in text
         else:
-            assert "reduced" not in got and "note:" not in text
+            assert "reduced" not in got and "reduced mode" not in text
 
 
 @linux

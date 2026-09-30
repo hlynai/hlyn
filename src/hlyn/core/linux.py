@@ -89,6 +89,10 @@ def probe() -> dict[str, object]:
             out["sockets"], out["socket_check"] = True, "kernel"
         elif out["hosts"]:  # the same needs as host mode's gate: notify, no other listener
             out["sockets"], out["socket_check"] = True, "gate"
+            # With ports, the gate connects each program's own socket itself
+            # (guard `_ports`); where it can't take a copy, it lets the call
+            # run for Landlock, and a program racing its threads can get past.
+            out["grab"] = notify.grabbable()
     missing = []
     if not abi:
         missing.append("Landlock is unavailable; Linux 5.13 or newer is needed")
@@ -265,7 +269,9 @@ def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int
     if watch:
         # Only before Landlock ABI 9 (`watched`): the gate checks socket files.
         config = guard.Config(port=0, rules=(), writes=policy.writes(), connect=CONNECT,
-                              mode="off" if policy.net is False else "ports", socket_check="gate")
+                              mode="off" if policy.net is False else "ports", socket_check="gate",
+                              ports=tuple(port for port in policy.net if isinstance(port, int))
+                              if isinstance(policy.net, tuple) else ())
     # Unix datagram sockets while a gate checks unix sockets, before Landlock
     # ABI 9 (seccomp.UNIX_KINDS). From ABI 9 the kernel checks each send's
     # path itself, so they are left alone there.
