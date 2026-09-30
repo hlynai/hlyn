@@ -397,6 +397,7 @@ class Report:
         self.dropped = 0  # refusals the policy explains away: see `verify`
         self.system = 0  # refusals of OS plumbing no flag allows: see `judge`
         self.more = 0  # distinct refusals past LIMIT
+        self.unlogged = 0  # log records a helper couldn't write (its log was full)
         self.why: str | None = None  # set when listening was degraded
         self._reads = plan.reads()
         self._writes = plan.writes()
@@ -406,7 +407,10 @@ class Report:
     # -- taking denials in -------------------------------------------------
 
     def add(self, denial: Denial) -> Entry | None:
-        """File one refusal. Returns its entry, or None if it was dropped."""
+        """File one refusal. Returns its entry, or None if it was dropped
+        (the policy explains it away). Past `LIMIT` distinct entries a new
+        one is counted in `more` and not kept, but still returned, so the
+        caller can log it: the log has its own, larger cap (`log.LIMIT`)."""
         made = self.judge(denial)
         if made is None:
             self.dropped += 1
@@ -416,7 +420,7 @@ class Report:
         if entry is None:
             if len(self.entries) >= LIMIT:
                 self.more += 1
-                return None
+                return made
             entry = self.entries[key] = made
         if denial.by:
             entry.by.add(safe(denial.by)[:32])
@@ -574,7 +578,11 @@ class Report:
                 allow = None
         if why in ("sni-mismatch", "resolve-failed", "busy", "dns"):
             allow = None  # nothing to add to net would fix these
-        return Entry("net", target, allow, WHY[why], source="proxy")
+        note = WHY[why]
+        if why == "not-listed" and allow is None:
+            # The name the agent sent isn't one an entry can be written for.
+            note = "the name isn't one hlyn can check, so no --net entry can allow it"
+        return Entry("net", target, allow, note, source="proxy")
 
     def _gate(self, denial: Denial) -> Entry | None:
         """A refusal by the Linux gate (5.3, 5.9): a direct connection, a
@@ -582,6 +590,11 @@ class Report:
         and path it reports came from the agent's memory, so they are
         cleaned and every flag is built or checked here."""
         why, where = denial.op, denial.target
+        if where.endswith("…") and why.startswith("unix"):
+            # Shortened by the gate to fit one pipe write: its folder isn't
+            # the socket's, so no flag is built from it.
+            return Entry("net", f"local socket {safe(tilde(where))[:300]}", None,
+                         "a local socket with a path too long to report whole", source="gate")
         if why == "unix":
             if where == "(unknown path)":
                 return Entry("net", "a local socket", None,
@@ -818,6 +831,7 @@ class Report:
             "exit": code,
             "blocked": [entry.json() for entry in self.items()],
             "more": self.more,
+            "unlogged": self.unlogged,
             "system": self.system,
             "removed_env": self.env,
             "why": self.why,
@@ -858,6 +872,9 @@ class Report:
             out.extend(self._rows(items, cmd))
             if self.more:
                 out.append(f"  and {self.more} more refusals past the first {LIMIT}, not listed.")
+            if self.unlogged:
+                out.append(f"  {self.unlogged} of these couldn't be written to hlyn's log: it wasn't being "
+                           f"read fast enough (a log file keeps up: --log PATH).")
             combined = [e.allow for e in items if e.allow and not e.quiet]
             unique = list(dict.fromkeys(combined))
             if 1 < len(unique) <= ALL:
@@ -941,11 +958,13 @@ class Report:
         for e in items:
             # A reason said on the line above isn't said again: thirty
             # addresses dialled directly need the explanation once.
-            note = "" if e.note == last else e.note
+            repeat = bool(e.note) and e.note == last
+            note = "" if repeat else e.note
             last = e.note
-            said = f"allow with {e.allow}" if e.allow else (note or "same as above")
-            if e.allow and note:
-                said += f" ({note})"
+            if e.allow:
+                said = f"allow with {e.allow}" + (f" ({note})" if note else "")
+            else:
+                said = "same as above" if repeat else (note or "refused; no flag allows it")
             extra = []
             # Only processes other than the command itself are named: saying
             # "by python" on every line of a Python agent's report is noise.

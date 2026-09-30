@@ -856,6 +856,47 @@ def test_ports_mode_connects_on_the_agents_own_socket(proxy, monkeypatch, grab):
     assert events.continued[SENDTO_NR] >= 1
 
 
+def test_ports_mode_acts_only_on_an_ip_socket_whatever_the_classification_said(proxy, monkeypatch):
+    """The gate classifies a descriptor by reading /proc, which another thread
+    can change between reads; what it then acts on is the copy it grabbed.
+    Here the classification says TCP for a unix socket, as a socket swapped
+    in and back again could make it say, and the gate must refuse rather
+    than connect that unix socket itself. The first build compared only the
+    copy's inode, which such a swap keeps, and connected it (review,
+    2026-09-30)."""
+    from hlyn.core import notify
+
+    if not notify.grabbable():
+        pytest.skip("pidfd_getfd is refused here (a stock docker run): the gate lets the call run instead")
+    real = notify.proto
+
+    def fooled(pid, fd):
+        got = real(pid, fd)
+        return "TCP" if got and got.startswith("UNIX") else got
+
+    monkeypatch.setattr(notify, "proto", fooled)
+    outside = tempfile.mkdtemp(prefix="hlyn-guard-outside-")
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(f"{outside}/x.sock")
+    listener.listen(4)
+    listener.settimeout(0.5)
+    out, events = gated(f"""
+        attempt("unix socket the gate was told is TCP",
+                lambda: socket.socket(socket.AF_UNIX).connect({outside + '/x.sock'!r}))
+    """, net=[443], proxy=proxy, mode="ports", datagrams=True)
+    try:
+        listener.accept()
+        reached = True
+    except OSError:
+        reached = False
+    listener.close()
+    got = lines(out)
+    print(f"answer: {got.get('unix socket the gate was told is TCP')}; outside listener reached: {reached}")
+    assert got["unix socket the gate was told is TCP"] == "EACCES"
+    assert not reached
+    assert events.continued[CONNECT_NR] == 0
+
+
 RACE = os.path.join(ROOT, "tools", "hostlab", "race.c")
 
 

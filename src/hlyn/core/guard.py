@@ -263,6 +263,7 @@ class _Dial:
     sock: socket.socket
     until: float | None
     data: bytes
+    ino: int
 
 
 @dataclass
@@ -709,8 +710,12 @@ class Guard:
         sock = socket.socket(fileno=copy)
         kept = False
         try:
-            if os.fstat(copy).st_ino != ino:
-                self._no(call, errno.EACCES)  # replaced while being looked at
+            if os.fstat(copy).st_ino != ino or sock.family not in (socket.AF_INET, socket.AF_INET6):
+                # Replaced while being looked at, or not an IP socket after
+                # all: what was classified can have been another socket put
+                # there and taken away again. What decides is the copy the
+                # gate holds, the object it would act on.
+                self._no(call, errno.EACCES)
                 return
             code = _landlock(sock, data, size, self.config.ports)
             if code:
@@ -720,7 +725,9 @@ class Guard:
             blocking = not flags & os.O_NONBLOCK
             if blocking:
                 # The status flags belong to the open file, which the agent
-                # shares: non-blocking only for this one call.
+                # shares: non-blocking only for this one call. Another of the
+                # agent's threads using this socket in that moment would see
+                # it non-blocking (a narrow cost; there is no per-call flag).
                 fcntl.fcntl(copy, fcntl.F_SETFL, flags | os.O_NONBLOCK)
             try:
                 code = _connect(copy, data, size)
@@ -732,7 +739,9 @@ class Guard:
                 # socket's send timeout, as the kernel would.
                 timeout = struct.unpack("=qq", sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, 16))
                 wait = timeout[0] + timeout[1] / 1e6
-                self.dialing[copy] = _Dial(call, sock, time.monotonic() + wait if wait else None, data[:size])
+                self._stale(ino)
+                until = time.monotonic() + wait if wait else None
+                self.dialing[copy] = _Dial(call, sock, until, data[:size], ino)
                 if self._poll is not None:
                     self._poll.register(copy, select.POLLOUT)
                 kept = True
@@ -913,6 +922,15 @@ class Guard:
                 self._forget(fd)
                 dial.sock.close()
 
+    def _stale(self, ino: int) -> None:
+        """Drop waits on socket `ino` whose call has gone: a signal restarts
+        an interrupted connect as a new call, which waits on its own."""
+        for fd, dial in list(self.dialing.items()):
+            if dial.ino == ino and not notify.valid(self.fd, dial.call):
+                del self.dialing[fd]
+                self._forget(fd)
+                dial.sock.close()
+
     def _dialed(self, fd: int) -> None:
         """A connect the gate made for a blocking socket has finished (or
         failed). The gate connects once more, as the kernel's blocking
@@ -959,8 +977,10 @@ class Reporter:
       line with a `count` now and then, and when the gate finishes.
 
     It never blocks the gate: a line that can't be written now waits in a
-    short queue, and past that is dropped and counted. Distinct refusals are
-    capped (`LIMIT`); past the cap they are counted, not kept. So a flood of
+    short queue, and past that is dropped and counted. Distinct refusals sent
+    to the report are capped (`LIMIT`); past the cap they are counted, not
+    kept, and still logged (the log's own cap, `log.LIMIT`, bounds what it
+    remembers). So a flood of
     connects to distinct addresses (matrix row 28) costs the gate a fixed
     amount of memory, and the connects it answers keep their pace.
     """
@@ -978,7 +998,8 @@ class Reporter:
         self.counts: dict[tuple[str, str], int] = {}  # sent to the report so far
         self.owed: dict[tuple[str, str], dict[str, object]] = {}  # repeats not yet sent
         self.more = 0  # distinct refusals past LIMIT
-        self.dropped = 0  # lines that found no room
+        self.dropped = 0  # report lines that found no room in the pipe
+        self.unlogged = 0  # log lines that found no room in the queue
         self.queue: collections.deque[bytes] = collections.deque()
         self.names: dict[int, str] = {}
         self.sent = time.monotonic()
@@ -992,10 +1013,12 @@ class Reporter:
         key = (str(event.get("why")), str(event.get("target")))
         if key not in self.counts:
             if len(self.counts) >= self.LIMIT:
+                # Counted for the report, and still logged below: the log
+                # keeps its own, larger cap (`log.LIMIT`).
                 self.more += 1
-                return
-            self.counts[key] = 1
-            self._send({**event, "by": by, "count": 1})
+            else:
+                self.counts[key] = 1
+                self._send({**event, "by": by, "count": 1})
         else:
             self.counts[key] += 1
             waiting = self.owed.setdefault(key, {**event, "by": by, "count": 0})
@@ -1007,7 +1030,7 @@ class Reporter:
             text = log.line("deny", fields, self.seen, pid=os.getpid())
             if text is not None:
                 if len(self.queue) >= self.QUEUE:
-                    self.dropped += 1
+                    self.unlogged += 1
                 else:
                     self.queue.append((text + "\n").encode())
         self.flush()
@@ -1020,8 +1043,9 @@ class Reporter:
                 self._send(waiting)
             self.owed.clear()
             self.sent = time.monotonic()
-        if final and (self.more or self.dropped):
-            self._send({"kind": "more", "count": self.more, "dropped": self.dropped})
+        if final and (self.more or self.dropped or self.unlogged):
+            self._send({"kind": "more", "count": self.more, "dropped": self.dropped,
+                        "unlogged": self.unlogged})
         while self.queue and self.log is not None and self._writable(self.log):
             try:
                 os.write(self.log, self.queue[0])
@@ -1036,13 +1060,8 @@ class Reporter:
     def _send(self, event: dict[str, object]) -> None:
         if self.events is None:
             return
-        line = json.dumps(event, separators=(",", ":"))
-        if len(line) >= 512:
-            # One atomic pipe write: keep what the report needs, then shorten.
-            event = {**event, "target": str(event.get("target", ""))[:200], "detail": None}
-            line = json.dumps(event, separators=(",", ":"))[:510]
         try:
-            os.write(self.events, (line + "\n").encode())
+            os.write(self.events, _fit(event) + b"\n")
         except BlockingIOError:
             self.dropped += 1  # a full pipe: the gate never waits on a reader
         except OSError:
@@ -1079,6 +1098,36 @@ def _flag(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, port: int) -> str |
         return None
 
 
+# One write to a pipe of at most this many bytes arrives whole, never
+# interleaved with another writer's (pipe(7): PIPE_BUF, 4096 on Linux).
+PIPE = getattr(select, "PIPE_BUF", 512)
+
+
+def _fit(event: dict[str, object]) -> bytes:
+    """`event` as one JSON line that is a single atomic pipe write
+    (`Reporter._send`), in UTF-8. Past the limit its detail and flag go, and
+    its target is shortened as text and marked with "…" (the report then
+    builds no flag from it: a shortened path names another folder). Never
+    by cutting the encoded line, which could leave a line that isn't JSON
+    and that the report drops (review, 2026-09-30)."""
+    def encode(item: dict[str, object]) -> bytes:
+        return json.dumps(item, separators=(",", ":"), ensure_ascii=False).encode()
+
+    line = encode(event)
+    if len(line) < PIPE:
+        return line
+    event = {**event, "detail": None, "allow": None}
+    target = str(event.get("target", ""))
+    while target:
+        target = target[: len(target) // 2]
+        event["target"] = target + "…"
+        line = encode(event)
+        if len(line) < PIPE:
+            return line
+    return encode({"kind": event.get("kind"), "why": event.get("why"), "target": "…", "allow": None,
+                   "source": event.get("source")})
+
+
 def _landlock(sock: socket.socket, data: bytes, size: int, ports: Sequence[int]) -> int:
     """Landlock's check of a TCP connect, `current_check_access_socket` in
     security/landlock/net.c (v6.12), for a connect the gate makes for the
@@ -1086,6 +1135,8 @@ def _landlock(sock: socket.socket, data: bytes, size: int, ports: Sequence[int])
     sockets are checked; `AF_UNSPEC` (a disconnect) is always allowed; the
     address must be long enough for its family and of the socket's family;
     the port must be one `net` names."""
+    if sock.family not in (socket.AF_INET, socket.AF_INET6):
+        return errno.EAFNOSUPPORT  # never an IP connect: `_ports` checks this first
     if sock.type != socket.SOCK_STREAM:
         return 0
     if size < 2:

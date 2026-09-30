@@ -115,6 +115,7 @@ def become(
     *,
     forward: bool,
     isolate: bool,
+    group: bool = False,
     close: Sequence[int] = (),
     fresh: bool = True,
     log: int | None = None,
@@ -126,6 +127,11 @@ def become(
     `forward` passes signals on (for `spawn` and `hlyn run`, where the
     original process stands for the command). `isolate` gives the child its
     own process group, and the terminal when there is one in the foreground.
+    `group` gives it its own process group without the terminal: signals
+    sent to the caller's group, the terminal's Ctrl-C among them, then reach
+    the child only through the gate (with `forward`), and nothing the child
+    sends to its group reaches the gate or the caller (5.2, "the helpers
+    also leave the caller's process group").
     `close` lists descriptors the gate must not keep: whatever the child
     alone should hold, such as the proxy's lifetime pipe.
 
@@ -178,7 +184,7 @@ def become(
                 if fd is not None:
                     os.close(fd)
             signal.pthread_sigmask(signal.SIG_SETMASK, before)
-            if isolate:
+            if isolate or group:
                 os.setpgid(0, 0)
                 if tty is not None:
                     _give(tty, os.getpgrp())
@@ -191,7 +197,7 @@ def become(
             traceback.print_exc()
         finally:
             os._exit(code)
-    if isolate:
+    if isolate or group:
         # Both sides set the group, as shells do, so neither order loses.
         with contextlib.suppress(OSError):
             os.setpgid(child, child)

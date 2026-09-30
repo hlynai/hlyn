@@ -456,6 +456,136 @@ def test_a_flood_of_distinct_refusals_is_capped(tmp_path):
     assert len(text.splitlines()) < 10
 
 
+def test_past_the_reports_cap_every_refusal_is_still_logged(tmp_path, monkeypatch):
+    """The report lists the first LIMIT distinct refusals; the log records
+    every one, up to its own, larger cap (`log.LIMIT`). Both used to stop at
+    the report's cap: 1002 of 3000 distinct refusals reached the log in a
+    real `hlyn run` (review, 2026-09-30)."""
+    import io
+
+    from hlyn import cli, log
+
+    stream = io.StringIO()
+    monkeypatch.setattr(log, "_seen", {})
+    log.sink(stream)
+    try:
+        report = book(tmp_path)
+        for i in range(LIMIT + 50):
+            cli._file(report, Denial("write", str(tmp_path / f"f{i}"), op="open", source="program"))
+    finally:
+        log.sink(True)
+    denies = [row for row in map(json.loads, stream.getvalue().splitlines()) if row["kind"] == "deny"]
+    print(f"{LIMIT + 50} distinct refusals: the report keeps {len(report.items())} (more: {report.more}); "
+          f"the log has {len(denies)} deny records")
+    assert len(report.items()) == LIMIT and report.more == 50
+    wanted = sorted(str(tmp_path / f"f{i}") for i in range(LIMIT + 50))
+    assert sorted(row["target"] for row in denies) == wanted
+
+
+def test_the_gates_reporter_logs_past_its_cap_and_the_report_says_what_the_log_lost(tmp_path):
+    """The gate's Reporter: past its LIMIT distinct refusals it stops sending
+    them to the report but still logs each one; its last line says how many
+    were past the cap, how many report lines found no room, and how many log
+    lines found none, and the report prints the last."""
+    from hlyn import cli
+    from hlyn.core.guard import Reporter
+
+    many = Reporter.LIMIT + 200
+    with open(tmp_path / "log", "w+b") as logged, open(tmp_path / "events", "w+b") as events:
+        reporter = Reporter(log=logged.fileno(), events=events.fileno())
+        for i in range(many):
+            reporter({"kind": "net", "target": f"10.0.{i // 256}.{i % 256}:443", "allow": None,
+                      "why": "direct", "source": "gate", "pid": os.getpid()})
+        reporter.flush(final=True)
+        logged.seek(0)
+        denies = [json.loads(line) for line in logged.read().splitlines()]
+        events.seek(0)
+        sent = [json.loads(line) for line in events.read().splitlines()]
+    last = sent[-1]
+    print(f"{many} distinct refusals: {len(denies)} logged, {len(sent) - 1} sent to the report, "
+          f"last line {last}")
+    assert len({row["target"] for row in denies}) == many
+    assert len(sent) - 1 == Reporter.LIMIT
+    assert last == {"kind": "more", "count": 200, "dropped": 0, "unlogged": 0}
+
+    report = book(tmp_path, net=["example.com"])
+    r, w = os.pipe()
+    os.write(w, json.dumps({"kind": "more", "count": 3, "dropped": 2, "unlogged": 7}).encode() + b"\n")
+    os.write(w, json.dumps({"target": "10.9.9.9:443", "why": "direct", "source": "gate",
+                            "allow": "--net 10.9.9.9:443"}).encode() + b"\n")
+    os.close(w)
+    os.set_blocking(r, False)
+    cli._proxied(r, b"", report)
+    os.close(r)
+    text = report.text(0)
+    print(text)
+    assert report.more == 5 and report.unlogged == 7
+    assert "7 of these couldn't be written to hlyn's log" in text
+
+
+@pytest.mark.parametrize("letter", ["a", "é", "日"])
+@pytest.mark.parametrize("length", [300, 5000])
+def test_the_gates_report_lines_are_whole_json_in_one_pipe_write(tmp_path, letter, length):
+    """Each report line is one atomic pipe write (PIPE_BUF: 4096 on Linux,
+    where the gate runs; 512 on macOS). Cutting the encoded line cut through
+    a character's six-byte escape and the report dropped the line (review,
+    2026-09-30: a 300-character non-ASCII socket path). Now a line is UTF-8,
+    a path that fits arrives whole, and one that doesn't is shortened as
+    text, marked with "…", and reported without a flag (a shortened path
+    names another folder)."""
+    import select
+
+    from hlyn.core.guard import Reporter
+
+    target = "/tmp/" + letter * length + "/x.sock"
+    with open(tmp_path / "events", "w+b") as events:
+        reporter = Reporter(events=events.fileno())
+        reporter({"kind": "net", "target": target, "allow": "--write /tmp/" + letter * length,
+                  "why": "unix", "source": "gate", "detail": "d" * 100, "pid": os.getpid()})
+        events.seek(0)
+        lines = events.read().splitlines()
+    sent = json.loads(lines[0])
+    whole = sent["target"] == target
+    print(f"{letter!r} x {length}: {len(lines[0])} bytes (limit {select.PIPE_BUF}), target whole: {whole}, "
+          f"allow: {str(sent['allow'])[:30]!r}")
+    assert len(lines) == 1 and len(lines[0]) < select.PIPE_BUF
+    if whole:
+        assert sent["allow"] == "--write /tmp/" + letter * length
+    else:
+        assert sent["target"].endswith("…") and target.startswith(sent["target"][:-1])
+        assert sent["allow"] is None and len(sent["target"]) >= 20
+    if length == 300 and select.PIPE_BUF >= 4096:
+        assert whole  # where the gate runs, a real socket path's length always fits
+    if length == 5000:
+        assert not whole
+        entry = book(tmp_path, net=[443]).add(Denial("net", sent["target"], op="unix", source="gate",
+                                                     allow="--write /tmp"))
+        print(entry)
+        assert entry is not None and entry.allow is None
+
+
+def test_a_refusal_no_flag_can_allow_says_why_instead_of_same_as_above(tmp_path):
+    """A name the proxy can't check (not a valid host name) has no flag to
+    suggest. Its line said "same as above" with nothing above it (review,
+    2026-09-30); it now says why, and "same as above" is kept for a real
+    repeat of the line before."""
+    report = book(tmp_path, net=["example.com"])
+    report.add(Denial("net", "(invalid host name)", op="not-listed", source="proxy"))
+    alone = report.text(1)
+    print(alone)
+    assert "same as above" not in alone
+    assert "(invalid host name)  the name isn't one hlyn can check, so no --net entry can allow it" in alone
+    report.add(Denial("net", "8.8.8.8:53", op="dns", source="proxy"))
+    report.add(Denial("net", "(also invalid)", op="not-listed", source="proxy"))
+    both = report.text(1)
+    print(both)
+    rows = [line for line in both.splitlines() if line.startswith("  net")]
+    said = [row.split(None, 2)[2] for row in rows]  # in the report's order
+    print(said)
+    assert said[1].endswith("so no --net entry can allow it") and said[2].endswith("same as above")
+    assert "(also invalid)" in rows[1] and "(invalid host name)" in rows[2]
+
+
 def test_a_long_list_is_cut_short_and_points_at_json(tmp_path):
     report = book(tmp_path)
     for i in range(40):
@@ -558,7 +688,8 @@ def test_json_carries_everything(tmp_path):
     out = json.loads(json.dumps(report.json(2)))
     assert out["exit"] == 2
     assert out["blocked"][0]["allow"] == f"--write {tmp_path}"
-    assert set(out) == {"exit", "blocked", "more", "system", "removed_env", "why"}
+    assert set(out) == {"exit", "blocked", "more", "unlogged", "system", "removed_env", "why"}
+    assert out["unlogged"] == 0
 
 
 # ---------------------------------------------------------------------------

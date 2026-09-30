@@ -600,16 +600,20 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
 
                 if not watch:
                     _child(fn, plain, write)
-                gate.become(lambda: _child(fn, plain, write), forward=False, isolate=False,
-                            close=[write], fresh=not alone, log=told)
+                gate.become(lambda: _child(fn, plain, write), forward=gate.DUTY, isolate=False,
+                            group=gate.DUTY, close=[write], fresh=not alone, log=told)
             pid = share.route.pid
 
             def sealed() -> None:
                 closed = _neutral(plan)
                 _seal(plan, _proxied(port), found=found, proxy=(port, pid), closed=closed)
 
-            gate.become(lambda: _child(fn, sealed, write), forward=False, isolate=False,
-                        close=[write], fresh=not alone, log=told)
+            # On Linux the sealed child gets its own process group, away from
+            # the gate and this caller (5.2), and the gate passes on what is
+            # sent to this group (Ctrl-C). Not the terminal: a caller with
+            # threads may be reading it. macOS's gate only waits (gate.DUTY).
+            gate.become(lambda: _child(fn, sealed, write), forward=gate.DUTY, isolate=False,
+                        group=gate.DUTY, close=[write], fresh=not alone, log=told)
 
         os.close(write)
         if told is not None:

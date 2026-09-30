@@ -775,7 +775,10 @@ def _proxied(fd: int, rest: bytes, book: Any) -> bytes:
         try:
             event = json.loads(line)
             if event.get("kind") == "more":
-                book.more += int(event.get("count") or 0)
+                # Report lines the gate had no room for are refusals not
+                # listed, as those past its cap are.
+                book.more += int(event.get("count") or 0) + int(event.get("dropped") or 0)
+                book.unlogged += int(event.get("unlogged") or 0)
                 continue
             source = "gate" if event.get("source") == "gate" else "proxy"
             denial = Denial("net", str(event["target"]), op=str(event["why"]), source=source,

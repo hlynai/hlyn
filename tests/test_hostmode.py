@@ -352,27 +352,37 @@ def test_cli_explains_a_direct_connect_without_a_wrong_flag():
 
 
 def test_row_15_clients_that_ignore_the_proxy_fail_closed():
+    """Clients that never read HTTPS_PROXY connect directly, and are refused
+    by the kernel: EACCES from the gate (Linux), EPERM from Seatbelt (macOS).
+    Both clients must be installed: the child imports them before it seals,
+    and without them the test used to pass on the exception from the import
+    (review, 2026-09-30: the Linux test image had neither)."""
+    pytest.importorskip("urllib3")
+    pytest.importorskip("aiohttp")
     body = PROBE + """
 import asyncio
+import aiohttp
+import urllib3
 try:
-    import urllib3
     urllib3.PoolManager(retries=False, timeout=5).request("GET", "http://1.1.1.1/"); print("urllib3: REACHED")
 except Exception as e:
-    print("urllib3:", type(e).__name__, str(e)[:90])
+    print("urllib3:", type(e).__name__, str(e)[:300])
 try:
-    import aiohttp
     async def go():
         async with aiohttp.ClientSession() as s:  # trust_env=False: ignores HTTPS_PROXY
             async with s.get("http://1.1.1.1/", timeout=aiohttp.ClientTimeout(total=5)) as r:
                 return r.status
     print("aiohttp: REACHED", asyncio.run(go()))
 except Exception as e:
-    print("aiohttp:", type(e).__name__, str(e)[:90])
+    print("aiohttp:", type(e).__name__, str(e)[:300])
 """
-    done = boot("import hlyn\nhlyn.on(net=['api.example.com'], log=False)\n" + body)
+    done = boot("import aiohttp, urllib3, hlyn\nhlyn.on(net=['api.example.com'], log=False)\n" + body)
     print(done.stdout, done.stderr[-800:], sep="\n")
     assert "REACHED" not in done.stdout
-    assert "urllib3:" in done.stdout and "aiohttp:" in done.stdout
+    refused = ("Permission denied", "Operation not permitted", "Errno 13", "Errno 1]")
+    for client in ("urllib3:", "aiohttp:"):
+        said = next(line for line in done.stdout.splitlines() if line.startswith(client))
+        assert any(word in said for word in refused), said
 
 
 def test_row_16_the_agent_cannot_touch_the_helpers_or_another_runs_proxy():
@@ -534,6 +544,57 @@ print(fetch("https://HOST/"), "|", fetch("https://www.iana.org/"))
 # ---------------------------------------------------------------------------
 
 linux = pytest.mark.skipif(sys.platform != "linux", reason="the gate answers connection checks on Linux only")
+
+GROUPS = """
+import json, os, signal, sys, time
+sys.path.insert(0, SRC)
+import hlyn
+caller = os.getpgid(0)
+def fn():
+    got = []
+    signal.signal(signal.SIGINT, lambda *_: got.append("SIGINT"))
+    gate = os.getppid()
+    print(json.dumps({"caller": caller, "gate": os.getpgid(gate), "fn": os.getpgid(0)}), flush=True)
+    end = time.monotonic() + 10
+    while not got and time.monotonic() < end:
+        time.sleep(0.05)
+    print("fn heard:", got, flush=True)
+try:
+    hlyn.run(fn, net=NET, log=False)
+    print("caller: run returned", flush=True)
+except KeyboardInterrupt:
+    print("caller: KeyboardInterrupt", flush=True)
+"""
+
+
+@linux
+@pytest.mark.parametrize("net", [["example.com"], False])
+def test_run_fn_puts_the_sealed_code_in_its_own_process_group_and_ctrl_c_still_reaches_it(net):
+    """5.2: the helpers leave the agent's process group, so nothing the agent
+    sends to its group reaches them. `hlyn.run(fn)` kept the sealed code in
+    the caller's group, with its gate (review, 2026-09-30). Now it has its
+    own group on Linux, and the gate passes on what the caller's group gets,
+    so Ctrl-C (SIGINT to the terminal's group) still reaches `fn` as before.
+    `net=False` has a gate only before Landlock ABI 9."""
+    from hlyn.core import landlock
+
+    if net is False and landlock.abi() >= 9:
+        pytest.skip("no gate with the network off from Landlock ABI 9")
+    code = GROUPS.replace("SRC", repr(SRC)).replace("NET", repr(net))
+    process = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, start_new_session=True)
+    first = process.stdout.readline()
+    groups = json.loads(first) if first.startswith("{") else None
+    if groups is not None:
+        os.killpg(process.pid, signal.SIGINT)  # what Ctrl-C does: the caller's group
+    out, err = process.communicate(timeout=30)
+    print(first + out, err[-1500:])
+    assert groups is not None, "fn never started"
+    assert groups["fn"] != groups["caller"] and groups["fn"] != groups["gate"]
+    assert groups["gate"] == groups["caller"]
+    assert "fn heard: ['SIGINT']" in out
+    assert "caller: KeyboardInterrupt" in out
+
 
 HUNT = """
 import fcntl, os, struct
