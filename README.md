@@ -1,6 +1,6 @@
 # hlyn
 
-**A kernel-enforced sandbox for AI agents.** You list what an agent may read, write, run and reach. The operating system enforces it, and everything else is denied.
+**A kernel-enforced environment for AI agents.** You list what an agent may read, write, run and reach. The operating system enforces it, and everything else is denied.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-lightgrey)
@@ -58,7 +58,7 @@ With hlyn, the answer is "only what you wrote down."
 | Agent runs `curl … \| sh` | Works | Refused unless you allowed that program |
 | Agent reads `OPENAI_API_KEY` from its environment | Works | Removed before it starts, unless you kept it |
 | You grant a folder that holds a `.env`, with the network open | Nothing tells you | hlyn warns before it starts, and says how to fix it |
-| Agent tries to turn the sandbox off | No sandbox to turn off | There is no off switch, not even for hlyn itself |
+| Agent tries to turn the environment off | No environment to turn off | There is no off switch, not even for hlyn itself |
 
 > **The honest caveat.** Naming hosts stops the agent reaching any other host. It can't stop the agent sending data *to* a host you listed: a prompt to `api.openai.com` or a gist on `github.com` looks like normal traffic. So the rule that matters most is still: **don't let the agent read what it shouldn't send.** Grant narrow folders, pass API keys with `--env` rather than a readable `.env`, and let hlyn's [secret warning](#secrets-in-granted-folders) catch the rest. A bare port (`net=[443]`) is weaker again: it reaches every host on that port. [What naming hosts does not stop](#what-naming-hosts-does-not-stop) lists the rest.
 
@@ -246,7 +246,7 @@ hlyn: net: 'https://api.openai.com/v1' is a URL. Give the host name: --net api.o
 
 The same goes for `*` alone or `*.com`, a name that isn't ASCII (write its `xn--` form), IPv4 in octal or hex, and port ranges.
 
-**How it works.** hlyn starts a small proxy for the run and points the agent at it with `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and friends (plus the settings npm, Node and the JVM read). The proxy checks each host and makes the connection itself. Nothing else can leave: on Linux a gate process answers every `connect()` by handing over a connection to the proxy, or refusing; on macOS the sandbox allows only the proxy's port.
+**How it works.** hlyn starts a small proxy for the run and points the agent at it with `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and friends (plus the settings npm, Node and the JVM read). The proxy checks each host and makes the connection itself. Nothing else can leave: on Linux a gate process answers every `connect()` by handing over a connection to the proxy, or refusing; on macOS the environment allows only the proxy's port.
 
 Worth knowing:
 
@@ -389,10 +389,10 @@ How it hears the refusals, and what it can miss:
 
 | | Linux | macOS |
 |---|---|---|
-| Source | A tiny library preloaded into the command and its children | The sandbox's own reports, from the system log |
+| Source | A tiny library preloaded into the command and its children | The environment's own reports, from the system log |
 | Cost | Nothing measurable on calls that succeed | About 50 ms per run |
 | Misses | Statically linked programs (most Go binaries; hlyn says so), and children of a program that clears its own environment | A few percent of reports under heavy system load |
-| With hosts | The proxy and the gate report network refusals from outside the sandbox, whatever the program, static binaries included. Past 1,000 different ones, the rest are counted, not listed | The proxy's refusals, as on Linux; direct connections come from the system log as above |
+| With hosts | The proxy and the gate report network refusals from outside the environment, whatever the program, static binaries included. Past 1,000 different ones, the rest are counted, not listed | The proxy's refusals, as on Linux; direct connections come from the system log as above |
 
 ---
 
@@ -524,7 +524,7 @@ Every error inherits from `hlyn.Error`, so one `except` catches them all. `hlyn.
 | Error | Raised when | The process is |
 |---|---|---|
 | `hlyn.Invalid` | The policy is malformed: a typo, a missing path, a malformed host in `net`, ports and hosts mixed | Untouched |
-| `hlyn.Unsupported` | This machine can't enforce the policy (old kernel, unsupported OS), or can't enforce host names here (libseccomp older than 2.5.0, or already inside another sandbox that filters connections) | Untouched |
+| `hlyn.Unsupported` | This machine can't enforce the policy (old kernel, unsupported OS), or can't enforce host names here (libseccomp older than 2.5.0, or already inside another environment that filters connections) | Untouched |
 | `hlyn.Failed` | The kernel refused to apply the boundary | **Not** confined, so don't continue |
 | `hlyn.Sealed` | You called `on()` twice. The boundary can't be changed once applied. | Already confined |
 
@@ -631,13 +631,13 @@ With hosts, the seal record also names them, the proxy's address and the helpers
 {"t": 1790529261.533, "kind": "seal", "pid": 4703, "backend": "linux", "level": 7, "read": [], "write": [], "exec": ["/usr/bin/true"], "net": ["api.openai.com:443", "localhost:5432"], "env": false, "tmp": "/tmp/hlyn-cga5azni", "proxy": "127.0.0.1:38483", "helpers": [4702, 4700], "closed": 0}
 ```
 
-Repeats are collapsed. The same refusal is written on its 1st, 2nd, 4th, 8th… occurrence with a running count, so a retry loop can't bury the lines that matter. `deny` records are written from outside the sandbox (by `hlyn run`'s own process, or by the proxy and the gate), never by the agent.
+Repeats are collapsed. The same refusal is written on its 1st, 2nd, 4th, 8th… occurrence with a running count, so a retry loop can't bury the lines that matter. `deny` records are written from outside the environment (by `hlyn run`'s own process, or by the proxy and the gate), never by the agent.
 
 ---
 
 ## Known limits
 
-A sandbox that oversells itself is worse than one that doesn't, so here is exactly what hlyn does **not** do:
+An environment that oversells itself is worse than one that doesn't, so here is exactly what hlyn does **not** do:
 
 | Limit | What it means | What to do |
 |---|---|---|
@@ -646,19 +646,19 @@ A sandbox that oversells itself is worse than one that doesn't, so here is exact
 | **Host names on Linux are new** | Tested on x86_64 without Yama so far. aarch64, and kernels with Yama, are designed for but not yet run. | `hlyn probe` says what this machine can do. |
 | **Seal before threads** | A thread started before `on()` would keep its access, so hlyn refuses to seal. | Call `on()` first, or use `hlyn.run(fn)`. |
 | **A granted socket grants its service** | The service behind a socket you allow (e.g. `docker.sock`) can hand the agent anything it can open. | Treat a socket grant like `exec` on that service. |
-| **Writable folders others execute** | Writing into a folder that cron, git hooks or CI later runs is running code outside the sandbox. | Don't grant write to folders something else executes from. |
+| **Writable folders others execute** | Writing into a folder that cron, git hooks or CI later runs is running code outside the environment. | Don't grant write to folders something else executes from. |
 | **Hardlinks** | A hardlink planted inside a granted folder beforehand reaches the file it points at. | Don't share granted folders with untrusted writers, and don't run as root. |
 | **GPU workloads** | CUDA writes under `/proc`, which is closed by default because it exposes the environment. | Grant `write=["/proc"]` and remove secrets at the source. |
 | **macOS: system services with an open network** | Unless the network is open, only measured system services are allowed (no pasteboard, no notifications, the keychain only with a readable keychain file). With `--net-any` every service is, so two agents can pass data through the pasteboard, and an agent can read or replace what you copied. | Name hosts or ports instead of `--net-any`. |
 | **macOS: the start folder's names** | macOS reports a folder's path only to a program that may read the folder, so hlyn lets a program read the folder it starts in: its path and the names in it, not the files or anything below. On Linux the names stay hidden. | Start the agent in a folder whose names you don't mind it seeing. |
-| **macOS: browsers, Electron and `open`** | Chromium registers system services and sandbox extensions of its own, which hlyn's sandbox refuses, so Chrome, Electron apps and browser automation built on them don't run under hlyn on macOS. `open` can't start apps or open URLs in any mode (the app would run outside the sandbox). | Run them outside hlyn. |
+| **macOS: browsers, Electron and `open`** | Chromium registers system services and sandbox extensions of its own, which hlyn's environment refuses, so Chrome, Electron apps and browser automation built on them don't run under hlyn on macOS. `open` can't start apps or open URLs in any mode (the app would run outside the environment). | Run them outside hlyn. |
 | **Reports are not complete** | Linux can't see inside static binaries; macOS drops a few percent of reports. | Neither affects enforcement, only the explanation. |
 
 ### What naming hosts stops, and what it doesn't
 
 This is the threat model from the [design](DESIGN-host-allowlisting.md), in the same words; section numbers refer to it. [SECURITY.md](SECURITY.md) has it too.
 
-**It stops**, for code running inside the sandbox, including code that deliberately races threads:
+**It stops**, for code running inside the environment, including code that deliberately races threads:
 
 - Opening a TCP connection to any host and port not on the list, whether through the proxy, directly, by IP address, or by exploiting a shared port. On Linux the kernel never runs such a connect.
 - Reaching private, loopback, link-local or cloud-metadata addresses through a public name, whether by DNS rebinding or by a name that resolves privately.
@@ -669,7 +669,7 @@ This is the threat model from the [design](DESIGN-host-allowlisting.md), in the 
 - Connections opened before the seal: the sealed child closes them, or `hlyn.on()` refuses.
 - Tricks with how names and addresses are written: case, trailing dots, Unicode confusables, octal, hex or decimal IPv4, IPv4-mapped IPv6, zone IDs, NUL bytes, CRLF.
 - A mismatch between the CONNECT target and the TLS SNI.
-- Using another sandbox's proxy, killing or tracing hlyn's own helpers, or answering its own connection checks.
+- Using another environment's proxy, killing or tracing hlyn's own helpers, or answering its own connection checks.
 - On macOS, system services that resolve names or fetch URLs on the agent's behalf (`com.apple.dnssd.service`, `trustd`): refused (5.4).
 
 #### What naming hosts does not stop
@@ -677,7 +677,7 @@ This is the threat model from the [design](DESIGN-host-allowlisting.md), in the 
 1. **Sending data to an allowed host.** A gist on `github.com`, an object in a bucket under `*.s3.amazonaws.com`, or a prompt sent to `api.openai.com` all look like normal traffic. This is the third leg of the lethal trifecta (private data, untrusted content, a way out). Host allowlisting narrows that way out; it can't close it for a host the agent needs. The mitigation is still hlyn's first rule: don't let the agent read what it shouldn't send. The secret warning stays on. This point is inferred from how network filtering works; the research found no direct citation for it.
 2. **Domain fronting, shared TLS endpoints, HTTP/2 connection coalescing, and ECH on connections that are already open.** Without looking inside TLS, the proxy sees the SNI but not the HTTP `Host`. A 2024 study found fronting still works on 22 of 30 CDNs, Akamai and Fastly among them. Claude Code's own documentation carries the same warning.
 3. **Unix sockets in two corners.** On Linux 7.1 and newer with the network off or limited to ports, no gate runs, and Landlock allows every socket file inside a write-granted folder: a refused socket (a resolver's, D-Bus, `docker.sock`) that sits in one is reachable. `hlyn show` warns when a grant holds one. And before 7.1, a unix datagram socket handed to the agent by a process outside (`SCM_RIGHTS`, over a socket the policy already lets it reach) can send to any socket file by name. Everything else is checked without a race. Every unix `connect()` and `sendto()` naming a path: the gate connects the socket file it checked itself (0 races won in 10 million tries, against 611-781 in 3,000 before). Unix datagram sockets, whose `sendmsg` can name any socket file where no filter can read it: while the network is limited on Linux before 7.1 none can be made, and `hlyn.on()` refuses to seal while one is open (5.3). From 7.1 the kernel checks each datagram's path against the write grants (built, not yet run on a 7.1 kernel). TCP is unaffected.
-4. **Other programs on the same Mac.** On macOS, `localhost:P` also matches the machine's own network addresses. A process outside the sandbox that listens on P at the Mac's LAN address could receive agent traffic.
+4. **Other programs on the same Mac.** On macOS, `localhost:P` also matches the machine's own network addresses. A process outside the environment that listens on P at the Mac's LAN address could receive agent traffic.
 5. **Behind a corporate proxy.** The address checks are skipped when chaining to a corporate proxy (5.5).
 6. **Kernel bugs, side channels, and denial of service against the machine.** These are the same as for the rest of hlyn. For tenants who may be hostile to each other, use a microVM outer boundary; nono and Sandlock both say the same.
 7. **Services you allow on this machine.** An address or `localhost:PORT` entry makes that service part of the boundary. A local HTTP or SOCKS proxy, Tor (9050), Docker's API (2375, 2376), the Kubernetes API (6443) or a kubelet (10250) each give full onward reach. hlyn warns when an entry names one of those ports:
@@ -685,7 +685,7 @@ This is the threat model from the [design](DESIGN-host-allowlisting.md), in the 
    hlyn: localhost:2375 is Docker's API port. An agent that reaches it controls this
      machine. Remove --net localhost:2375 unless you mean it.
    ```
-8. **Other processes on the machine.** Processes outside the sandbox can connect to the proxy's port like any local port, and can write a PROXY header themselves. They reach only the allowlist, which they could reach anyway. Blocks they cause show up in this run's report.
+8. **Other processes on the machine.** Processes outside the environment can connect to the proxy's port like any local port, and can write a PROXY header themselves. They reach only the allowlist, which they could reach anyway. Blocks they cause show up in this run's report.
 9. **Mach services on the macOS allowlist.** Each one is measured before it goes on the list (5.4), but a service that acts for its caller in a way no test covers would be a route out. The list starts empty and stays short.
 
 ---

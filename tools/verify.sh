@@ -12,7 +12,7 @@
 #   - makes a throwaway Python environment in a temporary folder
 #   - installs the wheel there (nothing is installed system-wide)
 #   - runs hlyn's full test suite against it: ~500 checks, most of them
-#     attempts to escape the sandbox, each of which must fail
+#     attempts to escape the environment, each of which must fail
 #   - deletes the temporary folder
 #   - writes hlyn-report.txt next to this script
 #

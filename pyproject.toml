@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "hlyn"
 version = "0.0.1"
-description = "Kernel-enforced sandbox for AI agents: declare what an agent may read, write, run and reach; everything else is denied."
+description = "Kernel-enforced environment for AI agents: declare what an agent may read, write, run and reach; everything else is denied."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = []
 keywords = [
-    "sandbox", "ai-agents", "llm", "security", "containment",
+    "environment", "ai-agents", "llm", "security", "containment",
     "landlock", "seccomp", "seatbelt", "prompt-injection",
 ]
 classifiers = [

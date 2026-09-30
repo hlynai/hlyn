@@ -2,7 +2,7 @@
 """`hlyn run` says what it blocked: end to end, against the real kernel.
 
 Every test here runs the real command line, which confines a real child, and
-reads the report it prints. On macOS the refusals come from the sandbox's own
+reads the report it prints. On macOS the refusals come from the environment's own
 reports in the system log, which drops a few percent of them (see
 `core/oslog.py`), so a macOS test that needs one particular refusal runs the
 command again, up to three times, rather than trusting one report to arrive.
@@ -243,7 +243,7 @@ def test_a_refused_fast_open_send_is_listed(tmp_path):
 
 @pytest.mark.skipif(not MAC, reason="LaunchServices is macOS's")
 def test_opening_a_url_is_refused_and_explained(tmp_path):
-    """`open URL` from inside the sandbox would have the browser, outside it,
+    """`open URL` from inside the environment would have the browser, outside it,
     fetch whatever the URL carries. Seatbelt refuses it (`lsopen`) in every
     mode, even with the network open, and the report says so."""
     done = run(tmp_path, """

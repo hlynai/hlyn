@@ -466,9 +466,10 @@ class Report:
         if kind == "system" and denial.op == "lsopen":
             # macOS: `open`, or LaunchServices called directly. Never allowed
             # in any mode: the app, or the browser for a URL, would run outside
-            # the sandbox, and a URL carries whatever the program puts in it.
+            # the environment, and a URL carries whatever the program puts in it.
             return Entry("exec", "opening an app or URL (open, LaunchServices)", None,
-                         "never allowed: it would run outside the sandbox. Open it yourself, outside hlyn",
+                         "never allowed: it would run outside the environment. "
+                         "Open it yourself, outside hlyn",
                          source=denial.source)
         if kind == "system":
             # The OS's own plumbing (macOS): counted, shown with --json, left
@@ -576,7 +577,7 @@ class Report:
 
     def _gate(self, denial: Denial) -> Entry | None:
         """A refusal by the Linux gate (5.3, 5.9): a direct connection, a
-        unix socket, DNS. The gate is outside the sandbox, but the address
+        unix socket, DNS. The gate is outside the environment, but the address
         and path it reports came from the agent's memory, so they are
         cleaned and every flag is built or checked here."""
         why, where = denial.op, denial.target
@@ -629,7 +630,7 @@ class Report:
         shown = f"TCP {port}" + ("" if anywhere else f" ({safe(rest)})")
         if self.plan.hosts() and sys.platform == "linux" and denial.op not in ("sendto", "sendmsg"):
             # Host mode on Linux: the gate refused this connect, and reports
-            # it itself, from outside the sandbox (`_gate`). The preloaded
+            # it itself, from outside the environment (`_gate`). The preloaded
             # reporter's copy of it would be the same line twice.
             return None
         if self.plan.hosts():

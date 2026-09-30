@@ -394,7 +394,7 @@ FAST_OPEN = """
     import os, socket, sys, hlyn
     r, w = os.pipe()
     if os.fork() == 0:
-        # The listener, outside the sandbox: it reports whether anything arrived.
+        # The listener, outside the environment: it reports whether anything arrived.
         lst = socket.socket(); lst.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         lst.setsockopt(socket.IPPROTO_TCP, socket.TCP_FASTOPEN, 16)
         lst.bind(("127.0.0.1", 0)); lst.listen(4)
@@ -470,7 +470,7 @@ HIGH_BITS = """
     libc = ctypes.CDLL(None, use_errno=True); libc.syscall.restype = ctypes.c_long
     r, w = os.pipe()
     if os.fork() == 0:
-        # A UDP listener outside the sandbox: it reports whether anything arrived.
+        # A UDP listener outside the environment: it reports whether anything arrived.
         lst = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         lst.bind(("127.0.0.1", 0))
         os.write(w, str(lst.getsockname()[1]).encode()); os.close(w)

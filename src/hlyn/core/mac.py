@@ -44,9 +44,9 @@ HOSTS = True
 # sizes rather than contents.
 BASE: tuple[str, ...] = (
     "(allow process-fork)",
-    # Signals within this sandbox: the process, its children and theirs, and
+    # Signals within this environment: the process, its children and theirs, and
     # back. Nothing outside it -- not hlyn, not an unrelated process, not a
-    # second agent sealed by the same policy (each seal is its own sandbox).
+    # second agent sealed by the same policy (each seal is its own environment).
     # That is Landlock's signal scope on Linux. `(target self)` alone left an
     # agent unable to stop what it started: `Popen.terminate()` and
     # `subprocess.run(timeout=...)` failed (tests/test_signals.py).
@@ -89,7 +89,7 @@ RESOLVER = "/private/var/run/mDNSResponder"
 #     that directory's server.
 #   - cfprefsd serves preferences. Without it CoreFoundation reads the plist
 #     files itself, and every run reports those reads. It checks the caller's
-#     sandbox for both reading and writing (measured: `defaults read` and
+#     environment for both reading and writing (measured: `defaults read` and
 #     `defaults write` of a domain outside the grants both fail under the
 #     seal), and does no network work.
 #   - opendirectoryd.membership answers group-membership checks; Swift and
@@ -186,7 +186,7 @@ def probe() -> dict[str, object]:
         "kernel": system.release(),
         "seatbelt": ready(),
         "enforce": ready(),
-        # Signals are scoped to each agent's sandbox, as Landlock scopes them
+        # Signals are scoped to each agent's environment, as Landlock scopes them
         # (`(target same-sandbox)`), and macOS has no abstract sockets. System
         # services are the measured allowlist unless the network is open, so
         # the pasteboard no longer carries data between agents (measured,
@@ -223,7 +223,7 @@ def quote(path: str) -> str:
     if '"' in path or "\\" in path:
         # SBPL has no dependable escape for these, and a mangled rule is a rule
         # that silently does not apply.
-        raise Invalid(f"path contains a character the sandbox cannot express: {path!r}")
+        raise Invalid(f"path contains a character the environment cannot express: {path!r}")
     return f'"{path}"'
 
 
@@ -296,7 +296,7 @@ def profile(policy: Policy, tag: str | None = None, port: int | None = None) -> 
 
     if refused:
         # Same refusal as the Linux backend, for the same reason: a path the
-        # policy names and the sandbox cannot see is a grant the reader
+        # policy names and the environment cannot see is a grant the reader
         # believes in and the kernel never hears about.
         raise Invalid(
             "these paths do not exist, so they cannot be granted: "
@@ -330,7 +330,7 @@ def profile(policy: Policy, tag: str | None = None, port: int | None = None) -> 
         # and this says so in the log, so the report can explain (5.4).
         # net=False (or an empty port list, which forbids the same thing):
         # HTTPS is impossible either way, so refusing these two services costs
-        # nothing while closing two routes past the sandbox that the blanket
+        # nothing while closing two routes past the environment that the blanket
         # `(allow mach-lookup)` in BASE otherwise leaves open. Both verified
         # live under shipped net=False (FINDINGS.md, "the blanket mach-lookup
         # grant"):
@@ -437,7 +437,7 @@ def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int
         if err.value:
             api.sandbox_free_error(err)
         raise Failed(
-            f"the kernel refused the sandbox profile: {detail}. "
+            f"the kernel refused the environment profile: {detail}. "
             "The process is NOT confined."
         )
     return 1

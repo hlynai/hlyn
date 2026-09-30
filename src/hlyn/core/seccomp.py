@@ -106,7 +106,7 @@ TCP = 6
 # Registers only, so nothing to race (the kernel's own advice for pointer
 # arguments: seccomp.h, SECCOMP_USER_NOTIF_FLAG_CONTINUE). The domain is
 # compared on its low 32 bits, the half the kernel reads. RESEARCH-host-
-# allowlisting.md, "Unix datagram sockets", has how other sandboxes do this.
+# allowlisting.md, "Unix datagram sockets", has how other environments do this.
 SEQPACKET = 5
 UNIX_KINDS = (STREAM, SEQPACKET)
 
@@ -398,9 +398,9 @@ def alone() -> None:
 
 # The refusal when this process is already inside a seccomp notifier (5.2).
 BUSY = (
-    "can't restrict hosts here: this process is already inside a sandbox that filters "
+    "can't restrict hosts here: this process is already inside an environment that filters "
     "connections (a host-mode hlyn run, LXD, Sysbox, nono or Sandlock), and Linux allows "
-    "only one. The outer sandbox's rules still apply. Use ports (--net 443) or net=False "
+    "only one. The outer environment's rules still apply. Use ports (--net 443) or net=False "
     "here, or run hlyn outside it."
 )
 

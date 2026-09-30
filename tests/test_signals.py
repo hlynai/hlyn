@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Signals: an agent controls what it started, and nothing else.
 
-The boundary is the sandbox itself, as Landlock's signal scope draws it on
+The boundary is the environment itself, as Landlock's signal scope draws it on
 Linux (ABI 6) and Seatbelt's `(target same-sandbox)` on macOS: a confined
 process may signal itself, its children and theirs, and they may signal it
 back; it may not signal a process outside -- one it didn't start, hlyn
@@ -107,7 +107,7 @@ def test_an_agent_signals_what_it_started_and_nothing_else(tmp_path, net):
     agent.write_text(AGENT)
     grants = ["--read", str(tmp_path), "--write", str(box), "--exec", PY, "--exec", "/bin/sleep", *net]
 
-    # Outside the agent's sandbox: a process of the same user, and a second
+    # Outside the agent's environment: a process of the same user, and a second
     # agent confined by exactly the same policy in a run of its own.
     unrelated = subprocess.Popen([PY, "-c", TARGET, str(box)], stdout=subprocess.PIPE, text=True)
     peer = hlyn(*grants, "--", PY, str(target), str(box))

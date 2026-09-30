@@ -643,7 +643,8 @@ def nested():
 print(hlyn.run(nested, net=["api.example.com"], exec=[sys.executable], read=[{SRC!r}], log=False))
 """)
     print(done.stdout, done.stderr[-800:], sep="\n")
-    assert "inner refused: can't restrict hosts here: this process is already inside a sandbox" in done.stdout
+    assert ("inner refused: can't restrict hosts here: this process is already inside an environment"
+            in done.stdout)
     assert ("Use ports (--net 443) or net=False here, or run hlyn outside it. "
             "Nothing was sealed.") in done.stdout
 

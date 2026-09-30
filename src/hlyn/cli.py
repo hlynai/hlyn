@@ -756,7 +756,7 @@ def _proxied(fd: int, rest: bytes, book: Any) -> bytes:
 
     The gate's lines (Linux, 5.9) name the program and say how many times;
     its last line counts what it didn't keep. Both helpers sit outside the
-    sandbox, but what they report comes from the agent (a host name, a
+    environment, but what they report comes from the agent (a host name, a
     path), so the report checks every flag it is handed."""
     from .report import Denial
 

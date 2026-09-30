@@ -4,7 +4,7 @@
 #
 # A passing suite says the code does what the tests ask. This says something
 # stronger -- that the tests would catch the code doing something else. For a
-# sandbox that matters more than usual, because the failure mode is a boundary
+# environment that matters more than usual, because the failure mode is a boundary
 # that is quietly wider than intended, and a test that never checks the absence
 # of a right passes just as green as one that does.
 #

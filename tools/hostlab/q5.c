@@ -34,7 +34,7 @@ int main(void) {
     int abi = syscall(SYS_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
     FILE *f = fopen("/proc/sys/net/ipv4/tcp_fastopen", "r"); int tfo = -1; if (f) { fscanf(f, "%d", &tfo); fclose(f); }
     printf("Landlock ABI %d, net.ipv4.tcp_fastopen=%d\n", abi, tfo);
-    // Listener set up before the sandbox, accepting TFO data in the SYN.
+    // Listener set up before the environment, accepting TFO data in the SYN.
     lst = socket(AF_INET, SOCK_STREAM, 0); int one = 1, q = 16;
     setsockopt(lst, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     setsockopt(lst, IPPROTO_TCP, TCP_FASTOPEN, &q, sizeof q);

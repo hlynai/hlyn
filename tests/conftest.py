@@ -108,7 +108,7 @@ def jail(
     # instead of letting a broken test masquerade as a passing one.
     for fault in ("SyntaxError", "IndentationError", "ModuleNotFoundError", "NameError"):
         if fault in done.stderr:
-            raise AssertionError(f"the test body is broken, not the sandbox:\n{done.stderr}")
+            raise AssertionError(f"the test body is broken, not the environment:\n{done.stderr}")
     skip_if_too_old(done)
     return done
 
@@ -130,7 +130,7 @@ def boot(code: str) -> subprocess.CompletedProcess:
     )
     for fault in ("SyntaxError", "IndentationError", "ModuleNotFoundError", "NameError"):
         if fault in done.stderr:
-            raise AssertionError(f"the test body is broken, not the sandbox:\n{done.stderr}")
+            raise AssertionError(f"the test body is broken, not the environment:\n{done.stderr}")
     skip_if_too_old(done)
     return done
 

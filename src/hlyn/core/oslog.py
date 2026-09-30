@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Hearing refusals on macOS: the sandbox's own reports, from the system log.
+"""Hearing refusals on macOS: the environment's own reports, from the system log.
 
 Seatbelt writes every refusal to the unified log, from the kernel, naming the
 process, the operation and the path:
@@ -19,9 +19,9 @@ Four things about reading it were found by measurement, not documentation
 - **Every refusal carries our tag.** The profile's `(deny default)` is given
   `(with message TAG)`, and Seatbelt appends TAG to each report it makes --
   for the command and for every process it starts, since they inherit the
-  sandbox. That scopes the stream to this run exactly, with no process-tree
+  environment. That scopes the stream to this run exactly, with no process-tree
   bookkeeping, and the tag is written by the kernel: the agent cannot forge a
-  report from the `Sandbox` sender.
+  report from the `Environment` sender.
 - **It is best-effort.** A few percent of reports never arrive, more when the
   log daemon is busy. When the end marker is late, the report says the list
   may be incomplete; a report that simply went missing cannot be detected.
@@ -98,7 +98,7 @@ def parse(line: str, tag: str) -> Denial | None:
     sender = event.get("senderImagePath")
     if not isinstance(message, str) or not isinstance(sender, str):
         return None
-    # Only the sandbox itself, never a process that wrote something similar.
+    # Only the environment itself, never a process that wrote something similar.
     if not sender.endswith("/Sandbox") or event.get("processImagePath") != "/kernel":
         return None
     body, _, last = message.rpartition("\n")
@@ -131,7 +131,7 @@ def parse(line: str, tag: str) -> Denial | None:
 
 
 class Listener:
-    """Streams the sandbox's reports for one tagged run."""
+    """Streams the environment's reports for one tagged run."""
 
     source = "kernel"
 

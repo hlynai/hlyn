@@ -3,6 +3,7 @@
 - **Usable without reading docs.** One line (`hlyn.on()` / `hlyn run -- cmd`) must give a safe, working minimum. Defaults stay strict and sensible; every extra need is one more simple, obvious argument. Easy by default, fully configurable when wanted.
 - **Every message tells the user what to do next.** Errors and refusals name the flag or field that would change the outcome.
 - **Human output by default, `--json` for machines**, on every command that prints data.
+- **Never say "sandbox"; say "environment".** In code, comments, docs, messages, tests, commits and anything written about hlyn, what hlyn creates is an *environment*: "the agent's environment", "outside the environment", "confined" for the adjective (never "sandboxed"). The only exceptions are names that belong to someone else and must match exactly: Apple's API and profile syntax (`sandbox_init`, `sandbox-exec`, `(target same-sandbox)`), the macOS log sender `Sandbox`, other products' names (Docker Sandboxes, Anthropic's sandbox-runtime), URLs and verbatim quotes.
 - **Prefer battle-tested over custom.** Before building anything non-trivial, and always for anything security-critical, look for a proven, maintained solution: a kernel facility, a standard, a widely deployed library or tool. Use it, or follow its pattern. Write custom code only for the gap it leaves, and record in the design doc or commit why the proven option didn't fit.
 
 ## Findings (engineering memory)

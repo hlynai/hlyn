@@ -619,7 +619,7 @@ def event(message, sender=SANDBOX, process="/kernel"):
     return json.dumps({"eventMessage": message, "senderImagePath": sender, "processImagePath": process})
 
 
-def test_a_sandbox_report_parses():
+def test_a_seatbelt_report_parses():
     found = oslog.parse(event(f"Sandbox: python3(4211) deny(1) file-read-data /Users/k/a b.txt\n{TAG}"), TAG)
     assert found == Denial("read", "/Users/k/a b.txt", "file-read-data", "python3", 4211, 1, "kernel")
 

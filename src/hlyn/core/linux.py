@@ -215,7 +215,7 @@ def watched(policy: Policy) -> bool:
     Landlock can't check socket files (ABI 9, Linux 7.1). Before that a
     confined program reached any unix socket on the machine, among them the
     user's systemd bus and docker.sock, each a way to run code outside the
-    sandbox (FINDINGS.md, "Checking the eight decisions").
+    environment (FINDINGS.md, "Checking the eight decisions").
 
     False where no gate can be installed: libseccomp before 2.5, or this
     process already inside a notification listener (the kernel allows one

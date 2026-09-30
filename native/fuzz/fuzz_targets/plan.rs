@@ -4,7 +4,7 @@
 //! Reads the caller's arrays, opens every path, assembles the ruleset, and
 //! stops. The last step is left out because it cannot be taken twice: one
 //! successful `restrict_self` would confine the fuzzer, and every input after
-//! it would be measuring the sandbox instead of the code.
+//! it would be measuring the environment instead of the code.
 //!
 //! Arbitrary bytes almost never name a path that exists, so paths are drawn
 //! from a table of real ones as well. Without that the fuzzer spends its whole

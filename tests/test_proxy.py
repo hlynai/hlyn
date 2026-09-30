@@ -1276,7 +1276,7 @@ def _confined(pid: int) -> str:
         import ctypes
 
         libc = ctypes.CDLL(None)
-        return "sandboxed" if libc.sandbox_check(pid, None, 0) == 1 else "not sandboxed"
+        return "confined" if libc.sandbox_check(pid, None, 0) == 1 else "not confined"
     with open(f"/proc/{pid}/status") as fh:
         lines = {line.split(":")[0]: line.split(":", 1)[1].strip() for line in fh}
     return f"NoNewPrivs={lines['NoNewPrivs']} Seccomp={lines['Seccomp']}"
@@ -1304,7 +1304,7 @@ def test_the_helper_seals_itself_serves_and_exits_with_its_caller():
         assert isinstance(ready["own"], int) and ready["own"] > 0, "own addresses unreadable once sealed"
         confined = _confined(helper.pid)
         print("confinement:", confined)
-        assert confined in ("sandboxed", "NoNewPrivs=1 Seccomp=2")
+        assert confined in ("confined", "NoNewPrivs=1 Seccomp=2")
 
         async def use():
             return await talk(ready["port"], connect(f"localhost:{far.port}") + b"ping", 0.5), \

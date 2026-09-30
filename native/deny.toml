@@ -10,7 +10,7 @@
 version = 2
 # A yanked crate is one the author withdrew. Sometimes that is a trivial
 # packaging mistake and sometimes it is a security hole; either way it is not
-# something to link into a sandbox without noticing.
+# something to link into an environment without noticing.
 yanked = "deny"
 
 [licenses]

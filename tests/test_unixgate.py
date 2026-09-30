@@ -4,7 +4,7 @@
 Landlock checks socket files only from ABI 9 (Linux 7.1). Before that, with
 `net=False` (the default) or ports, a confined program reached any unix
 socket on the machine: measured 2026-09-28, the user's systemd bus (which
-can start a program outside the sandbox) and `docker.sock` (root, for a
+can start a program outside the environment) and `docker.sock` (root, for a
 member of the docker group). So on those kernels every entry point starts
 the gate for these modes too, and a unix connect gets host mode's rules: a
 write grant on the folder, never a refused socket, connected by the gate

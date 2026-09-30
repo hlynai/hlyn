@@ -590,7 +590,7 @@ mod tests {
     fn writing_a_directory_grants_what_an_atomic_write_needs() {
         // Every editor, compiler, and package manager writes by renaming a
         // temporary file into place. Without Refer that rename is refused and
-        // the sandbox looks broken rather than strict.
+        // the environment looks broken rather than strict.
         let dir = on_dir(writable);
         for right in [
             AccessFs::WriteFile,

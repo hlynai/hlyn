@@ -386,7 +386,7 @@ def reaches(plan: Policy) -> list[str]:
             where = f"--write {folder} covers"
         out.append(
             f"hlyn: {where} {path}, a socket whose program acts for its caller (it can run "
-            f"things outside the sandbox). Linux lets a confined program connect to any socket "
+            f"things outside the environment). Linux lets a confined program connect to any socket "
             f"in a write-granted folder. Grant a narrower folder unless you mean it."
         )
     return out

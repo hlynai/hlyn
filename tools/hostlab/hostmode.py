@@ -5,7 +5,7 @@ A prototype of the host-mode Seatbelt profile (design 5.4): hlyn's base
 profile with the blanket `(allow mach-lookup)` removed, no mDNSResponder,
 and TCP allowed only to the proxy's port. Each client then runs through a
 real proxy (`python -m hlyn.proxy`, unsealed here) with HTTPS_PROXY set, and
-the script prints what worked and what the sandbox refused (from `log
+the script prints what worked and what the environment refused (from `log
 stream`, scoped by a tag, as oslog.py does).
 
     python3 tools/hostlab/hostmode.py            # every probe
@@ -36,7 +36,7 @@ def profile(port, tag, extra=()):
 
 
 def denials(tag, run):
-    """Run `run()` while streaming the log; return the Sandbox lines tagged `tag`."""
+    """Run `run()` while streaming the log; return the Environment lines tagged `tag`."""
     stream = subprocess.Popen(["/usr/bin/log", "stream", "--style", "ndjson", "--predicate",
                                'sender == "Sandbox"'], stdout=subprocess.PIPE, text=True)
     time.sleep(1.5)  # crude: oslog.py proves readiness with a marker; enough for a lab

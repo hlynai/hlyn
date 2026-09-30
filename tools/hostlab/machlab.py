@@ -5,7 +5,7 @@ Each client runs under hlyn's own macOS profile with the blanket
 `(allow mach-lookup)` replaced by an allowlist that starts empty. The
 policy grants everything else the client could want (read everywhere, its
 own scratch folders, any program, the network ports it uses), so a failure
-is a missing service. The allowlist grows from the Sandbox's denials until
+is a missing service. The allowlist grows from the Environment's denials until
 the client succeeds, then is minimised: each service is dropped in turn and
 kept only if the client then fails.
 
