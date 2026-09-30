@@ -66,9 +66,10 @@ BASE: tuple[str, ...] = (
     # links Foundation maps it at startup; without it each launch logs a
     # denial and carries on.
     '(allow ipc-posix-shm-read-data (ipc-posix-name "apple.shm.notification_center"))',
-    # The system log's socket. Logging is already reachable through Mach
-    # (allowed above), so this adds no new way out; refusing it only turns
-    # every program's log call into a denial.
+    # The system log's socket, which carries a program's syslog() messages
+    # to the system log; refusing it only turns every such call into a
+    # denial. Mach services are a measured allowlist (`MACH` below) unless
+    # the network is open; the system log's service isn't on it.
     '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/syslog")))',
 )
 
