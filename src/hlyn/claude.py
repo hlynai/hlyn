@@ -141,7 +141,7 @@ def policy(binary: str, env: MutableMapping[str, str], tmp: str) -> Policy:
     keep = sorted(
         name for name in env
         if name.startswith(("ANTHROPIC_", "CLAUDE_"))
-        or name in ("DISABLE_TELEMETRY", "IS_SANDBOX", "SHELL", "xcrun_db")
+        or name in ("DISABLE_TELEMETRY", "IS_SANDBOX", "SHELL", "TMPPREFIX", "xcrun_db")
     )
     return Policy(
         read=tuple(read),
@@ -187,6 +187,9 @@ def prepare(env: MutableMapping[str, str]) -> str:
     box = tempfile.mkdtemp(prefix="hlyn-claude-")
     env["CLAUDE_CODE_TMPDIR"] = box
     env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    # zsh, the macOS default shell, makes its here-document files at
+    # $TMPPREFIX* (/tmp/zsh by default), not under TMPDIR.
+    env.setdefault("TMPPREFIX", os.path.join(box, "zsh"))
     if sys.platform == "darwin":
         # xcrun (behind /usr/bin/git) caches in the per-user temporary folder
         # every app shares, and prints an error on each call when refused.

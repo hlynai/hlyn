@@ -149,6 +149,42 @@ print("WENT ON")
     assert not killed(done) and "WENT ON" in done.stdout
 
 
+def test_typing_into_the_terminal_is_refused():
+    # TIOCSTI pushes bytes into a terminal's input, where the user's shell
+    # reads them after the agent exits. The terminal here is a fresh pty made
+    # the process's own controlling terminal (TIOCSTI needs that), in raw mode
+    # so a single byte is readable. The second request has high bits set,
+    # which the kernel ignores (CVE-2019-10063). Unconfined, both land.
+    code = RAW + """
+import errno, os
+for request in (0x5412, 0xdead00005412):
+    byte = ctypes.c_char(b'Z')
+    rc = call(nr, term, request, ctypes.addressof(byte))
+    print(hex(request), rc, errno.errorcode.get(ctypes.get_errno()) if rc < 0 else 'accepted')
+os.set_blocking(term, False)
+try:
+    print('input now', os.read(term, 16))
+except BlockingIOError:
+    print('input now empty')
+"""
+    before = """
+import os, tty
+os.setsid()
+mine, theirs = os.openpty()
+term = os.open(os.ttyname(theirs), os.O_RDWR)  # the controlling terminal now
+tty.setraw(term)
+nr = seccomp._nr('ioctl')
+"""
+    control = jail(code, before=before, seal="")
+    done = jail(code, before=before)
+    print("unconfined:\n" + control.stdout + control.stderr)
+    print("confined:\n" + done.stdout + done.stderr)
+    assert "0x5412 0 accepted" in control.stdout and "input now b'ZZ'" in control.stdout
+    assert "0x5412 -1 EPERM" in done.stdout
+    assert "0xdead00005412 -1 EPERM" in done.stdout
+    assert "input now empty" in done.stdout and not killed(done)
+
+
 def test_a_syscall_from_the_wrong_architecture_kills_the_whole_process():
     # libseccomp's default for a call made through another architecture's
     # convention (ia32's int 0x80 on x86_64) is KILL_THREAD, which seccomp(2)

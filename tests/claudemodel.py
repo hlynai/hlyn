@@ -45,6 +45,7 @@ class Model:
         self.steps = list(steps)
         self._lock = threading.Lock()
         self._requests: list[dict[str, Any]] = []
+        self.headers: list[dict[str, str]] = []  # each request's, in order
         self._server = _server(self)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -189,6 +190,8 @@ def _server(model: Model) -> ThreadingHTTPServer:
                 if urlsplit(self.path).path != "/v1/messages" or not isinstance(request, dict):
                     raise ValueError("expected an Anthropic /v1/messages request")
                 model.record(request)
+                with model._lock:
+                    model.headers.append({k.lower(): v for k, v in self.headers.items()})
                 answer = message(model, request)
                 if request.get("stream"):
                     self.reply(200, event_stream(answer), "text/event-stream")

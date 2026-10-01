@@ -541,3 +541,39 @@ print(hlyn.run(look, log=False))
     assert got["names"] == ["below", "secret.txt"]
     assert got["read a file"] == "PermissionError"
     assert got["list below"] == "PermissionError"
+
+
+def test_the_terminal_can_be_controlled_but_not_typed_into():
+    # Raw mode, size and foreground group: every full-screen program needs
+    # them, and Claude Code read no keys without them. TIOCSTI stays refused:
+    # it types into the terminal for the user's shell to read later. The
+    # terminal is a fresh pty made this process's controlling terminal.
+    # Removing the allow fails the first two lines; removing the TIOCSTI
+    # deny doesn't fail the third (deny-default refuses it anyway, measured),
+    # so that line pins the outcome, whichever rule gives it.
+    code = """
+import errno, fcntl, os, termios, tty
+print('foreground', 'ok' if os.tcgetpgrp(term) == os.getpgrp() else 'other')
+old = termios.tcgetattr(term)
+tty.setraw(term)
+termios.tcsetattr(term, termios.TCSADRAIN, old)
+print('raw mode ok')
+try:
+    fcntl.ioctl(term, termios.TIOCSTI, b'Z')
+    print('TIOCSTI accepted')
+except OSError as e:
+    print('TIOCSTI', errno.errorcode[e.errno])
+"""
+    before = """
+import os
+os.setsid()
+mine, theirs = os.openpty()
+term = os.open(os.ttyname(theirs), os.O_RDWR)  # the controlling terminal now
+"""
+    control = jail(code, before=before, seal="")
+    done = jail(code, before=before, seal=SEAL)
+    print("unconfined:\n" + control.stdout + control.stderr)
+    print("confined:\n" + done.stdout + done.stderr)
+    assert "TIOCSTI accepted" in control.stdout
+    assert "foreground ok" in done.stdout and "raw mode ok" in done.stdout
+    assert "TIOCSTI EPERM" in done.stdout

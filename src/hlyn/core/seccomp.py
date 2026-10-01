@@ -128,6 +128,11 @@ SENDS = {"sendto": 3, "sendmsg": 2, "sendmmsg": 3}
 # and has nothing to match against when there is no path.
 EMPTY = 0x1000  # AT_EMPTY_PATH
 
+# ioctl requests that type into the terminal (see `_build`).
+TIOCSTI = 0x5412
+TIOCLINUX = 0x541C
+TERMINAL = (TIOCSTI, TIOCLINUX)
+
 # clone(2) flags that build a new namespace. Each is refused individually
 # because a masked comparison can only test for equality, not for "any of".
 NEW = {
@@ -532,6 +537,16 @@ def _build(policy: Policy, watch: bool = False, datagrams: bool = False) -> int:
         # keeps working. `memfd_create` itself stays open: making anonymous
         # memory is not the dangerous step, and shared-memory users need it.
         _rule(ctx, KILL, "execveat", [Arg(4, MASKED, EMPTY, EMPTY)])
+
+        # Typing into the terminal: TIOCSTI pushes bytes into its input, which
+        # the user's shell reads after the agent exits, and TIOCLINUX can do
+        # the same on a virtual console. Landlock's device-ioctl right doesn't
+        # cover the terminal the agent inherits. Refused as Flatpak refuses
+        # them, on the low 32 bits only: the kernel ignores the rest of the
+        # command, and a filter that compared all 64 was passed with high bits
+        # set (CVE-2019-10063).
+        for request in TERMINAL:
+            _rule(ctx, ERROR | EPERM, "ioctl", [Arg(1, MASKED, LOW, request)])
 
         # Socket families outside what `net` describes, whatever `net` says.
         for domain in range(FAMILIES):

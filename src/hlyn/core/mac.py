@@ -71,6 +71,16 @@ BASE: tuple[str, ...] = (
     # denial. Mach services are a measured allowlist (`MACH` below) unless
     # the network is open; the system log's service isn't on it.
     '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/syslog")))',
+    # Controlling the terminal the agent was started on: its mode (raw for
+    # every full-screen program: Claude Code, vim, less), size and foreground
+    # group. Refused, `tcgetpgrp(0)` failed with EPERM and Claude Code's
+    # input was never read (FINDINGS.md, "hlyn claude"). Except TIOCSTI,
+    # which types into the terminal for the shell to read after the agent
+    # exits: the deny comes after the allow, so it wins. Measured: a
+    # deny-default profile refuses TIOCSTI even without this line (some other
+    # operation gates it; not identified), so this is the second guard.
+    '(allow file-ioctl (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))',
+    "(deny file-ioctl (ioctl-command #x80017472))",
 )
 
 # The system resolver's socket. Every name lookup on macOS goes through it.
