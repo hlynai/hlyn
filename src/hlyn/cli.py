@@ -740,17 +740,16 @@ def _examples() -> list[str]:
     return [f"--read {folder}", "--net github.com", "--write ./dist"]
 
 
-def _ask(no: bool, first: bool = True) -> bool | list[str]:
+def _ask(first: bool = True) -> bool | list[str]:
     """Ask whether to start. True, False, or more flags to add (as typed).
-    `no` makes no the answer to a bare Enter: starting somewhere risky. The
-    question and its examples are printed with `first`; asking again after a
-    mistake is only the prompt."""
+    Only a y starts it; a bare Enter asks again. The question and its examples
+    are printed with `first`; asking again after a mistake is only the prompt."""
     import shlex
 
     from .term import Paint
 
     paint = Paint(sys.stderr)
-    keys = "Enter: no · y: yes" if no else "Enter: yes · n: no"
+    keys = "y: start · n: stop"
     meaning = ("let it read that folder", "let it reach that host", "let it write there too")
     while True:
         if first:
@@ -767,7 +766,9 @@ def _ask(no: bool, first: bool = True) -> bool | list[str]:
             return False  # end of input: never start on a guess
         typed = line.strip()
         if not typed:
-            return not no
+            # Enter alone is never a yes: starting takes a y, so a stray key can't start it.
+            print("  hlyn: type y to start or n to stop.", file=sys.stderr)
+            continue
         if typed.lower() in ("y", "yes"):
             return True
         if typed.lower() in ("n", "no", "q", "quit"):
@@ -1111,7 +1112,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
             if not again:
                 print(claude.describe(plan, base, signed, mine, found(plan, known), log_to, sys.stderr),
                       file=sys.stderr)
-            answer = _ask(no=bool(claude.risky(os.getcwd())), first=not again)
+            answer = _ask(first=not again)
             again = False
             if answer is True:
                 break

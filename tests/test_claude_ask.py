@@ -101,11 +101,20 @@ def test_yes_starts_it(place):
     assert "CLAUDE RAN" in screen and code == 0
 
 
-def test_enter_starts_it_in_a_project(place):
+def test_enter_alone_never_starts_it(place):
+    # A stray Enter is not a yes: it is asked again, and only a y starts it.
     _home, work, env = place
-    _code, screen = typed(work, env, "")
+    _code, screen = typed(work, env, "", "", "n")
     print(screen)
-    assert "Enter: yes" in screen and "CLAUDE RAN" in screen
+    assert "y: start" in screen and screen.count("type y to start or n to stop") == 2
+    assert "CLAUDE RAN" not in screen and "hlyn: not started." in screen
+
+
+def test_enter_then_y_starts_it(place):
+    _home, work, env = place
+    code, screen = typed(work, env, "", "y")
+    print(screen)
+    assert "type y to start or n to stop" in screen and "CLAUDE RAN" in screen and code == 0
 
 
 def test_access_added_at_the_question_is_shown_then_used(place):
@@ -157,14 +166,15 @@ def test_something_that_is_neither_asks_again(place):
     assert "type y to start, n to stop" in screen and "CLAUDE RAN" not in screen
 
 
-def test_in_the_home_folder_it_warns_and_enter_means_no(place):
+def test_in_the_home_folder_it_warns_and_enter_does_not_start(place):
     # The folder it starts in is granted whole. The real run that prompted
     # this was started in ~, and Claude Code got all of it.
     home, _work, env = place
-    _code, screen = typed(home, env, "")
+    _code, screen = typed(home, env, "", "n")
     print(screen)
     assert "your home folder" in screen
-    assert "Enter: no" in screen and "hlyn: not started." in screen and "CLAUDE RAN" not in screen
+    assert "type y to start or n to stop" in screen
+    assert "hlyn: not started." in screen and "CLAUDE RAN" not in screen
 
 
 def test_risks_are_listed_last_and_short(place):
