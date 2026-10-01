@@ -323,3 +323,13 @@ def test_whose_names_only_network_refusals_and_only_known_hosts():
     assert claude.whose(refused("net", "mcp.example.org"), hosts) == "the thing"
     assert claude.whose(refused("net", "other.example.org:443"), hosts) == ""
     assert claude.whose(refused("read", "mcp.example.org:443"), hosts) == ""
+
+
+def test_the_right_hand_column_lines_up_across_rows(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "100")
+    text = report(refused("net", "a.example:443", "--net a.example"),
+                  refused("net", "much-longer-host.example.org:443", "--net much-longer-host.example.org"),
+                  refused("read", "/opt/x", "--read /opt/x")).brief(0, stream=Tty(False))
+    print(text)
+    starts = {ln.index("--") for ln in text.splitlines() if ln.startswith("  ✗")}
+    assert len(starts) == 1, starts

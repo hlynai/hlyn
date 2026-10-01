@@ -959,15 +959,18 @@ class Report:
         lines = ["", paint(f"Claude Code {how}. hlyn blocked "
                            f"{count} thing{'s' if count != 1 else ''}:", "bold"), ""]
         words = {"read": "read", "write": "write", "exec": "run", "net": "network", "bind": "listen"}
+        rows = []
         for e in items:
             source = who(e) if who else ""
             right = source or e.allow or ("kept closed: a credential" if e.credential else (e.note or ""))
-            right = squeeze(right, max(20, cols // 3))
-            room = cols - 5 - 9 - len(right) - 2
+            rows.append((e, source, squeeze(right, max(20, cols // 3))))
+        side = max(len(right) for _, _, right in rows)  # one right-hand column, so it lines up
+        room = cols - 5 - 9 - side - 2
+        for e, source, right in rows:
             target = squeeze(e.target.removesuffix(":443") if e.kind == "net" else e.target, room)
             mark = paint("✗", "red", "bold")
             what = f"{words.get(e.kind, e.kind):<9}"
-            gap = " " * max(2, room - len(target) + 2)
+            gap = " " * (room - len(target) + 2)
             colour = "cyan" if e.allow and not source else "dim"
             lines.append(f"  {mark}  {what}{target}{gap}{paint(right, colour)}")
         if self.more:
