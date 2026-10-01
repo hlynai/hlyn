@@ -65,11 +65,11 @@ def typed(where, env, *answers, flags=()):
         return True
 
     for answer in answers:
-        # Wait for the question rather than a fixed time: the policy is
+        # Wait for the prompt rather than a fixed time: the policy is
         # resolved first, and that takes longer on a busy machine.
         end = time.time() + 30
-        asked = seen.count(b"Start Claude Code?")
-        while seen.count(b"Start Claude Code?") == asked and time.time() < end and pump(0.2):
+        asked = seen.count(b"  > ")
+        while seen.count(b"  > ") == asked and time.time() < end and pump(0.2):
             pass
         try:
             os.write(fd, answer.encode() + b"\r")
@@ -123,7 +123,31 @@ def test_a_mistyped_flag_says_so_and_asks_again(place):
     _code, screen = typed(work, env, "--reed ~/docs", "n")
     print(screen)
     assert "can't add --reed" in screen
-    assert screen.count("Start Claude Code?") == 2 and "CLAUDE RAN" not in screen
+    # The mistake is answered at the prompt: the table and the examples are not drawn again.
+    assert screen.count("Start Claude Code?") == 1 and screen.count("hlyn claude: Claude Code, confined") == 1
+    assert screen.count("\n  > ") == 2 and "CLAUDE RAN" not in screen
+
+
+def test_the_examples_come_from_this_machine(place):
+    home, work, env = place
+    (home / "Documents").mkdir()
+    _code, screen = typed(work, env, "n")
+    print(screen)
+    assert "--read ~/Documents" in screen and "let it read that folder" in screen
+    assert "--net github.com" in screen and "--write ./dist" in screen
+    assert "../other-project" not in screen
+    (home / "Documents").rmdir()
+    _code, none = typed(work, env, "n")
+    assert "--read ../other-project" in none and "~/Documents" not in none
+
+
+def test_flags_that_work_draw_the_table_again_with_them(place):
+    home, work, env = place
+    (home / "docs").mkdir()
+    _code, screen = typed(work, env, "--read ~/docs", "n")
+    print(screen)
+    assert screen.count("hlyn claude: Claude Code, confined") == 2
+    assert screen.count("Start Claude Code?") == 2
 
 
 def test_something_that_is_neither_asks_again(place):

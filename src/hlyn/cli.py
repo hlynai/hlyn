@@ -730,18 +730,37 @@ def _signed(had: set[str], note: str | None, env: Any) -> tuple[bool, str]:
     return True, "its own sign-in file in its state folder"
 
 
-def _ask(no: bool) -> bool | list[str]:
+def _examples() -> list[str]:
+    """Flags worth typing at the question, from this machine: a folder you
+    have (the first of the usual ones), a host people commonly need, and a
+    folder of this one to write."""
+    home = [name for name in ("Documents", "Downloads", "Desktop", "Projects", "dev", "src")
+            if os.path.isdir(os.path.expanduser(f"~/{name}"))]
+    folder = f"~/{home[0]}" if home else "../other-project"
+    return [f"--read {folder}", "--net github.com", "--write ./dist"]
+
+
+def _ask(no: bool, first: bool = True) -> bool | list[str]:
     """Ask whether to start. True, False, or more flags to add (as typed).
-    `no` makes no the answer to a bare Enter: starting somewhere risky."""
+    `no` makes no the answer to a bare Enter: starting somewhere risky. The
+    question and its examples are printed with `first`; asking again after a
+    mistake is only the prompt."""
     import shlex
 
     from .term import Paint
 
     paint = Paint(sys.stderr)
     keys = "Enter: no · y: yes" if no else "Enter: yes · n: no"
+    meaning = ("let it read that folder", "let it reach that host", "let it write there too")
     while True:
-        sys.stderr.write(f"\n  {paint('Start Claude Code?', 'bold')}  {keys}\n"
-                         f"  {paint('or add access, e.g.  --read ~/docs --net pypi.org', 'dim')}\n  > ")
+        if first:
+            shown = [f"    {flag:<26}{paint(what, 'dim')}"
+                     for flag, what in zip(_examples(), meaning, strict=True)]
+            sys.stderr.write(f"\n  {paint('Start Claude Code?', 'bold')}  {keys}\n"
+                             f"  {paint('Or give it more first by typing flags, for example:', 'dim')}\n"
+                             + "\n".join(shown) + "\n")
+            first = False
+        sys.stderr.write("  > ")
         sys.stderr.flush()
         line = sys.stdin.readline()
         if not line:
@@ -760,8 +779,7 @@ def _ask(no: bool) -> bool | list[str]:
             continue
         if words and words[0].startswith("-"):
             return words
-        print("  hlyn: type y to start, n to stop, or flags such as --read ~/docs --net pypi.org.",
-              file=sys.stderr)
+        print(f"  hlyn: type y to start, n to stop, or flags such as {_examples()[0]}.", file=sys.stderr)
 
 
 def _more(args: argparse.Namespace, words: list[str]) -> argparse.Namespace:
@@ -1067,6 +1085,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
         # A person at a terminal sees what Claude Code gets and says yes
         # first; a script (or -y) gets the warnings as before.
         asking = not args.yes and sys.stdin.isatty() and sys.stderr.isatty()
+        again = False  # the question again after a mistake: no table, no examples
         while True:
             plan = _policy(args, base)
             if not args.log and not args.no_log:
@@ -1089,9 +1108,11 @@ def _run(argv: Sequence[str] | None = None) -> int:
 
             mine = [path for path in exposed(plan)
                     if not any(under(os.path.realpath(path), os.path.realpath(k)) for k in known)]
-            print(claude.describe(plan, base, signed, mine, found(plan, known), log_to, sys.stderr),
-                  file=sys.stderr)
-            answer = _ask(no=bool(claude.risky(os.getcwd())))
+            if not again:
+                print(claude.describe(plan, base, signed, mine, found(plan, known), log_to, sys.stderr),
+                      file=sys.stderr)
+            answer = _ask(no=bool(claude.risky(os.getcwd())), first=not again)
+            again = False
             if answer is True:
                 break
             if answer is False:
@@ -1101,6 +1122,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
                 args = _more(args, answer)
             except Error as exc:
                 print(f"  hlyn: {exc}", file=sys.stderr)
+                again = True
             print(file=sys.stderr)
         jail.unbuilt(plan)
         jail._ready(plan)
