@@ -359,3 +359,82 @@ def test_the_end_report_box_is_not_ragged(monkeypatch):
     box = [ln for ln in text.splitlines() if ln.strip() and ln.strip()[0] in "┌├└│"]
     assert len({len(ln) for ln in box}) == 1, "the box is ragged"
     assert {ln.index("│", 5) for ln in box if ln.strip().startswith("│")} == {box[1].index("│", 5)}
+
+
+# --- every branch of the end report, each pinned by a planted bug -----------------
+
+def test_the_heading_counts_refusals_past_the_listed_limit_and_says_so():
+    from hlyn.report import LIMIT
+
+    book = report(*(refused("read", f"/opt/many/f{n}", f"--read /opt/many/f{n}") for n in range(LIMIT + 3)))
+    text = book.brief(0, stream=Tty(False))
+    print(text.splitlines()[:3], text.splitlines()[-4:])
+    assert book.more == 3, book.more
+    assert f"hlyn blocked {LIMIT + 3} things:" in text
+    assert f"and 3 more, past the first {LIMIT}" in text
+
+
+def test_a_failed_run_says_its_exit_code():
+    text = report(refused("net", "example.com:443", "--net example.com")).brief(7, stream=Tty(False))
+    print(text)
+    assert "Claude Code exited with code 7. hlyn blocked 1 thing:" in text
+
+
+def test_a_credential_is_shown_as_kept_closed_with_no_flag_to_allow_it(tmp_path):
+    key = os.path.join(os.path.expanduser("~"), ".ssh", "id_rsa")
+    book = report(Denial(kind="read", target=key, source="program"))
+    entry = book.items()[0]
+    text = book.brief(1, stream=Tty(False))
+    print(text)
+    assert entry.credential and entry.allow is None
+    assert ["✗", "read", "~/.ssh/id_rsa", "kept closed: a credential"] in rows_of(text)
+    assert "  to allow:" not in text
+
+
+def test_the_same_flag_is_offered_once():
+    book = report(refused("write", "/opt/a/x"), refused("write", "/opt/a/y"))
+    text = book.brief(0, stream=Tty(False))
+    print(text)
+    flags = [e.allow for e in book.items()]
+    assert flags == ["--write /opt/a", "--write /opt/a"], "the case needs two equal flags"
+    assert text.count("--write /opt/a") == 2 + 1, "two rows and one 'to allow' line"
+    assert "  to allow:  hlyn claude --write /opt/a\n" in text
+
+
+def test_the_host_warning_is_for_hosts_not_for_ports():
+    ports = Report(Policy(net=(443,)), env={}, which=lambda _name: None, cwd="/work")
+    ports.add(Denial(kind="net", target="5432 127.0.0.1", op="connect", source="program"))
+    port_text = ports.brief(0, stream=Tty(False))
+    host_text = report(refused("net", "example.com:443", "--net example.com")).brief(0, stream=Tty(False))
+    print(port_text, host_text)
+    assert "--net 5432" in port_text and "allow only hosts you recognise" not in port_text
+    assert "allow only hosts you recognise" in host_text
+
+
+def test_the_record_and_an_incomplete_list_are_named_only_when_they_apply():
+    book = report(refused("net", "example.com:443", "--net example.com"))
+    bare = book.brief(0, stream=Tty(False))
+    assert "every refusal" not in bare and "incomplete" not in bare
+    book.why = "the system log fell behind"
+    full = book.brief(0, log="/home/x/claude.jsonl", stream=Tty(False))
+    print(full)
+    assert "  every refusal: /home/x/claude.jsonl" in full
+    assert "  this list may be incomplete: the system log fell behind" in full
+
+
+def test_quiet_refusals_are_shown_only_when_the_run_failed_and_never_offer_their_flag():
+    from hlyn.report import Entry
+
+    book = report(refused("net", "example.com:443", "--net example.com"))
+    book.entries[("write", "/opt/noise/cache")] = Entry(
+        "write", "/opt/noise/cache", "--write /opt/noise", "it carries on without it", quiet=True,
+        source="program")
+    ok = book.brief(0, stream=Tty(False))
+    failed = book.brief(1, stream=Tty(False))
+    print(ok, failed)
+    assert "/opt/noise" not in ok, "a quiet refusal was shown on a run that succeeded"
+    assert ["✗", "write", "/opt/noise/cache", "--write /opt/noise"] in rows_of(failed)
+    assert "  to allow:  hlyn claude --net example.com\n" in failed, "a quiet refusal's flag was offered"
+    only = report()
+    only.entries[("write", "/opt/noise/cache")] = book.entries[("write", "/opt/noise/cache")]
+    assert only.brief(0, stream=Tty(False)) == ""

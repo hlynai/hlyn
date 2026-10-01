@@ -46,9 +46,12 @@ def place(tmp_path):
     return home, work
 
 
-def session(steps, home, work, confined=True, **extra):
+def session(steps, home, work, confined=True, *, prompt="go", more=(), flags=(), persist=False,
+            output="json", **extra):
     """One `claude -p` session driven by `steps`; returns (process, model).
-    `extra` sets variables; one set to None is left out."""
+    `more` is added to Claude Code's arguments and `flags` to hlyn's; the
+    session is kept on disk with `persist` (to resume it); `extra` sets
+    variables, one set to None being left out."""
     with Model(steps) as model:
         env = {
             "HOME": str(home),
@@ -68,10 +71,14 @@ def session(steps, home, work, confined=True, **extra):
             # Claude Code refuses to skip its permission prompts as root
             # unless told it runs in a container (the Linux test bed does).
             env["IS_SANDBOX"] = "1"
-        args = ["-p", "go", "--setting-sources", "", "--permission-mode", "bypassPermissions",
-                "--model", "sonnet", "--output-format", "json", "--no-session-persistence"]
+        args = ["-p", prompt, "--setting-sources", "", "--permission-mode", "bypassPermissions",
+                "--model", "sonnet", "--output-format", output, *more]
+        if output == "stream-json":
+            args.append("--verbose")
+        if not persist:
+            args.append("--no-session-persistence")
         if confined:
-            cmd = [sys.executable, "-m", "hlyn.cli", "claude", "--no-log", "--json", "--", *args]
+            cmd = [sys.executable, "-m", "hlyn.cli", "claude", "--no-log", "--json", *flags, "--", *args]
         else:
             cmd = [CLAUDE, *args]
         done = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True,
@@ -275,3 +282,236 @@ def test_interactive_claude_code_works_and_cannot_reach_a_key(place):
     assert not write[0] and (work / "out.txt").read_text() == "hello"
     assert read[0] and ("EACCES" if sys.platform == "linux" else "EPERM") in read[1]
     assert CANARY not in json.dumps(model.requests())
+
+
+# --- what a real Claude Code session does beyond its first prompt -------------
+# Measured 2026-10-01 against Claude Code 2.1.269 (macOS) and 2.1.286 (Linux);
+# FINDINGS.md, "`hlyn claude` beyond the first prompt".
+
+MARK = "FIRST-PROMPT-MARK"
+
+
+def test_resume_continues_a_session_that_was_started_under_hlyn(place):
+    # The session file goes to the state folder, which is granted, and
+    # --resume reads it back: the model is sent the first prompt again.
+    if not enforces():
+        pytest.skip("this machine can't enforce")
+    import uuid
+
+    home, work = place
+    sid = str(uuid.uuid4())
+    first, one = session([], home, work, prompt=f"{MARK} say hi", more=["--session-id", sid], persist=True)
+    show("first session", first, one, [])
+    kept = list((home / ".claude" / "projects").rglob(f"{sid}.jsonl"))
+    assert first.returncode == 0 and len(kept) == 1, "the session was not kept in the state folder"
+    second, two = session([], home, work, prompt="and now more", more=["--resume", sid], persist=True)
+    show("resumed session", second, two, [])
+    assert second.returncode == 0
+    assert MARK in json.dumps(two.requests()), "the resumed session did not carry the first prompt"
+    assert json.loads(second.stdout)["session_id"] == sid
+    assert len(list((home / ".claude" / "projects").rglob("*.jsonl"))) == 1, "a second session file was made"
+
+
+STDIO_SERVER = '''
+import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    method = msg.get("method")
+    if method == "initialize":
+        result = {"protocolVersion": msg["params"]["protocolVersion"], "capabilities": {"tools": {}},
+                  "serverInfo": {"name": "demo", "version": "1"}}
+    elif method == "tools/list":
+        result = {"tools": [{"name": "ping", "description": "say pong",
+                             "inputSchema": {"type": "object", "properties": {}}}]}
+    elif method == "tools/call":
+        result = {"content": [{"type": "text", "text": "MCP-PONG"}]}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}), flush=True)
+'''
+
+
+def mcp_config(work, servers):
+    path = work / "mcp.json"
+    path.write_text(json.dumps({"mcpServers": servers}))
+    return ["--mcp-config", str(path), "--strict-mcp-config"]
+
+
+def test_an_mcp_server_that_runs_as_a_program_starts_and_answers(place):
+    # A stdio server is a program Claude Code starts: confined like the rest,
+    # it needs nothing but to run.
+    if not enforces():
+        pytest.skip("this machine can't enforce")
+    home, work = place
+    (work / "mcp_stdio.py").write_text(STDIO_SERVER)
+    use = mcp_config(work, {"demo": {"command": sys.executable, "args": [str(work / "mcp_stdio.py")]}})
+    steps = [("ping", {})]
+    free, plain = session(steps, home, work, confined=False, more=use)
+    show("without hlyn", free, plain, steps)
+    done, model = session(steps, home, work, more=use)
+    show("hlyn claude", done, model, steps)
+    assert plain.results() == [(False, "text\nMCP-PONG")], "the control run didn't reach the server"
+    assert done.returncode == 0 and model.results() == [(False, "text\nMCP-PONG")]
+
+
+def web_mcp_server():
+    """A local HTTP MCP server (one JSON reply per POST), on a free port."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            msg = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if "id" not in msg:
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            method = msg["method"]
+            if method == "initialize":
+                result = {"protocolVersion": msg["params"]["protocolVersion"], "capabilities": {"tools": {}},
+                          "serverInfo": {"name": "web", "version": "1"}}
+            elif method == "tools/list":
+                result = {"tools": [{"name": "ping", "description": "pong",
+                                     "inputSchema": {"type": "object", "properties": {}}}]}
+            elif method == "tools/call":
+                result = {"content": [{"type": "text", "text": "HTTP-MCP-PONG"}]}
+            else:
+                result = {}
+            body = json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_an_mcp_server_on_this_machine_needs_its_port_and_the_report_says_so(place):
+    if not enforces():
+        pytest.skip("this machine can't enforce")
+    home, work = place
+    server = web_mcp_server()
+    try:
+        port = server.server_port
+        use = mcp_config(work, {"web": {"type": "http", "url": f"http://127.0.0.1:{port}/mcp"}})
+        steps = [("ping", {})]
+        _free, plain = session(steps, home, work, confined=False, more=use)
+        assert plain.results() == [(False, "text\nHTTP-MCP-PONG")], "the control run didn't reach the server"
+        shut, none = session(steps, home, work, more=use)
+        show("without --net", shut, none, steps)
+        assert none.results() == [], "the server answered without being allowed"
+        said = [e for e in blocked(shut) if e["kind"] == "net" and str(port) in e["target"]]
+        assert said and f"--net localhost:{port}" in (said[0]["allow"] or "") + said[0]["note"], \
+            f"the report didn't name the flag: {blocked(shut)}"
+        done, model = session(steps, home, work, more=use, flags=["--net", f"localhost:{port}"])
+        show(f"--net localhost:{port}", done, model, steps)
+        assert done.returncode == 0 and model.results() == [(False, "text\nHTTP-MCP-PONG")]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_remote_mcp_server_is_refused_with_the_flag_that_allows_it(place):
+    if not enforces():
+        pytest.skip("this machine can't enforce")
+    home, work = place
+    use = mcp_config(work, {"web": {"type": "http", "url": "https://mcp.example.test/mcp"}})
+    done, model = session([("ping", {})], home, work, more=use)
+    show("hlyn claude", done, model, [("ping", {})])
+    assert model.results() == []
+    said = [e for e in blocked(done) if e["kind"] == "net" and e["target"] == "mcp.example.test:443"]
+    assert said and said[0]["allow"] == "--net mcp.example.test"
+
+
+def plugin(root):
+    (root / ".claude-plugin").mkdir(parents=True)
+    (root / "skills" / "hello").mkdir(parents=True)
+    (root / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "demoplug", "version": "1.0.0", "description": "a plugin"}))
+    (root / "skills" / "hello" / "SKILL.md").write_text(
+        "---\nname: hello\ndescription: say hello\n---\nHi.\n")
+    return str(root)
+
+
+def loaded(done):
+    """The plugins Claude Code reports at the start of a stream-json session,
+    leaving out the ones built into it (newer versions list those too)."""
+    for line in done.stdout.splitlines():
+        if line.startswith("{") and '"init"' in line:
+            event = json.loads(line)
+            if event.get("subtype") == "init":
+                return [item["name"] for item in event.get("plugins", []) if item.get("path") != "builtin"]
+    return None
+
+
+def test_a_plugin_in_the_project_loads_and_one_elsewhere_needs_read(place, tmp_path):
+    if not enforces():
+        pytest.skip("this machine can't enforce")
+    home, work = place
+    inside, outside = plugin(work / "plug"), plugin(tmp_path / "elsewhere" / "plug")
+    done, model = session([], home, work, more=["--plugin-dir", inside], output="stream-json")
+    show("plugin in the project", done, model, [])
+    assert done.returncode == 0 and loaded(done) == ["demoplug"]
+    done, model = session([], home, work, more=["--plugin-dir", outside], output="stream-json")
+    show("plugin outside the project", done, model, [])
+    assert loaded(done) == [], "a plugin outside every grant was loaded"
+    if sys.platform == "darwin":
+        # Linux can't see inside Claude Code's static binary (README, "Reports are not complete"),
+        # so there the refusal is real but unreported.
+        read = [e for e in blocked(done) if e["kind"] == "read" and "elsewhere" in e["target"]]
+        assert read and all(e["allow"] and e["allow"].startswith("--read ") for e in read)
+    done, model = session([], home, work, more=["--plugin-dir", outside], output="stream-json",
+                          flags=["--read", outside])
+    show("plugin outside, with --read", done, model, [])
+    assert done.returncode == 0 and loaded(done) == ["demoplug"]
+
+
+PROVIDERS = [
+    # (name, variables set, the one to pass with --env, host without it, host with it)
+    ("vertex", {"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "europe-west1",
+                "ANTHROPIC_VERTEX_PROJECT_ID": "demo-project", "CLAUDE_CODE_SKIP_VERTEX_AUTH": "1"},
+     "CLOUD_ML_REGION", "us-east5-aiplatform.googleapis.com", "europe-west1-aiplatform.googleapis.com"),
+    ("bedrock", {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "eu-west-1",
+                 "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1"},
+     "AWS_REGION", "bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.eu-west-1.amazonaws.com"),
+    ("foundry", {"CLAUDE_CODE_USE_FOUNDRY": "1", "ANTHROPIC_FOUNDRY_RESOURCE": "demo-resource",
+                 "CLAUDE_CODE_SKIP_FOUNDRY_AUTH": "1"},
+     None, "demo-resource.services.ai.azure.com", "demo-resource.services.ai.azure.com"),
+]
+
+
+@pytest.mark.parametrize(("name", "variables", "passed", "plain", "regional"), PROVIDERS,
+                         ids=[p[0] for p in PROVIDERS])
+def test_a_cloud_provider_is_refused_naming_its_host_and_the_region_needs_env(
+        place, name, variables, passed, plain, regional):
+    # Bedrock, Vertex and Foundry send to their own hosts, not api.anthropic.com. hlyn
+    # allows only the Anthropic ones, so the report names the host to add; a region
+    # set in a variable that isn't ANTHROPIC_* or CLAUDE_* only counts with --env.
+    # No credentials are needed: the SKIP_*_AUTH variables stand in for them, and the
+    # request never leaves because the proxy refuses it first.
+    if not enforces():
+        pytest.skip("this machine can't enforce")
+    home, work = place
+    extra = {**variables, "ANTHROPIC_BASE_URL": None, "ANTHROPIC_API_KEY": None,
+             "CLAUDE_CODE_MAX_RETRIES": "0"}
+    done, model = session([], home, work, **extra)
+    show(f"{name}, no --env", done, model, [])
+    hosts = {e["target"].removesuffix(":443"): e["allow"] for e in blocked(done) if e["kind"] == "net"}
+    assert plain in hosts and hosts[plain] == f"--net {plain}", f"the host to allow wasn't named: {hosts}"
+    assert model.requests() == [], "something reached the Anthropic API stand-in"
+    if passed is None:
+        return
+    done, model = session([], home, work, flags=["--env", passed], **extra)
+    show(f"{name}, --env {passed}", done, model, [])
+    hosts = {e["target"].removesuffix(":443"): e["allow"] for e in blocked(done) if e["kind"] == "net"}
+    assert regional in hosts and hosts[regional] == f"--net {regional}", f"--env didn't reach it: {hosts}"
+    assert plain not in hosts or plain == regional

@@ -413,6 +413,10 @@ class Report:
         self.more = 0  # distinct refusals past LIMIT
         self.unlogged = 0  # log records a helper couldn't write (its log was full)
         self.why: str | None = None  # set when listening was degraded
+        # --no-report: the person asked for no list of what was blocked. The
+        # kernel's listener is off, but hlyn's proxy and gate still report
+        # refusals, so the list is held back here; `json` keeps all of it.
+        self.silent = False
         self._reads = plan.reads()
         self._writes = plan.writes()
         self._runs = plan.runs()
@@ -873,7 +877,7 @@ class Report:
         import signal
 
         cmd = list(cmd)
-        items = self.items()
+        items = [] if self.silent else self.items()
         if not code:
             items = [e for e in items if not e.quiet]
         out: list[str] = []
@@ -944,9 +948,9 @@ class Report:
 
         from .term import Paint, width
 
-        if code == -signal.SIGSYS or (code and not self.items()):
+        if code == -signal.SIGSYS or (code and (self.silent or not self.items())):
             return self.text(code, cmd)
-        items = [e for e in self.items() if not (hide and hide(e))]
+        items = [] if self.silent else [e for e in self.items() if not (hide and hide(e))]
         if not code:
             items = [e for e in items if not e.quiet]
         if not items:

@@ -9,5 +9,8 @@ RUN apt-get update -qq \
       git nodejs npm \
  && rm -rf /var/lib/apt/lists/*
 # The real Claude Code, for tests/test_claude.py (`hlyn claude` against a
-# scripted model). Pinned, so a run is reproducible; raise it on purpose.
+# scripted model). Pinned, so a run is reproducible; raise it on purpose:
+# `npm view @anthropic-ai/claude-code dist-tags`, then tests/test_claude.py
+# against the new one. Checked 2026-10-01: `latest` is 2.1.286 (this pin);
+# 2.1.287 (`next`) passed the same 12 tests, 2.1.285 is `stable`.
 RUN npm install -g --no-fund --no-audit @anthropic-ai/claude-code@2.1.286

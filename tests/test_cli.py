@@ -560,3 +560,45 @@ def test_a_command_that_cannot_start_gets_one_message_not_a_hint():
     assert done.returncode == 1
     assert "was not found" in done.stderr
     assert "Allow it with" not in done.stderr
+
+
+@here
+def test_a_detached_child_outlives_the_command_and_stays_confined(tmp_path):
+    # By design (DESIGN-host-allowlisting.md 5.2, "Lifetimes"; README, Known
+    # limits): hlyn confines what the command starts but does not wait for it.
+    # The child waits for a file the test makes only after hlyn has returned,
+    # so there is no timing to get wrong, then tries a write inside its grant
+    # and one outside it.
+    out = tmp_path / "out"
+    out.mkdir()
+    outside = tmp_path / "outside.txt"
+    script = tmp_path / "linger.py"
+    script.write_text(
+        "import os, sys, time\n"
+        "if os.fork():\n    os._exit(0)\n"
+        "os.setsid()\n"
+        "null = os.open(os.devnull, os.O_RDWR)\n"
+        "for fd in (0, 1, 2):\n    os.dup2(null, fd)  # or the test's pipes stay open and it waits for us\n"
+        "if os.fork():\n    os._exit(0)\n"
+        "end = time.time() + 60\n"
+        "while not os.path.exists(sys.argv[1] + '/go') and time.time() < end:\n    time.sleep(0.05)\n"
+        "log = open(sys.argv[1] + '/late.txt', 'w')\n"
+        "try:\n    open(sys.argv[2], 'w').write('escaped')\n    log.write('outside: written')\n"
+        "except OSError as exc:\n    log.write('outside: refused ' + str(exc.errno))\n"
+        "log.close()\n"
+    )
+    done = hlyn("run", "--no-log", "--no-report", "--write", str(out), "--read", str(script), "--",
+                sys.executable, str(script), str(out), str(outside))
+    assert done.returncode == 0
+    assert not (out / "late.txt").exists(), "the child had not even started waiting"
+    (out / "go").write_text("now")
+    import time
+
+    end = time.monotonic() + 30
+    while time.monotonic() < end and not (out / "late.txt").exists():
+        time.sleep(0.1)
+    time.sleep(0.5)  # the file is created before it is written
+    said = (out / "late.txt").read_text() if (out / "late.txt").exists() else None
+    print("the detached child said:", said)
+    assert said is not None and said.startswith("outside: refused"), said
+    assert not outside.exists(), "the detached child wrote outside its grant"

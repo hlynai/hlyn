@@ -317,6 +317,69 @@ def test_no_report_means_no_report(tmp_path, outside):
     assert "hlyn blocked" not in done.stderr
 
 
+PROXIED = """
+    import urllib.request
+    try:
+        urllib.request.urlopen("https://example.com/", timeout=10)
+        print("CONNECTED")
+    except Exception as exc:
+        print("REFUSED", exc)
+"""
+
+
+@here
+def test_no_report_holds_back_the_proxys_refusals_too(tmp_path):
+    # The kernel's listener is off under --no-report, but the proxy (host mode)
+    # reports from hlyn itself and used to print its list anyway, ending with
+    # "this list may be incomplete: turned off with --no-report".
+    script = agent(tmp_path, PROXIED)
+    argv = ["run", "--no-log", "--read", script, "--net", "api.openai.com", "--", sys.executable, script]
+    asked = hlyn(*argv)
+    assert "REFUSED" in asked.stdout and "403" in asked.stdout, "the proxy did not refuse it"
+    assert "example.com:443" in asked.stderr, "the control run should list the refusal"
+    quiet = hlyn(*argv[:2], "--no-report", *argv[2:])
+    assert "REFUSED" in quiet.stdout and "403" in quiet.stdout
+    assert quiet.returncode == 0
+    assert quiet.stderr == "", f"--no-report still said something:\n{quiet.stderr}"
+
+
+@linux
+def test_no_report_holds_back_the_gates_refusals_too(tmp_path):
+    # A direct connection under --net is refused by the gate, not the proxy.
+    script = agent(tmp_path, """
+        import socket
+        try:
+            socket.create_connection(("192.0.2.1", 443), timeout=3)
+            print("CONNECTED")
+        except OSError as exc:
+            print("REFUSED", exc.errno)
+    """)
+    argv = ["run", "--no-log", "--read", script, "--net", "api.openai.com", "--", sys.executable, script]
+    asked = hlyn(*argv)
+    assert "REFUSED" in asked.stdout, "the gate did not refuse it"
+    assert "192.0.2.1" in asked.stderr, "the control run should list the refusal"
+    quiet = hlyn(*argv[:2], "--no-report", *argv[2:])
+    assert "REFUSED" in quiet.stdout and quiet.returncode == 0
+    assert quiet.stderr == "", f"--no-report still said something:\n{quiet.stderr}"
+
+
+def test_a_silent_report_lists_nothing_but_json_keeps_everything():
+    from hlyn.policy import Policy
+    from hlyn.report import Denial, Report
+
+    book = Report(Policy(), env={}, which=lambda _name: None, cwd="/work")
+    book.add(Denial(kind="net", target="example.com:443", source="proxy", op="not-listed",
+                    allow="--net example.com"))
+    assert "example.com" in book.text(0) and "example.com" in book.brief(0)
+    book.silent = True
+    assert book.text(0) == "" and book.brief(0) == ""
+    failed = book.text(3)
+    print(failed)
+    assert "example.com" not in failed and "the command exited with code 3." in failed
+    assert "example.com" not in book.brief(3)
+    assert [item["target"] for item in book.json(3)["blocked"]] == ["example.com:443"]
+
+
 @here
 def test_refusals_reach_the_log_as_they_happen(tmp_path, outside):
     target = outside / "secret.txt"

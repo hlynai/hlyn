@@ -512,6 +512,7 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
     try:
         ear.start()
         book = report.Report(plan)
+        book.silent = quiet
         failed, status = _wait(cmd, ear.grant(plan), ear, book, plan, own)
     finally:
         ear.close()
