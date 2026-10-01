@@ -121,6 +121,34 @@ if ring < 0:
     assert "ring -1" in done.stdout and "fell back, read True" in done.stdout
 
 
+def test_sysv_ipc_is_refused_not_killed():
+    # SysV objects are named by a number, so Landlock never sees them, and a
+    # confined program read another process's segment and queue (FINDINGS.md,
+    # "a confined program reaches SysV shared memory"). All twelve calls are
+    # refused with EPERM and the program goes on. The arguments are ones the
+    # kernel itself answers with EINVAL or ENOENT, never EPERM: the unconfined
+    # run shows that, so an EPERM here can only be the filter.
+    code = RAW + """
+import errno
+for name, nr in calls:
+    rc = call(nr, -1, 0, 0, 0, 0)
+    print(name, rc, errno.errorcode.get(ctypes.get_errno()))
+print("WENT ON")
+"""
+    before = "calls = [(n, seccomp._nr(n)) for n in seccomp.SHARED]"
+    control = jail(code, before=before, seal="")
+    done = jail(code, before=before)
+    print("unconfined:\n" + control.stdout + control.stderr)
+    print("confined:\n" + done.stdout + done.stderr)
+    from hlyn.core import seccomp
+
+    assert len(seccomp.SHARED) == 12
+    for name in seccomp.SHARED:
+        assert f"{name} -1 EPERM" not in control.stdout, f"{name}: the kernel says EPERM by itself"
+        assert f"{name} -1 EPERM" in done.stdout, f"{name} was not refused"
+    assert not killed(done) and "WENT ON" in done.stdout
+
+
 def test_a_syscall_from_the_wrong_architecture_kills_the_whole_process():
     # libseccomp's default for a call made through another architecture's
     # convention (ia32's int 0x80 on x86_64) is KILL_THREAD, which seccomp(2)
@@ -561,6 +589,7 @@ def test_shut_list_resolves_on_this_architecture():
         "setns", "bpf", "perf_event_open", "init_module", "finit_module",
         "open_by_handle_at", "name_to_handle_at", "pivot_root", "chroot",
         "userfaultfd", "keyctl", "add_key", "request_key", "kexec_load",
+        *seccomp.SHARED,
     ]
     missing = [name for name in must if seccomp._nr(name) == seccomp.BAD]
     assert not missing, f"these syscalls did not resolve, so they are not blocked: {missing}"

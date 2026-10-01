@@ -28,7 +28,7 @@ TYPE_CHECKING = False
 if TYPE_CHECKING:
     from ..policy import Policy
 
-__all__ = ["MISSING", "SHUT", "busy", "load", "program", "ready", "why"]
+__all__ = ["MISSING", "SHARED", "SHUT", "busy", "load", "program", "ready", "why"]
 
 
 # -- libseccomp constants ---------------------------------------------------
@@ -248,10 +248,40 @@ MISSING: dict[str, str] = {
     "io_uring_register": "bypasses syscall filtering entirely",
 }
 
+# SysV IPC, refused with EPERM, as Seatbelt refuses it on macOS.
+#
+# Its objects are named by a number, not a path, so Landlock never sees them:
+# the only check is the object's mode against the uid, and the agent runs as
+# the user who owns them. Left open, a confined program read another
+# process's shared memory and message queue, finding the segment without its
+# key, and two agents could talk through them (FINDINGS.md, "a confined
+# program reaches SysV shared memory"). OpenAPPA's file runner refuses the
+# same twelve. An IPC namespace would keep a program's own segments working,
+# but needs a user namespace, which hlyn refuses.
+#
+# A refusal, not a kill: nothing measured needs these (Python's
+# multiprocessing uses POSIX shared memory, which Landlock checks as a file;
+# node, npm, git, sqlite, gcc, cargo and pytest made none), and the programs
+# that do (PostgreSQL, X11's MIT-SHM) report the error or fall back.
+SHARED: dict[str, str] = {
+    "shmget": "reaches another process's shared memory",
+    "shmat": "reaches another process's shared memory",
+    "shmdt": "reaches another process's shared memory",
+    "shmctl": "reaches another process's shared memory",
+    "msgget": "reaches another process's message queue",
+    "msgsnd": "reaches another process's message queue",
+    "msgrcv": "reaches another process's message queue",
+    "msgctl": "reaches another process's message queue",
+    "semget": "reaches another process's semaphores",
+    "semop": "reaches another process's semaphores",
+    "semtimedop": "reaches another process's semaphores",
+    "semctl": "reaches another process's semaphores",
+}
+
 
 def why(name: str) -> str:
     """The reason a syscall is refused, for the log and for reviewers."""
-    return SHUT.get(name) or MISSING.get(name) or "not permitted by policy"
+    return SHUT.get(name) or MISSING.get(name) or SHARED.get(name) or "not permitted by policy"
 
 
 # -- the library ------------------------------------------------------------
@@ -485,6 +515,8 @@ def _build(policy: Policy, watch: bool = False, datagrams: bool = False) -> int:
             _rule(ctx, KILL, name)
         for name in MISSING:
             _rule(ctx, ERROR | ENOSYS, name)
+        for name in SHARED:
+            _rule(ctx, ERROR | EPERM, name)
 
         # clone3 takes its flags in a struct, and seccomp cannot follow a
         # pointer. Reporting it missing makes glibc fall back to clone, whose

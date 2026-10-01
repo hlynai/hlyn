@@ -371,6 +371,84 @@ def test_run_confines_the_command_it_launches():
     assert "CONFINED" in done.stdout, f"the command was not confined: {done.stdout}"
 
 
+# Reads a SysV shared-memory segment and message queue made outside, first by
+# key, then by the id the test hands it (as if it had guessed or walked to it).
+_SYSV = """
+import ctypes, errno, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.shmat.restype = ctypes.c_void_p
+libc.shmat.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+class Msg(ctypes.Structure):
+    _fields_ = [("mtype", ctypes.c_long), ("mtext", ctypes.c_char * 64)]
+def no(what):
+    print(what, errno.errorcode.get(ctypes.get_errno()))
+key, shm, q = (int(a) for a in sys.argv[1:4])
+found = libc.shmget(key, 0, 0)
+print("shmget", found) if found >= 0 else no("shmget")
+addr = libc.shmat(shm, None, 0)
+if addr in (None, ctypes.c_void_p(-1).value):
+    no("shmat")
+else:
+    print("shmat READ", ctypes.string_at(addr, 19).decode())
+found = libc.msgget(key, 0)
+print("msgget", found) if found >= 0 else no("msgget")
+m = Msg()
+n = libc.msgrcv(q, ctypes.byref(m), 64, 0, 0o4000)
+print("msgrcv READ", m.mtext[:n].decode()) if n >= 0 else no("msgrcv")
+"""
+
+
+@contextlib.contextmanager
+def _sysv_secret():
+    """A shared-memory segment and a message queue holding a secret, made by
+    this (unconfined) test process and removed afterwards."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.shmat.restype = ctypes.c_void_p
+    libc.shmat.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+    secret = b"SYSV-SECRET-CANARY!"
+    key = 0x484C0000 | (os.getpid() & 0xFFFF)
+    shm = libc.shmget(key, 4096, 0o1000 | 0o600)
+    q = libc.msgget(key, 0o1000 | 0o600)
+    try:
+        assert shm >= 0 and q >= 0, f"could not make the objects: errno {ctypes.get_errno()}"
+        addr = libc.shmat(shm, None, 0)
+        ctypes.memmove(addr, secret, len(secret))
+        libc.shmdt(ctypes.c_void_p(addr))
+
+        class Msg(ctypes.Structure):
+            _fields_ = [("mtype", ctypes.c_long), ("mtext", ctypes.c_char * 64)]
+
+        # Two copies, so the control and the confined run each have one to take.
+        for _ in range(2):
+            assert libc.msgsnd(q, ctypes.byref(Msg(1, secret)), len(secret), 0) == 0
+        yield key, shm, q
+    finally:
+        libc.shmctl(shm, 0, None)  # IPC_RMID
+        libc.msgctl(q, 0, None)
+
+
+@here
+@pytest.mark.parametrize("net", [[], ["--net-any"]], ids=["default", "net-any"])
+def test_run_cannot_reach_sysv_shared_memory_made_outside(net):
+    # FINDINGS.md, "a confined program reaches SysV shared memory": these are
+    # named by a number, not a path, so Landlock never sees them. On Linux
+    # seccomp refuses them; on macOS Seatbelt always did. The unconfined run
+    # reads both, so the confined one's refusals are not the objects missing.
+    with _sysv_secret() as (key, shm, q):
+        argv = [sys.executable, "-c", _SYSV, str(key), str(shm), str(q)]
+        control = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+        done = hlyn("run", *net, "--", *argv)
+    print("unconfined:\n" + control.stdout + control.stderr)
+    print(f"hlyn run {' '.join(net)}:\n" + done.stdout + done.stderr)
+    assert "shmat READ SYSV-SECRET-CANARY!" in control.stdout
+    assert "msgrcv READ SYSV-SECRET-CANARY!" in control.stdout
+    for line in ("shmget EPERM", "shmat EPERM", "msgget EPERM", "msgrcv EPERM"):
+        assert line in done.stdout, f"{line!r} missing: the program reached it"
+    assert "CANARY" not in done.stdout
+
+
 @here
 def test_run_records_the_boundary_it_applied():
     done = hlyn("run", "--", sys.executable, "-c", "print('UP')")

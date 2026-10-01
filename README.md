@@ -90,7 +90,7 @@ With hlyn, the answer is "only what you wrote down."
 | **Policy files** | Keep the rules in a TOML, JSON or YAML file next to your code and review them like code. | `hlyn run -f policy.toml` / `hlyn.on("policy.toml")` |
 | **Presets** | Ready-made policies for common jobs: `strict`, `data`, `coder`, `web`, `debug`. | `hlyn.on("coder")` / `-p coder` |
 | **Four ways in** | Lock the current process, run one function in a locked child, replace the process with a locked command, or wrap any command from the terminal. | `hlyn.on()`, `hlyn.run(fn)`, `hlyn.spawn(cmd)`, `hlyn run -- cmd` |
-| **Agent isolation** | On Linux, one agent can't signal or connect to another agent on the same machine. | automatic (Linux) |
+| **Agent isolation** | On Linux, one agent can't signal or connect to another agent on the same machine, or reach any program's SysV shared memory or message queues. | automatic (Linux) |
 | **Dangerous system calls blocked** | Kernel tricks like `io_uring`, `ptrace`, mounting and loading kernel modules are always refused. | automatic (Linux) |
 | **Machine check** | Tells you what this computer can enforce, and why not when it can't. | `hlyn probe` |
 | **Log** | A JSON record of what was sealed and what was blocked, for audits and CI. | stderr by default, `--log FILE` |
@@ -551,7 +551,7 @@ Messages say what to do next, naming the field or flag that would change the out
 | Direct connections to address entries (`10.0.0.5:5432`) | ✅ | ❌ Only through the proxy. `localhost:PORT` entries work directly |
 | Local sockets only in write-granted folders | ✅ Whenever the network isn't open: by the kernel from Linux 7.1, before that by the gate, which connects the socket it checked itself | ✅ |
 | All network off (TCP and UDP) | ✅ | ✅ |
-| Isolation between agents (signals, abstract sockets) | ✅ | ✅ Signals, as on Linux (macOS has no abstract sockets), and only measured system services: the pasteboard and notifications are refused. With an open network every service is allowed |
+| Isolation between agents (signals, abstract sockets, SysV shared memory and message queues) | ✅ | ✅ Signals and SysV IPC, as on Linux (macOS has no abstract sockets), and only measured system services: the pasteboard and notifications are refused. With an open network every service is allowed |
 | Dangerous syscalls blocked (`io_uring`, `ptrace`, `mount`, namespaces, kernel modules, `bpf`, …) | ✅ | n/a |
 | Secret environment variables removed | ✅ | ✅ |
 | Report of what was blocked | ✅ | ✅ Best-effort |
