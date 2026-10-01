@@ -292,3 +292,17 @@ def test_a_keynote_file_or_a_public_certificate_is_not_a_secret(tmp_path):
     (tmp_path / "ca.pem").write_text("-----BEGIN CERTIFICATE-----\nMIIB\n")
     (tmp_path / "tls.pem").write_text("-----BEGIN RSA PRIVATE KEY-----\nMIIE\n")
     assert names(exposed(Policy(read=[tmp_path], net=True))) == {"tls.pem"}
+
+
+def test_an_env_template_is_not_a_secret_whichever_end_the_word_is_on(tmp_path):
+    # Found by `hlyn claude`: a Claude Code plugin marketplace ships
+    # `.env.production.example` and friends, and the warning named all four.
+    # A template is a template wherever the word sits; a real `.env` is not.
+    for name in (".env.example", ".env.sample", ".env.production.example",
+                 ".env.preview.example", ".env.local.template", ".env.defaults"):
+        (tmp_path / name).write_text("KEY=replace-me\n")
+    for name in (".env", ".env.local", ".env.production", ".env.prod.secret"):
+        (tmp_path / name).write_text("KEY=real\n")
+    found = names(exposed(Policy(read=[tmp_path], net=True)))
+    print(sorted(found))
+    assert found == {".env", ".env.local", ".env.production", ".env.prod.secret"}

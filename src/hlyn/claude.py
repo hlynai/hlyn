@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 from .error import Error
 from .policy import Policy
 
-__all__ = ["HOSTS", "command", "policy", "prepare", "signin"]
+__all__ = ["HOSTS", "command", "policy", "prepare", "signin", "state"]
 
 # The model API, and the host that refreshes a signed-in session's token
 # (TOKEN_URL in Claude Code 2.1). Nothing else: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
@@ -103,7 +103,8 @@ def command(args: list[str]) -> list[str]:
     return [found, *args]
 
 
-def _state(env: MutableMapping[str, str]) -> str:
+def state(env: MutableMapping[str, str]) -> str:
+    """Where Claude Code keeps its own settings, sessions and hooks."""
     return env.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
 
 
@@ -126,13 +127,20 @@ def policy(binary: str, env: MutableMapping[str, str], tmp: str) -> Policy:
     """What Claude Code needs, measured, as a policy. `tmp` is the folder
     `prepare` made: hlyn's private temporary folder and Claude Code's."""
     cwd = os.getcwd()
-    state = _state(env)
-    read = [cwd, os.path.dirname(os.path.realpath(binary))]
+    mine = state(env)
+    # The installation, by both names: `claude` is usually a link in a bin
+    # folder (`~/.local/bin`) pointing at the version it runs, and Claude Code
+    # lists both while starting.
+    read = [cwd, os.path.dirname(os.path.realpath(binary)), os.path.dirname(binary)]
     if not env.get("CLAUDE_CONFIG_DIR"):
         dotfile = os.path.join(os.path.expanduser("~"), ".claude.json")
         if os.path.exists(dotfile):
             read.append(dotfile)
-    extra = [*SHELLS, *GIT]
+    # The terminal the person started it on. The shell Claude Code's Bash tool
+    # runs opens it for job control and prompts, and reports a refusal on every
+    # command without it. Typing into it stays refused by both kernels
+    # (`TIOCSTI`; FINDINGS.md, "Terminal control"), which is the dangerous part.
+    extra = [*SHELLS, *GIT, "/dev/tty"]
     if sys.platform == "darwin":
         extra += TOOLS
     elif sys.platform == "linux":
@@ -145,7 +153,7 @@ def policy(binary: str, env: MutableMapping[str, str], tmp: str) -> Policy:
     )
     return Policy(
         read=tuple(read),
-        write=(cwd, state),
+        write=(cwd, mine, *(["/dev/tty"] if os.path.exists("/dev/tty") else [])),
         exec=True,
         net=(_model(env), *HOSTS[1:]),
         env=tuple(keep),
@@ -169,7 +177,7 @@ def signin(env: MutableMapping[str, str]) -> str | None:
     """
     if sys.platform != "darwin" or any(env.get(name) for name in SIGNINS):
         return None
-    if os.path.exists(os.path.join(_state(env), ".credentials.json")):
+    if os.path.exists(os.path.join(state(env), ".credentials.json")):
         return None  # signed in without the keychain
     return (
         "hlyn: Claude Code keeps its sign-in in the macOS keychain, which stays closed to the agent "
@@ -183,7 +191,7 @@ def prepare(env: MutableMapping[str, str]) -> str:
     """Set up what Claude Code expects before it starts: its state folder
     exists (a grant needs a path that does), its temporary folder is private,
     and traffic that isn't the model is off. Returns the temporary folder."""
-    os.makedirs(_state(env), mode=0o700, exist_ok=True)
+    os.makedirs(state(env), mode=0o700, exist_ok=True)
     box = tempfile.mkdtemp(prefix="hlyn-claude-")
     env["CLAUDE_CODE_TMPDIR"] = box
     env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")

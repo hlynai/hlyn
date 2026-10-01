@@ -707,6 +707,34 @@ def _starting(way: Any, final: bool = False) -> None:
         print(f"hlyn: {trouble}", file=sys.stderr)
 
 
+def _later(plan: Policy, known: tuple[str, ...] = ()) -> bool:
+    """Warn, on stderr, when the policy lets the agent write a file something
+    else runs later (`later.py`). Same filters and exit rule as `_exposed`:
+    `-W error::hlyn.Runs` refuses the run, which is how a CI job keeps a
+    policy that allows hook planting from shipping.
+    """
+    import warnings
+
+    from .later import Runs, found, warning
+
+    hits = found(plan, known)
+    if not hits:
+        return True
+    text = warning(hits, cli=True)
+    jail.options()
+    try:
+        with warnings.catch_warnings(record=True) as heard:
+            warnings.warn(text, Runs, stacklevel=1)
+    except Runs:
+        print(text.replace("hlyn: warning:", "hlyn: refused:", 1).rsplit("\n  Meant it?", 1)[0],
+              file=sys.stderr)
+        print("  Refused because warnings are errors here (PYTHONWARNINGS / -W error).", file=sys.stderr)
+        return False
+    if heard:
+        print(text, file=sys.stderr)
+    return True
+
+
 def _exposed(plan: Policy) -> bool:
     """Warn, on stderr, when the policy lets secrets out. By default the run
     goes ahead: the user may mean it, and the message says how to say so.
@@ -895,7 +923,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
 
     if args.verb == "show":
         p = _policy(args)
-        if not _exposed(p) or not _reach(p):
+        if not _exposed(p) or not _reach(p) or not _later(p):
             return 2
         if args.intent:
             # What was asked for, not what it becomes: this is the form a file
@@ -945,7 +973,11 @@ def _run(argv: Sequence[str] | None = None) -> int:
             print(note, file=sys.stderr)
         box = claude.prepare(os.environ)
         plan = _policy(args, claude.policy(full[0], os.environ, box))
-        if not _exposed(plan) or not _reach(plan):
+        # Claude Code's own state folder holds settings and hooks that run at
+        # its next start, which is why the README says to start it with
+        # `hlyn claude` every time. Granted here on purpose, so `_later` says
+        # nothing about it; everything else it finds is still a surprise.
+        if not _exposed(plan) or not _reach(plan) or not _later(plan, (claude.state(os.environ),)):
             return 2
         jail.unbuilt(plan)
         jail._ready(plan)
@@ -967,7 +999,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
     # Built here, before the fork, so a malformed policy is reported once, as
     # a sentence, with exit code 2 -- like every other command.
     plan = _policy(args)
-    if not _exposed(plan) or not _reach(plan):
+    if not _exposed(plan) or not _reach(plan) or not _later(plan):
         return 2
     jail.unbuilt(plan)
     jail._ready(plan)

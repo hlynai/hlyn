@@ -11,6 +11,7 @@ from .error import Error, Failed, Invalid, Sealed, Unsupported
 from .helpers import helper
 from .hosts import Reach
 from .jail import on, probe, run, sealed, spawn
+from .later import Runs
 from .policy import SAFE, Policy, preset, presets, register, runtime
 from .secret import Exposed, exposed
 from .spec import load
@@ -25,6 +26,7 @@ __all__ = [
     "Invalid",
     "Policy",
     "Reach",
+    "Runs",
     "Sealed",
     "Unsupported",
     "__version__",

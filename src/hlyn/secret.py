@@ -43,10 +43,14 @@ SYSTEM: tuple[str, ...] = (
 )
 
 # File names that hold secrets wherever they are. `.env.example` and friends
-# are templates checked in on purpose, and a public key is public.
+# are templates checked in on purpose, and a public key is public. The
+# template word can come last rather than first (`.env.production.example`,
+# which four files in a Claude Code plugin marketplace are named), so it is
+# excluded at the end as well as on its own.
+TEMPLATE = r"(example|sample|template|dist|defaults)"
 KEYS = re.compile(
     r"^(id_(rsa|dsa|ecdsa|ed25519)(_sk)?"
-    r"|\.env(\.(?!example$|sample$|template$|dist$|defaults$)[^/]+)?"
+    rf"|\.env(\.(?!{TEMPLATE}$)(?!([^/]+\.)?{TEMPLATE}$)[^/]+)?"
     r"|\.envrc|\.netrc|\.npmrc|\.pypirc|\.pgpass|\.git-credentials|\.htpasswd"
     r"|credentials(\.json)?|service[-_]?account.*\.json|secrets?\.(ya?ml|json|toml)"
     r"|kubeconfig|terraform\.tfstate(\.backup)?"

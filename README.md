@@ -193,7 +193,7 @@ Claude Code can read and write this folder, write its own state (`~/.claude`), r
 
 - **Sign-in on macOS:** Claude Code keeps it in the keychain, which stays closed to the agent. Run `claude setup-token` once (outside hlyn) and `export CLAUDE_CODE_OAUTH_TOKEN=...`, or set `ANTHROPIC_API_KEY`. On Linux the sign-in file in `~/.claude` works as it is.
 - **`~/.claude.json` is read-only:** it lists the MCP servers Claude Code starts outside any environment, so the agent can't add one. Settings Claude Code saves there during the run aren't kept.
-- **`~/.claude` is writable**, settings and hooks included, and a hook runs unconfined the next time you start `claude` without hlyn. Start it with `hlyn claude` each time.
+- **`~/.claude` is writable**, settings and hooks included, and a hook runs unconfined the next time you start `claude` without hlyn. Start it with `hlyn claude` each time. Inside your project, hlyn names `.git/hooks`, `.claude/settings.json` and `.mcp.json` before the run if they exist ([Files that run later](#files-that-run-later)).
 - **Interactive mode works** (keystrokes reach the full-screen session), as does `claude -p`. A program Claude Code's Bash tool starts is confined too, so a few things the agent might run don't work: a second `claude` (its runtime aborts without a fresh `/proc`), Node's `process.memoryUsage()`, and Python's `multiprocessing` (see [Known limits](#known-limits)). The session itself is unaffected.
 
 ### Confine one risky step, not the whole program
@@ -298,6 +298,30 @@ hlyn: warning: the agent can read 1 secret file and reach the network, so it cou
 | In Python | Raised as a `hlyn.Exposed` warning, so the standard filters apply |
 | Make it an error | `PYTHONWARNINGS=error::hlyn.Exposed` refuses the run (exit 2), which keeps leaky policies out of CI. In Python, `warnings.simplefilter("error", hlyn.Exposed)` raises before anything is sealed. With hlyn installed from PyPI, Python first prints `Invalid -W option ignored: invalid module name: 'hlyn'`, because it reads the setting before it can import hlyn; hlyn applies it anyway. |
 | Check a policy yourself | `hlyn.exposed(policy)` returns the list |
+
+### Files that run later
+
+A write grant can reach files **other programs run**: a git hook, Claude Code's own settings, `.mcp.json`, `.envrc`. hlyn refuses none of them, because they sit in a folder you granted on purpose, and neither kernel can grant a folder minus one file. So it names them before the run:
+
+```
+$ hlyn run --write . -- python agent.py
+hlyn: warning: the agent can write 1 file that runs later, outside this environment:
+  ./.git/hooks
+  Whatever it writes there runs unconfined the next time you (or git, or CI) start that program.
+  Grant a narrower folder (e.g. --write ./out instead of the whole project), or check these files before you run them again.
+  Meant it? Run with PYTHONWARNINGS=ignore::hlyn.Runs to stop this warning.
+```
+
+| Detail | Behaviour |
+|---|---|
+| What counts | `.git/hooks`, `.githooks`, `.claude/settings.json`, `.claude/{hooks,agents,commands,skills,plugins}`, `.mcp.json`, `.envrc` in any granted folder; and in the home folder shell start-up files, `~/.gitconfig`, `~/.ssh/config`, `~/.claude.json`, `LaunchAgents`, `autostart`, `systemd/user`, `~/bin`, `~/.local/bin`; and `/etc/cron.d`, `/etc/profile.d`, `/etc/systemd/system`, `/Library/LaunchAgents`, `/Library/LaunchDaemons` |
+| What doesn't | `Makefile`, `package.json`, `pyproject.toml`, `Dockerfile`, `conftest.py`, `CLAUDE.md` and the like. Editing those is the agent's job, and a warning on every run would train you to ignore it. They are the [Writable folders others execute](#known-limits) limit instead. |
+| When it warns | Only for paths that **already exist** and are writable under the policy. A name the agent could create is not named: every writable folder has infinitely many. |
+| `hlyn claude` | Says nothing about Claude Code's own `~/.claude`, which it grants on purpose and explains [above](#claude-code-confined). It still names the project's hooks and `.mcp.json`. |
+| Where it looks | The granted folders only, bounded: at most 2000 folders, skipping `node_modules`, `.venv`, `target` and build output. Links are followed only as far as the kernel would. At most 12 paths are named. |
+| In Python | Raised as a `hlyn.Runs` warning, before anything is sealed, so the standard filters apply |
+| Make it an error | `PYTHONWARNINGS=error::hlyn.Runs` refuses the run (exit 2). In Python, `warnings.simplefilter("error", hlyn.Runs)` raises before the seal, so the process is left untouched. |
+| Check a policy yourself | `hlyn.later.found(policy)` returns the list |
 
 ### Policy files
 
@@ -663,7 +687,7 @@ An environment that oversells itself is worse than one that doesn't, so here is 
 | **Host names on Linux are new** | Tested on x86_64 without Yama so far. aarch64, and kernels with Yama, are designed for but not yet run. | `hlyn probe` says what this machine can do. |
 | **Seal before threads** | A thread started before `on()` would keep its access, so hlyn refuses to seal. | Call `on()` first, or use `hlyn.run(fn)`. |
 | **A granted socket grants its service** | The service behind a socket you allow (e.g. `docker.sock`) can hand the agent anything it can open. | Treat a socket grant like `exec` on that service. |
-| **Writable folders others execute** | Writing into a folder that cron, git hooks or CI later runs is running code outside the environment. | Don't grant write to folders something else executes from. |
+| **Writable folders others execute** | Writing into a folder that cron, git hooks or CI later runs is running code outside the environment. hlyn names the ones it finds before the run (see [Files that run later](#files-that-run-later)), but it can only refuse the whole folder, not one file in it. | Don't grant write to folders something else executes from. |
 | **Hardlinks** | A hardlink planted inside a granted folder beforehand reaches the file it points at. | Don't share granted folders with untrusted writers, and don't run as root. |
 | **GPU workloads** | CUDA writes under `/proc`, which is closed by default because it exposes the environment. | Grant `write=["/proc"]` and remove secrets at the source. |
 | **Python `multiprocessing`** | `Lock`, `Queue`, `Pool` and shared memory need a POSIX semaphore or shared-memory object, refused by default (Linux `/dev/shm`; macOS shared-memory operations). Threads and `subprocess` are unaffected. | Use threads or `subprocess`, or grant `write=["/dev/shm"]` on Linux (which also exposes other programs' segments there). |

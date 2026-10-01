@@ -414,11 +414,13 @@ def options() -> None:
     import warnings
 
     from .hosts import Reach
+    from .later import Runs
     from .secret import Exposed
 
     ours: dict[str, type[Warning]] = {
         "hlyn.Exposed": Exposed, "hlyn.secret.Exposed": Exposed,
         "hlyn.Reach": Reach, "hlyn.hosts.Reach": Reach,
+        "hlyn.Runs": Runs, "hlyn.later.Runs": Runs,
     }
     have = {item[2] for item in warnings.filters}
     for option in sys.warnoptions:
@@ -442,12 +444,16 @@ def _warn(plan: Policy) -> list[str]:
     """
     import warnings
 
+    from . import later
     from .hosts import Reach
     from .secret import Exposed, exposed, warning
 
     options()
     for said in reaches(plan):
         warnings.warn(said, Reach, stacklevel=3)
+    runs = later.found(plan)
+    if runs:
+        warnings.warn(later.warning(runs, cli=False), later.Runs, stacklevel=3)
     found = exposed(plan)
     if found:
         warnings.warn(warning(found, cli=False), Exposed, stacklevel=3)
