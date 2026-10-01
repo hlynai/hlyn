@@ -2,7 +2,8 @@
 """The command line.
 
     hlyn run -- python agent.py          confine, then run it
-    hlyn probe                           what can this machine enforce
+    hlyn claude                          Claude Code, confined to this folder
+    hlyn probe                          what can this machine enforce
     hlyn show --read /src                what would this policy grant
     hlyn presets                         what is available out of the box
 
@@ -36,10 +37,11 @@ def build() -> argparse.ArgumentParser:
     top.add_argument("-V", "--version", action="version", version=f"hlyn {__version__}")
     sub = top.add_subparsers(dest="verb", required=True)
 
-    def grants(p: argparse.ArgumentParser) -> None:
-        p.add_argument("-p", "--preset", metavar="NAME", help=f"one of: {', '.join(sorted(presets))}")
-        p.add_argument("-f", "--policy", metavar="FILE",
-                       help="read the policy from a .toml, .json or .yaml file")
+    def grants(p: argparse.ArgumentParser, starts: bool = True) -> None:
+        if starts:
+            p.add_argument("-p", "--preset", metavar="NAME", help=f"one of: {', '.join(sorted(presets))}")
+            p.add_argument("-f", "--policy", metavar="FILE",
+                           help="read the policy from a .toml, .json or .yaml file")
         p.add_argument("--read", action="append", metavar="PATH", default=[],
                        help="readable path (repeatable)")
         p.add_argument("--write", action="append", metavar="PATH", default=[],
@@ -68,6 +70,16 @@ def build() -> argparse.ArgumentParser:
                     help="print the list of what was blocked as JSON (on stderr)")
     go.add_argument("cmd", nargs=argparse.REMAINDER, help="-- command to run")
 
+    cc = sub.add_parser(
+        "claude", help="run Claude Code confined to this folder (flags add to what it gets)",
+    )
+    grants(cc, starts=False)
+    cc.add_argument("--no-report", action="store_true",
+                    help="do not list what was blocked when Claude Code ends")
+    cc.add_argument("--json", action="store_true",
+                    help="print the list of what was blocked as JSON (on stderr)")
+    cc.add_argument("cmd", nargs=argparse.REMAINDER, help="-- arguments for claude")
+
     check = sub.add_parser("probe", help="report what this machine can enforce")
     check.add_argument("--json", action="store_true", help="print as JSON")
 
@@ -88,8 +100,9 @@ def build() -> argparse.ArgumentParser:
     return top
 
 
-def _policy(args: argparse.Namespace) -> Policy:
-    """Turn flags into a policy, without applying anything.
+def _policy(args: argparse.Namespace, start: Policy | None = None) -> Policy:
+    """Turn flags into a policy, without applying anything. `start`, when
+    given, is the policy the flags add to (`hlyn claude`'s).
 
     A file and a preset are both starting points, and flags add to whichever
     was given -- never replace or narrow it. They are mutually exclusive on
@@ -106,20 +119,23 @@ def _policy(args: argparse.Namespace) -> Policy:
     field that already grants everything is a no-op, since the wider grant
     already covers it, so there is nothing misleading about leaving it be.
     """
-    if args.preset and args.policy:
+    preset_, file = getattr(args, "preset", None), getattr(args, "policy", None)
+    if preset_ and file:
         raise Error("give either --preset or --policy, not both: each is a whole policy.")
-    if args.policy:
-        base = spec.load(args.policy)
-    elif args.preset:
-        base = jail._plan(args.preset, {})
+    if start is not None:
+        base = start
+    elif file:
+        base = spec.load(file)
+    elif preset_:
+        base = jail._plan(preset_, {})
     else:
         base = Policy()
     net_from = None
-    if base.net is True:
-        if args.policy:
-            net_from = f"net = true in {args.policy}"
-        elif args.preset:
-            net_from = f"--preset {args.preset}"
+    if base.net is True and start is None:
+        if file:
+            net_from = f"net = true in {file}"
+        elif preset_:
+            net_from = f"--preset {preset_}"
     edits: dict[str, object] = {}
     if args.read:
         edits["read"] = _add(base.read, args.read)
@@ -465,8 +481,10 @@ def _gist(plan: Policy) -> str:
     return "; ".join(said)
 
 
-def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = False) -> int:
-    """Run `cmd` confined in a child, and say what it was refused.
+def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = False,
+            own: bool = False) -> int:
+    """Run `cmd` confined in a child, and say what it was refused. `own`
+    grants the command its own /proc/PID on Linux (see `_own`).
 
     The child seals itself and becomes `cmd`; this process stays unconfined to
     wait, listen for refusals while the command runs, pass on the exit code,
@@ -486,7 +504,7 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
     try:
         ear.start()
         book = report.Report(plan)
-        failed, status = _wait(cmd, ear.grant(plan), ear, book, plan)
+        failed, status = _wait(cmd, ear.grant(plan), ear, book, plan, own)
     finally:
         ear.close()
 
@@ -501,7 +519,24 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
     return code if code >= 0 else 128 - code
 
 
-def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> tuple[bool, int]:
+def _own(grants: Policy) -> Policy:
+    """`grants`, plus this process's own /proc/PID, to read (Linux).
+
+    Called in the process that seals and then execs the command, which keeps
+    its PID, so the command reads its own /proc/self and nothing else under
+    /proc. Its environment there is the one hlyn left (the exec replaced the
+    block), and another process's environment or command line stays refused.
+    Claude Code's runtime (Bun) aborts without /proc/self/cgroup. Granting all
+    of /proc would let it read every process's command line (FINDINGS.md,
+    "hlyn claude").
+    """
+    if sys.platform != "linux" or grants.read is True:
+        return grants
+    return grants.with_(read=(*(grants.read or ()), f"/proc/{os.getpid()}"))
+
+
+def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy,
+          own: bool = False) -> tuple[bool, int]:
     """Fork, seal and start the command, then listen until it exits.
 
     Returns whether it failed to start, and its wait status.
@@ -577,11 +612,12 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy) -> 
 
             def start() -> NoReturn:
                 try:
+                    mine = _own(grants) if own else grants
                     if way is None:
-                        jail._spawn(cmd, grants, ear.env, ear.tag)
+                        jail._spawn(cmd, mine, ear.env, ear.tag)
                     else:
                         port = jail._port(way)
-                        jail._spawn(cmd, grants, jail._both(ear.env, jail._proxied(port)), ear.tag,
+                        jail._spawn(cmd, mine, jail._both(ear.env, jail._proxied(port)), ear.tag,
                                     proxy=(port, way.pid))
                 except Error as exc:
                     print(f"hlyn: {exc}", file=sys.stderr)
@@ -896,6 +932,24 @@ def _run(argv: Sequence[str] | None = None) -> int:
     cmd = list(args.cmd)
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
+
+    if args.verb == "claude":
+        from . import claude
+
+        if args.no_tmp:
+            raise Error("hlyn claude needs its private folder: Claude Code keeps its temporary "
+                        "files there (CLAUDE_CODE_TMPDIR). Use hlyn run -- claude for another layout.")
+        full = claude.command(cmd)
+        note = claude.signin(os.environ)
+        if note:
+            print(note, file=sys.stderr)
+        box = claude.prepare(os.environ)
+        plan = _policy(args, claude.policy(full[0], os.environ, box))
+        if not _exposed(plan) or not _reach(plan):
+            return 2
+        jail.unbuilt(plan)
+        jail._ready(plan)
+        return _launch(full, plan, args.no_report, args.json, own=True)
 
     if args.verb == "watch":
         if not cmd:

@@ -90,6 +90,7 @@ With hlyn, the answer is "only what you wrote down."
 | **Policy files** | Keep the rules in a TOML, JSON or YAML file next to your code and review them like code. | `hlyn run -f policy.toml` / `hlyn.on("policy.toml")` |
 | **Presets** | Ready-made policies for common jobs: `strict`, `data`, `coder`, `web`, `debug`. | `hlyn.on("coder")` / `-p coder` |
 | **Four ways in** | Lock the current process, run one function in a locked child, replace the process with a locked command, or wrap any command from the terminal. | `hlyn.on()`, `hlyn.run(fn)`, `hlyn.spawn(cmd)`, `hlyn run -- cmd` |
+| **Claude Code in one command** | Claude Code confined to the project folder and Anthropic's API, with git working. | `hlyn claude` |
 | **Agent isolation** | On Linux, one agent can't signal or connect to another agent on the same machine, or reach any program's SysV shared memory or message queues. | automatic (Linux) |
 | **Dangerous system calls blocked** | Kernel tricks like `io_uring`, `ptrace`, mounting and loading kernel modules are always refused. | automatic (Linux) |
 | **Machine check** | Tells you what this computer can enforce, and why not when it can't. | `hlyn probe` |
@@ -179,6 +180,20 @@ hlyn run -f policy.toml -- ./my-agent
 `hlyn run` confines the command and everything it starts, whatever language it is written in. The command itself is always allowed to run, and so is the script it is asked to run: `python agent.py` may read `agent.py`, and `./tool` may start the interpreter its `#!` line names. Nothing beside them is.
 
 **Any Python works**, not just the one hlyn is installed in: a project venv, Homebrew's, pyenv's, `uv`'s, or Apple's `/usr/bin/python3`. Before sealing, hlyn asks that interpreter (itself confined: no writing, no network) where its standard library and packages are, and grants reading them. Launchers such as pyenv shims are followed to the real interpreter.
+
+### Claude Code, confined
+
+```bash
+hlyn claude                      # Claude Code in this folder
+hlyn claude --read ~/docs        # plus one more folder to read
+hlyn claude -- --resume          # arguments after -- go to claude
+```
+
+Claude Code can read and write this folder, write its own state (`~/.claude`), read `~/.claude.json`, run any program, and reach Anthropic's API (`api.anthropic.com`, or the host in `ANTHROPIC_BASE_URL`) and the sign-in refresh (`platform.claude.com`). Nothing else: not `~/.ssh`, not your other projects, not any other host. git works, with your `~/.gitconfig`; `~/.git-credentials` stays closed. Flags add to this, as for `hlyn run`.
+
+- **Sign-in on macOS:** Claude Code keeps it in the keychain, which stays closed to the agent. Run `claude setup-token` once (outside hlyn) and `export CLAUDE_CODE_OAUTH_TOKEN=...`, or set `ANTHROPIC_API_KEY`. On Linux the sign-in file in `~/.claude` works as it is.
+- **`~/.claude.json` is read-only:** it lists the MCP servers Claude Code starts outside any environment, so the agent can't add one. Settings Claude Code saves there during the run aren't kept.
+- **`~/.claude` is writable**, settings and hooks included, and a hook runs unconfined the next time you start `claude` without hlyn. Start it with `hlyn claude` each time.
 
 ### Confine one risky step, not the whole program
 
@@ -448,6 +463,7 @@ hlyn show --intent --read ./src --net 443 > policy.toml
 | Command | What it does |
 |---|---|
 | `hlyn run [flags] -- CMD` | Runs `CMD` confined, passes on its exit code, and lists what was blocked |
+| `hlyn claude [flags] [-- ARGS]` | Runs Claude Code confined to this folder ([Claude Code, confined](#claude-code-confined)); flags add to what it gets |
 | `hlyn watch -- CMD` | Runs a program **unconfined** and prints the policy it would need (on macOS, Python programs) |
 | `hlyn show [flags]` | Prints the full list of paths, hosts and ports a set of flags would grant |
 | `hlyn show --intent [flags]` | Prints the flags as a policy file you can check in |
@@ -455,7 +471,7 @@ hlyn show --intent --read ./src --net 443 > policy.toml
 | `hlyn probe` | Says what this machine can enforce; exits non-zero if it can't |
 | `hlyn --version` | Prints the version |
 
-Flags for `run` and `show`:
+Flags for `run`, `claude` (all but `-p` and `-f`) and `show`:
 
 | Flag | Grants |
 |---|---|
@@ -473,7 +489,7 @@ Flags for `run` and `show`:
 | `--no-tmp` | No private scratch folder |
 | `--log PATH` / `--no-log` | Write the log to a file, or nowhere |
 
-Only on `run`:
+Only on `run` and `claude`:
 
 | Flag | Does |
 |---|---|

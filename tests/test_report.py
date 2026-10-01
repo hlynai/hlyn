@@ -411,6 +411,21 @@ def test_listing_a_folder_above_it_is_never_given_a_flag(tmp_path):
     assert entry.allow is None
 
 
+def test_a_file_made_directly_in_the_home_folder_is_never_given_a_flag(tmp_path, monkeypatch):
+    # Making a file needs its folder, so this used to suggest `--write ~`:
+    # the whole home folder, to let Claude Code save ~/.claude.json through
+    # a temporary file beside it. One level down is still a normal flag.
+    home = tmp_path / "home"
+    (home / "notes").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    report = book(tmp_path)
+    top = one(report, kind="write", target=str(home / ".claude.json.tmp.1.ab"), op="open")
+    below = one(report, kind="write", target=str(home / "notes" / "new.txt"), op="open")
+    print(f"{top.target}: allow={top.allow!r} note={top.note!r}\n{below.target}: allow={below.allow!r}")
+    assert top.allow is None and top.quiet and "home folder" in top.note
+    assert below.allow == "--write ~/notes"
+
+
 def test_quiet_entries_alone_do_not_make_a_success_noisy(tmp_path):
     report = book(tmp_path)
     one(report, kind="read", target=str(tmp_path), op="opendir")

@@ -548,6 +548,13 @@ class Report:
             if credential(grant):
                 return Entry(kind, target, None, "inside a credential directory: not suggested",
                              credential=True, source=denial.source)
+            if os.path.realpath(grant) == os.path.realpath(os.path.expanduser("~")):
+                # A file made or replaced directly in the home folder (Claude
+                # Code saving ~/.claude.json through a temporary file beside
+                # it). The only grant is the whole home folder.
+                return Entry(kind, target, None,
+                             "in your home folder: a grant would expose everything inside",
+                             quiet=True, source=denial.source)
         return Entry(kind, target, flag(f"--{kind}", grant), source=denial.source)
 
     def _listing(self, path: str, target: str, source: str) -> Entry | None:

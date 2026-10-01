@@ -258,7 +258,11 @@ def _lib() -> tuple[str, ...]:
         return (
             "/usr/lib",
             "/usr/share/icu",
-            "/usr/share/zoneinfo",
+            # The system's time zone data, root-owned. /usr/share/zoneinfo and
+            # /etc/localtime both lead here; granting only zoneinfo left ICU's
+            # copy beside it (icutz) refused, and Claude Code's runtime (Bun)
+            # was killed (SIGKILL, before its first request) without it.
+            "/private/var/db/timezone",
             "/System/Library",
             "/private/var/db/dyld",
             # The whole cryptex volume, not just OS/: dyld probes Rosetta's
