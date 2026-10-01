@@ -53,7 +53,11 @@ def test_the_grants(home):
     plan = claude.policy("/opt/claude/bin/claude", env, box)
     print(plan)
     cwd = os.getcwd()
-    assert set(plan.write) == {cwd, str(home / ".claude")}
+    # The terminal is writable so the shell Claude Code starts can use it for
+    # job control; typing into it stays refused by both kernels (TIOCSTI).
+    assert set(plan.write) == {cwd, str(home / ".claude"), "/dev/tty"}
+    assert "/dev/tty" in plan.read
+    # The installation by both names: the link, and what it points at.
     assert cwd in plan.read and "/opt/claude/bin" in plan.read
     assert str(home / ".claude.json") in plan.read and str(home / ".claude.json") not in plan.write
     assert plan.exec is True
