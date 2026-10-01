@@ -44,7 +44,7 @@ import shutil
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, TextIO
 
 from .policy import Policy, under
 from .secret import credential, secret, secret_file
@@ -150,6 +150,9 @@ NOISE: frozenset[tuple[str, str]] = frozenset({
     ("read", "/dev/dtracehelper"),
     ("read", "/dev/fd"),
     ("read", "/proc/sys/vm/overcommit_memory"),
+    # Claude Code (Bun) lists /dev while starting, and carries on. Granting
+    # it would also expose the terminals of the person's other sessions.
+    ("read", "/dev"),
 })
 
 # macOS services refused under net=False because each one goes on the network
@@ -926,6 +929,59 @@ class Report:
         if items and self.why:
             out.append(f"hlyn: this list may be incomplete: {self.why}.")
         return "\n".join(out) + "\n" if out else ""
+
+    def brief(self, code: int, cmd: Iterable[str] = (), log: str | None = None,
+              hide: Callable[[Entry], bool] | None = None, stream: TextIO | None = None) -> str:
+        """`text`, as a table for `hlyn claude`: one line per refusal fitted
+        to the window, the flag that allows it on the right, then a single
+        line to start with next time. `hide` drops refusals the caller
+        expects (Claude Code asking the keychain after hlyn signed it in);
+        `--json` and the record keep them."""
+        import signal
+
+        from .term import Paint, squeeze, width
+
+        if code == -signal.SIGSYS or (code and not self.items()):
+            return self.text(code, cmd)
+        items = [e for e in self.items() if not (hide and hide(e))]
+        if not code:
+            items = [e for e in items if not e.quiet]
+        if not items:
+            return ""
+        stream = stream or sys.stderr
+        paint, cols = Paint(stream), width(stream)
+        count = len(items) + self.more
+        ending = {0: "ended"}.get(code)
+        how = ending or (f"stopped (signal {-code})" if code < 0 else f"exited with code {code}")
+        lines = ["", paint(f"hlyn claude: Claude Code {how}. hlyn refused it "
+                           f"{count} thing{'s' if count != 1 else ''}:", "bold"), ""]
+        words = {"read": "read", "write": "write", "exec": "run", "net": "network", "bind": "listen"}
+        for e in items:
+            right = e.allow or ("kept closed: a credential" if e.credential else (e.note or ""))
+            right = squeeze(right, max(20, cols // 3))
+            room = cols - 5 - 9 - len(right) - 2
+            target = squeeze(e.target, room)
+            mark = paint("✗", "red", "bold")
+            what = f"{words.get(e.kind, e.kind):<9}"
+            gap = " " * max(2, room - len(target) + 2)
+            lines.append(f"  {mark}  {what}{target}{gap}{paint(right, 'dim' if not e.allow else 'cyan')}")
+        if self.more:
+            lines.append(paint(f"     and {self.more} more, past the first {LIMIT}", "dim"))
+        allows = list(dict.fromkeys(e.allow for e in items if e.allow and not e.quiet))
+        if allows:
+            lines.append("")
+            again = "hlyn claude " + " ".join(allows)
+            if len(again) + 15 <= cols:
+                lines.append(f"  next time:  {paint(again, 'bold')}")
+            else:
+                lines.append("  next time: add the flags above you trust to hlyn claude")
+            if any(a.startswith("--net ") and not a[6:].isdigit() for a in allows):
+                lines.append(paint("  allow only hosts you recognise", "dim"))
+        if log:
+            lines.append(paint(f"  every refusal: {tilde(log)}", "dim"))
+        if items and self.why:
+            lines.append(paint(f"  this list may be incomplete: {self.why}", "dim"))
+        return "\n".join(lines) + "\n"
 
     def _group(self, items: list[Entry]) -> list[Entry]:
         """Entries sharing one suggested flag, folded into a single line.

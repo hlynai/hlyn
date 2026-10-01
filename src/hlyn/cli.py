@@ -488,9 +488,11 @@ def _gist(plan: Policy) -> str:
 
 
 def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = False,
-            own: bool = False) -> int:
+            own: bool = False, brief: dict[str, Any] | None = None) -> int:
     """Run `cmd` confined in a child, and say what it was refused. `own`
-    grants the command its own /proc/PID on Linux (see `_own`).
+    grants the command its own /proc/PID on Linux (see `_own`). `brief`, from
+    `hlyn claude`, asks for the compact report (`Report.brief`) with these
+    arguments.
 
     The child seals itself and becomes `cmd`; this process stays unconfined to
     wait, listen for refusals while the command runs, pass on the exit code,
@@ -520,6 +522,8 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
     book.why = ear.why or _deaf(ear, cmd)
     if as_json:
         sys.stderr.write(json.dumps(book.json(code)) + "\n")
+    elif brief is not None:
+        sys.stderr.write(book.brief(code, cmd, **brief))
     else:
         sys.stderr.write(book.text(code, cmd))
     return code if code >= 0 else 128 - code
@@ -713,17 +717,17 @@ def _starting(way: Any, final: bool = False) -> None:
         print(f"hlyn: {trouble}", file=sys.stderr)
 
 
-def _signed(had: set[str], note: str | None, env: Any) -> str:
-    """How Claude Code will sign in, in a few words, for `hlyn claude`'s summary."""
+def _signed(had: set[str], note: str | None, env: Any) -> tuple[bool, str]:
+    """Whether and how Claude Code will sign in, for `hlyn claude`'s summary."""
     from . import claude
 
     if note:
-        return "none found: run hlyn claude --login first"
+        return False, "none found: run hlyn claude --login first"
     if had:
-        return f"from {', '.join(sorted(had))}"
+        return True, f"from {', '.join(sorted(had))}"
     if env.get(claude.TOKEN):
-        return "the token hlyn claude --login kept, given to Claude Code only"
-    return "its own sign-in file in its state folder"
+        return True, "hlyn's keychain token, given to Claude Code only"
+    return True, "its own sign-in file in its state folder"
 
 
 def _ask(no: bool) -> bool | list[str]:
@@ -731,9 +735,13 @@ def _ask(no: bool) -> bool | list[str]:
     `no` makes no the answer to a bare Enter: starting somewhere risky."""
     import shlex
 
-    choices = "y/N" if no else "Y/n"
+    from .term import Paint
+
+    paint = Paint(sys.stderr)
+    keys = "Enter: no · y: yes" if no else "Enter: yes · n: no"
     while True:
-        sys.stderr.write(f"\nStart Claude Code? [{choices}, or add access like --read ~/docs] ")
+        sys.stderr.write(f"\n  {paint('Start Claude Code?', 'bold')}  {keys}\n"
+                         f"  {paint('or add access, e.g.  --read ~/docs --net pypi.org', 'dim')}\n  > ")
         sys.stderr.flush()
         line = sys.stdin.readline()
         if not line:
@@ -748,11 +756,11 @@ def _ask(no: bool) -> bool | list[str]:
         try:
             words = shlex.split(typed)
         except ValueError as exc:
-            print(f"hlyn: {exc}", file=sys.stderr)
+            print(f"  hlyn: {exc}", file=sys.stderr)
             continue
         if words and words[0].startswith("-"):
             return words
-        print("hlyn: type y to start, n to stop, or flags such as --read ~/docs --net pypi.org.",
+        print("  hlyn: type y to start, n to stop, or flags such as --read ~/docs --net pypi.org.",
               file=sys.stderr)
 
 
@@ -1081,7 +1089,8 @@ def _run(argv: Sequence[str] | None = None) -> int:
 
             mine = [path for path in exposed(plan)
                     if not any(under(os.path.realpath(path), os.path.realpath(k)) for k in known)]
-            print(claude.describe(plan, base, signed, mine, found(plan, known), log_to), file=sys.stderr)
+            print(claude.describe(plan, base, signed, mine, found(plan, known), log_to, sys.stderr),
+                  file=sys.stderr)
             answer = _ask(no=bool(claude.risky(os.getcwd())))
             if answer is True:
                 break
@@ -1091,11 +1100,12 @@ def _run(argv: Sequence[str] | None = None) -> int:
             try:
                 args = _more(args, answer)
             except Error as exc:
-                print(f"hlyn: {exc}", file=sys.stderr)
+                print(f"  hlyn: {exc}", file=sys.stderr)
             print(file=sys.stderr)
         jail.unbuilt(plan)
         jail._ready(plan)
-        return _launch(full, plan, args.no_report, args.json, own=True)
+        brief = {"log": plan.log if isinstance(plan.log, str) else None, "hide": claude.expected}
+        return _launch(full, plan, args.no_report, args.json, own=True, brief=brief)
 
     if args.verb == "watch":
         if not cmd:

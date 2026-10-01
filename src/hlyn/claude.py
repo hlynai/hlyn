@@ -34,7 +34,9 @@ import re
 import shutil
 import sys
 import tempfile
+import textwrap
 from collections.abc import MutableMapping
+from typing import TextIO
 from urllib.parse import urlsplit
 
 from .error import Error
@@ -78,6 +80,16 @@ TOOLS: tuple[str, ...] = (
 KERNEL: tuple[str, ...] = (
     "/sys/kernel/mm/transparent_hugepage/enabled", "/proc/sys/vm/mmap_min_addr",
     "/proc/sys/vm/overcommit_memory", "/sys/devices/system/cpu/online",
+)
+
+
+# Where Claude Code keeps its own housekeeping, outside its state folder:
+# version locks (native installs) and its cache, which holds its MCP servers'
+# logs. Refused, a real session's report listed them every time. Nothing here
+# runs later. Made by `prepare` where their parent exists.
+KEEPING: tuple[str, ...] = (
+    "~/.local/state/claude/locks",
+    "~/Library/Caches/claude-cli-nodejs" if sys.platform == "darwin" else "~/.cache/claude-cli-nodejs",
 )
 
 
@@ -154,7 +166,8 @@ def policy(binary: str, env: MutableMapping[str, str], tmp: str) -> Policy:
     )
     return Policy(
         read=tuple(read),
-        write=(cwd, mine, *(["/dev/tty"] if os.path.exists("/dev/tty") else [])),
+        write=(cwd, mine, *(["/dev/tty"] if os.path.exists("/dev/tty") else []),
+               *(path for path in map(os.path.expanduser, KEEPING) if os.path.isdir(path))),
         exec=True,
         net=(_model(env), *HOSTS[1:]),
         env=tuple(keep),
@@ -383,6 +396,9 @@ def prepare(env: MutableMapping[str, str]) -> str:
     exists (a grant needs a path that does), its temporary folder is private,
     and traffic that isn't the model is off. Returns the temporary folder."""
     os.makedirs(state(env), mode=0o700, exist_ok=True)
+    for path in map(os.path.expanduser, KEEPING):
+        if os.path.isdir(os.path.dirname(path)):
+            os.makedirs(path, mode=0o700, exist_ok=True)
     box = tempfile.mkdtemp(prefix="hlyn-claude-")
     env["CLAUDE_CODE_TMPDIR"] = box
     env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
@@ -428,62 +444,103 @@ def risky(where: str) -> str | None:
     return None
 
 
-def _few(paths: list[str], shown: int = 3) -> str:
+def expected(entry: object) -> bool:
+    """Refusals `hlyn claude` expects, left out of its report: Claude Code
+    asking the keychain for a sign-in (hlyn gave it one; the keychain stays
+    closed), and the `security` tool reading the keychain's message file for
+    it, and macOS reading the home folder's text-encoding hint. The record and
+    `--json` keep them."""
+    kind, target = getattr(entry, "kind", ""), getattr(entry, "target", "")
+    if kind == "system" and "com.apple.SecurityServer" in target:
+        return True
+    return kind == "read" and (
+        target.startswith("/var/db/mds/messages/") or os.path.basename(target) == ".CFUserTextEncoding")
+
+
+def _names(paths: list[str]) -> list[str]:
+    """`paths` as a person would type them: ./ inside this folder, ~/ in
+    the home folder; each once."""
     from .report import safe, tilde
 
     here = os.path.realpath(os.getcwd())
     names: list[str] = []
     for path in paths:
         real = os.path.realpath(path)
-        name = "./" + os.path.relpath(real, here) if real.startswith(here + os.sep) else tilde(real)
+        name = safe("./" + os.path.relpath(real, here) if real.startswith(here + os.sep) else tilde(real))
         if name not in names:
-            names.append(safe(name))
-    text = ", ".join(names[:shown])
-    return text + (f" (and {len(names) - shown} more)" if len(names) > shown else "")
+            names.append(name)
+    return names
 
 
-def describe(plan: Policy, base: Policy, signed: str, secrets: list[str], runs: list[str],
-             log: str | None) -> str:
-    """What `hlyn claude` is about to give Claude Code, for a person to read
-    before saying yes: a few lines, the risks last, nothing else."""
+def describe(plan: Policy, base: Policy, signed: tuple[bool, str], secrets: list[str], runs: list[str],
+             log: str | None, stream: TextIO | None = None) -> str:
+    """What `hlyn claude` is about to give Claude Code, as a table to take in
+    at a glance: what it can use (✓), what it can't (✗), what to watch (!).
+    Fitted to the window; nothing wraps."""
     from .report import tilde
+    from .term import Paint, fit, squeeze, width
 
+    stream = stream or sys.stderr
+    paint, cols = Paint(stream), width(stream)
+    label = 17
     cwd = os.getcwd()
-    rows = [("this folder", f"{tilde(cwd)}", "read and write")]
-    state = next((p for p in base.write or () if p != cwd and p != "/dev/tty"), None)
-    if state:
-        rows.append(("its own state", tilde(state), "read and write"))
-    hosts = "any host" if plan.net is True else ", ".join(str(h).removesuffix(":443") for h in plan.net or ())
-    rows.append(("network", hosts or "none", ""))
-    rows.append(("programs", "any, and they are confined the same way", ""))
-    rows.append(("sign-in", signed, ""))
-    for field, label in (("read", "read"), ("write", "write")):
-        mine, theirs = getattr(plan, field), getattr(base, field)
-        if mine is True:
-            rows.append(("also", "every file", label))
-        elif isinstance(mine, tuple):
-            extra = [p for p in mine if p not in (theirs or ())]
-            if extra:
-                rows.append(("also", ", ".join(tilde(p) for p in extra), label))
-    if plan.env is True:
-        rows.append(("also", "your whole environment, secrets included", ""))
-    width = max(len(name) for name, _, _ in rows)
-    lines = ["hlyn claude: Claude Code will start confined, with:", ""]
-    for name, what, how in rows:
-        lines.append(f"  {name:<{width}}  {what}" + (f"  ({how})" if how else ""))
-    lines += ["", "  Everything else is refused: other folders, other hosts, your keys and passwords."]
-    if log:
-        lines.append(f"  A record of what it was refused goes to {tilde(log)}.")
-    warnings = []
+
+    def row(mark: str, colour: str, name: str, value: str | list[str], how: str = "") -> str:
+        """One line: a path is cut in its middle, a list ends in "+N more",
+        a sentence is cut at its end."""
+        room = cols - 5 - label - (len(how) + 2 if how else 0)
+        if isinstance(value, list):
+            shown = fit(value, room)
+        elif value.startswith(("/", "~", "./")):
+            shown = squeeze(value, room)
+        else:
+            shown = value if len(value) <= room else value[: room - 1] + "…"
+        line = f"  {paint(mark, colour, 'bold')}  {name:<{label}}{shown}"
+        if how:
+            line += " " * max(2, room - len(shown) + 2) + paint(how, "dim")
+        return line
+
+    lines = [paint("hlyn claude: Claude Code, confined", "bold"), ""]
     danger = risky(cwd)
     if danger:
-        warnings.append(danger + ". Start it inside a project folder instead.")
+        # A warning is a sentence, so it wraps to the window (a table row is cut instead).
+        said = textwrap.wrap(danger[0].upper() + danger[1:] + ". Start it inside a project folder instead.",
+                             cols - 5)
+        lines += [f"  {paint('!', 'red', 'bold')}  {paint(said[0], 'red')}",
+                  *(f"     {paint(more, 'red')}" for more in said[1:]), ""]
+    lines.append(row("✓", "green", "this folder", tilde(cwd), "read + write"))
+    state = next((p for p in base.write or () if p not in (cwd, "/dev/tty")), None)
+    if state:
+        lines.append(row("✓", "green", "Claude's state", tilde(state), "read + write"))
+    hosts = (["any host"] if plan.net is True
+             else [str(h).removesuffix(":443") for h in plan.net or ()] or ["none"])
+    lines.append(row("✓", "green", "network", hosts))
+    lines.append(row("✓", "green", "programs", "any, confined the same way"))
+    ok, how = signed
+    lines.append(row("✓" if ok else "!", "green" if ok else "yellow", "sign-in", how))
+    for field, word in (("read", "read"), ("write", "read + write")):
+        mine, theirs = getattr(plan, field), getattr(base, field)
+        if mine is True:
+            lines.append(row("✓", "green", "also", "every file", word))
+        elif isinstance(mine, tuple):
+            extra = [tilde(p) for p in mine if p not in (theirs or ())]
+            if extra:
+                lines.append(row("✓", "green", "also", extra, word))
+    if plan.env is True:
+        lines.append(row("✓", "green", "also", "your whole environment, secrets included"))
+    lines.append(row("✗", "red", "everything else", "other folders, hosts, your keys"))
+
+    watch = []
     if secrets:
-        one = len(set(map(os.path.realpath, secrets))) == 1
-        warnings.append(f"it can read {'a secret file' if one else 'secret files'}: {_few(secrets)}")
+        names = _names(secrets)
+        watch.append(row("!", "yellow", "secret" if len(names) == 1 else "secrets", names))
     if runs:
-        warnings.append(f"it can change files that run later, outside hlyn: {_few(runs)}")
-    if warnings:
-        lines.append("")
-        lines += [f"  ! {text}" for text in warnings]
+        watch.append(row("!", "yellow", "runs later", _names(runs)))
+    if watch:
+        lines += ["", *watch]
+        if runs:
+            note = "these run later, outside hlyn"
+            lines.append(paint(f"     {'':<{label}}{note}", "dim"))
+    if log:
+        lines += ["", paint(f"  record of what it's refused: {tilde(log)}", "dim")]
     return "\n".join(lines)

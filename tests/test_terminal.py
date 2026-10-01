@@ -213,3 +213,37 @@ def test_ctrl_c_still_gives_the_report(tmp_path, net):
     report = term.seen.split("the command exited with code 130", 1)[1]
     assert "fell behind" not in report and "could not be listed" not in report
     assert "secret" in report and "allow with --read" in report
+
+
+@pytest.mark.parametrize("net", [["--net", "example.com"], []], ids=["hosts", "no network"])
+def test_a_command_that_exits_at_once_on_a_terminal_keeps_its_exit_status(tmp_path, net):
+    # The gate asked for the command's process group after it had already
+    # gone (macOS: ESRCH for a child not yet waited for), crashed with a
+    # traceback, and `echo`'s exit 0 became 1. A race, so run it ten times.
+    import pty
+
+    outcomes = []
+    for _ in range(10):
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(tmp_path)
+            env = {**os.environ, "PYTHONPATH": SRC}
+            argv = [sys.executable, "-m", "hlyn.cli", "run", "--no-log", "--no-report", *net,
+                    "--", "/bin/echo", "RAN"]
+            os.execve(sys.executable, argv, env)  # noqa: S606
+        seen = bytearray()
+        end = time.time() + 30
+        while time.time() < end:
+            if select.select([fd], [], [], 0.1)[0]:
+                try:
+                    data = os.read(fd, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                seen.extend(data)
+        _, status = os.waitpid(pid, 0)
+        os.close(fd)
+        outcomes.append((os.waitstatus_to_exitcode(status), "Traceback" in seen.decode(errors="replace")))
+    print(outcomes)
+    assert outcomes == [(0, False)] * 10

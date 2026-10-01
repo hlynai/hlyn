@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import pty
+import re
 import select
 import subprocess
 import sys
@@ -77,14 +78,15 @@ def typed(where, env, *answers, flags=()):
     pump(5)
     _, status = os.waitpid(pid, 0)
     os.close(fd)
-    return os.waitstatus_to_exitcode(status), seen.decode("utf-8", "replace").replace("\r", "")
+    shown = seen.decode("utf-8", "replace").replace("\r", "")
+    return os.waitstatus_to_exitcode(status), re.sub(r"\x1b\[[0-9;]*m", "", shown)  # colour is not the words
 
 
 def test_it_says_what_claude_code_gets_and_no_stops_it(place):
     _home, work, env = place
     code, screen = typed(work, env, "n")
     print(screen)
-    assert "Claude Code will start confined, with:" in screen
+    assert "hlyn claude: Claude Code, confined" in screen
     assert "this folder" in screen and "~/project" in screen
     assert "api.anthropic.com, platform.claude.com" in screen
     assert "from ANTHROPIC_API_KEY" in screen
@@ -103,7 +105,7 @@ def test_enter_starts_it_in_a_project(place):
     _home, work, env = place
     _code, screen = typed(work, env, "")
     print(screen)
-    assert "[Y/n" in screen and "CLAUDE RAN" in screen
+    assert "Enter: yes" in screen and "CLAUDE RAN" in screen
 
 
 def test_access_added_at_the_question_is_shown_then_used(place):
@@ -112,7 +114,7 @@ def test_access_added_at_the_question_is_shown_then_used(place):
     _code, screen = typed(work, env, "--read ~/docs --net pypi.org", "y")
     print(screen)
     second = screen.split("Start Claude Code?")[1]
-    assert "~/docs  (read)" in second and "pypi.org" in second
+    assert "~/docs" in second and "read" in second and "pypi.org" in second
     assert "CLAUDE RAN" in screen
 
 
@@ -137,8 +139,8 @@ def test_in_the_home_folder_it_warns_and_enter_means_no(place):
     home, _work, env = place
     _code, screen = typed(home, env, "")
     print(screen)
-    assert "this is your home folder" in screen
-    assert "[y/N" in screen and "hlyn: not started." in screen and "CLAUDE RAN" not in screen
+    assert "your home folder" in screen
+    assert "Enter: no" in screen and "hlyn: not started." in screen and "CLAUDE RAN" not in screen
 
 
 def test_risks_are_listed_last_and_short(place):
@@ -147,8 +149,9 @@ def test_risks_are_listed_last_and_short(place):
     (work / ".git" / "hooks").mkdir(parents=True)
     _code, screen = typed(work, env, "n")
     print(screen)
-    assert "! it can read a secret file: ./.env" in screen
-    assert "! it can change files that run later, outside hlyn: ./.git/hooks" in screen
+    assert re.search(r"!  secret +\./\.env", screen)
+    assert re.search(r"!  runs later +\./\.git/hooks", screen)
+    assert "these run later, outside hlyn" in screen
     # The long warnings are not printed as well.
     assert "Grant only the folders it needs" not in screen
     assert "Whatever it writes there runs unconfined" not in screen
@@ -173,7 +176,7 @@ def test_the_record_goes_to_a_file_not_the_screen(place):
     record = (home / "Library/Logs/hlyn/claude.jsonl" if sys.platform == "darwin"
               else home / ".local/state/hlyn/claude.jsonl")
     assert record.exists() and '"kind": "seal"' in record.read_text()
-    assert "A record of what it was refused goes to ~/" in screen
+    assert "record of what it's refused: ~/" in screen
 
 
 def test_yes_flag_skips_the_question(place):

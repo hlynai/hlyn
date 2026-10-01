@@ -419,7 +419,16 @@ def relay(child: int, *, forward: bool, terminal: int | None, guard: Guard | Non
     Returns only when dying by the child's signal didn't take (a signal
     whose default is to be ignored), with 128 + the signal, as shells report.
     """
-    group = os.getpgid(child) if terminal is not None else None
+    group = None
+    if terminal is not None:
+        try:
+            group = os.getpgid(child)
+        except ProcessLookupError:
+            # Already exited: a quick command, and macOS answers ESRCH for a
+            # child not yet waited for. Its group is named by its own pid
+            # (`become` sets it on both sides). Asking crashed the gate and
+            # turned `echo`'s exit 0 into 1, with a traceback, on a terminal.
+            group = child
 
     def pass_on(number: int, _frame: object) -> None:
         with contextlib.suppress(ProcessLookupError):
