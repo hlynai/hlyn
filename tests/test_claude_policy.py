@@ -111,8 +111,11 @@ def test_flags_add_to_what_claude_gets(home):
     ("darwin", {}, True, False),
     ("linux", {}, False, False),
 ])
-def test_the_macos_sign_in_note(home, monkeypatch, platform, env, creds, noted):
+def test_the_macos_sign_in_note(home, monkeypatch, platform, env, creds, noted, tmp_path):
     monkeypatch.setattr(claude.sys, "platform", platform)
+    # Never the real keychain: with no `security` here, nothing is kept.
+    # tests/test_claude_signin.py covers a kept token.
+    monkeypatch.setattr(claude, "SECURITY", str(tmp_path / "no-security-here"))
     if creds:
         (home / ".claude").mkdir()
         (home / ".claude" / ".credentials.json").write_text("{}")
@@ -120,4 +123,4 @@ def test_the_macos_sign_in_note(home, monkeypatch, platform, env, creds, noted):
     print(platform, env, creds, "->", note)
     assert (note is not None) == noted
     if noted:
-        assert "claude setup-token" in note and "CLAUDE_CODE_OAUTH_TOKEN" in note
+        assert "hlyn claude --login" in note

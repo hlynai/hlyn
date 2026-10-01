@@ -139,7 +139,11 @@ def test_a_setup_token_signs_in_without_the_keychain(place):
     if not enforces():
         pytest.skip("this machine can't enforce")
     home, work = place
-    steps = [("Write", {"file_path": str(work / "out.txt"), "content": "hello"})]
+    # The second step is what makes a kept token safer than an API key: Claude
+    # Code holds it, but strips it from the programs its Bash tool starts
+    # (an ANTHROPIC_API_KEY is passed through to them; measured).
+    steps = [("Write", {"file_path": str(work / "out.txt"), "content": "hello"}),
+             ("Bash", {"command": "env | grep -c CLAUDE_CODE_OAUTH_TOKEN; echo END"})]
     token = "sk-ant-oat01-not-a-real-token"  # noqa: S105 - a fake, for the scripted model
     done, model = session(steps, home, work, ANTHROPIC_API_KEY=None, CLAUDE_CODE_OAUTH_TOKEN=token)
     show("hlyn claude, signed in with a setup token", done, model, steps)
@@ -148,6 +152,8 @@ def test_a_setup_token_signs_in_without_the_keychain(place):
     assert done.returncode == 0 and (work / "out.txt").read_text() == "hello"
     assert model.headers and all(h.get("authorization") == f"Bearer {token}" for h in model.headers)
     assert not any("x-api-key" in h for h in model.headers)
+    shell = model.results()[1][1]
+    assert shell.split() == ["0", "END"], f"the agent's shell saw the token: {shell!r}"
     # Claude Code still asks the keychain (the report lists it); hlyn's note
     # about signing in is what must not appear.
     assert "keeps its sign-in in the macOS keychain" not in done.stderr

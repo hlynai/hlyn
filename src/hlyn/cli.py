@@ -78,6 +78,10 @@ def build() -> argparse.ArgumentParser:
                     help="do not list what was blocked when Claude Code ends")
     cc.add_argument("--json", action="store_true",
                     help="print the list of what was blocked as JSON (on stderr)")
+    cc.add_argument("--login", action="store_true",
+                    help="macOS: sign in once with `claude setup-token` and keep the token in your "
+                         "keychain, outside the agent's reach")
+    cc.add_argument("--logout", action="store_true", help="macOS: remove the token --login kept")
     cc.add_argument("cmd", nargs=argparse.REMAINDER, help="-- arguments for claude")
 
     check = sub.add_parser("probe", help="report what this machine can enforce")
@@ -968,6 +972,14 @@ def _run(argv: Sequence[str] | None = None) -> int:
             raise Error("hlyn claude needs its private folder: Claude Code keeps its temporary "
                         "files there (CLAUDE_CODE_TMPDIR). Use hlyn run -- claude for another layout.")
         full = claude.command(cmd)
+        if args.login:
+            print(claude.login(full[0], os.environ), file=sys.stderr)
+            return 0
+        if args.logout:
+            gone = claude.forget(os.environ)
+            print("hlyn: removed the sign-in hlyn claude kept." if gone
+                  else "hlyn: there was no sign-in to remove.", file=sys.stderr)
+            return 0
         note = claude.signin(os.environ)
         if note:
             print(note, file=sys.stderr)

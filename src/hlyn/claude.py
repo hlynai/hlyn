@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 from .error import Error
 from .policy import Policy
 
-__all__ = ["HOSTS", "command", "policy", "prepare", "signin", "state"]
+__all__ = ["HOSTS", "command", "forget", "login", "policy", "prepare", "save", "saved", "signin", "state"]
 
 # The model API, and the host that refreshes a signed-in session's token
 # (TOKEN_URL in Claude Code 2.1). Nothing else: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
@@ -161,29 +161,144 @@ def policy(binary: str, env: MutableMapping[str, str], tmp: str) -> Policy:
     )
 
 
+# -- signing in on macOS ------------------------------------------------------
+#
+# Claude Code keeps its sign-in in the macOS keychain and reads it with the
+# `security` tool. That stays closed to the agent: opening it would let the
+# agent's `security` read every item that tool may read, other command-line
+# tools' tokens included. So hlyn keeps a sign-in of its own there instead:
+# a long-lived token from `claude setup-token`, read by hlyn *outside* the
+# environment and handed to Claude Code alone as CLAUDE_CODE_OAUTH_TOKEN.
+# Measured (FINDINGS.md, "hlyn claude"): Claude Code strips that variable from
+# the programs its Bash tool starts, so the agent's commands never see it.
+#
+# The rules are OpenAPPA's for its own credential store
+# (`appa-runtime/src/credentials.rs`): the store is outside the agent, a
+# variable the person set always wins over it, and only the one variable goes
+# to the one program. Where OpenAPPA keeps a 0600 SQLite file, this uses the
+# keychain, written the way Claude Code writes its own item: `security -i`
+# reading the command on stdin, the secret hex-encoded (`-X`), so it is never
+# in the process list.
+
+SECURITY = "/usr/bin/security"  # by full path: never a `security` found on PATH
+SERVICE = "hlyn: Claude Code sign-in"
+TOKEN = "CLAUDE_CODE_OAUTH_TOKEN"  # noqa: S105 - a variable name, not a value
+
+
+def _keychain(env: MutableMapping[str, str]) -> list[str]:
+    """The keychain file to use, if not the default one (HLYN_KEYCHAIN)."""
+    where = env.get("HLYN_KEYCHAIN")
+    return [os.path.abspath(os.path.expanduser(where))] if where else []
+
+
+def _account() -> str:
+    import getpass
+
+    name = getpass.getuser()
+    if not name or '"' in name or "\\" in name or "\n" in name:
+        raise Error(f"can't keep a sign-in for the user name {name!r}.")
+    return name
+
+
+def saved(env: MutableMapping[str, str]) -> str | None:
+    """The token `hlyn claude --login` kept, or None. Read by hlyn itself,
+    unconfined, before anything is sealed."""
+    import subprocess
+
+    if sys.platform != "darwin" or not os.path.exists(SECURITY):
+        return None
+    done = subprocess.run(  # noqa: S603 - Apple's tool by full path, fixed arguments
+        [SECURITY, "find-generic-password", "-a", _account(), "-s", SERVICE, "-w", *_keychain(env)],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    token = done.stdout.strip()
+    return token if done.returncode == 0 and token else None
+
+
+def save(token: str, env: MutableMapping[str, str]) -> None:
+    """Keep `token` in the keychain, replacing any kept before."""
+    import subprocess
+
+    paths = _keychain(env)
+    if any('"' in path or "\n" in path for path in paths):
+        raise Error("HLYN_KEYCHAIN can't contain a quotation mark or a line break.")
+    keychain = "".join(f' "{path}"' for path in paths)
+    command = (f'add-generic-password -U -a "{_account()}" -s "{SERVICE}" '
+               f'-X "{token.encode().hex()}"{keychain}\n')
+    done = subprocess.run(  # noqa: S603 - Apple's tool by full path; the secret goes on stdin
+        [SECURITY, "-i"], input=command, capture_output=True, text=True, timeout=30, check=False,
+    )
+    # `security -i` answers 0 even when a command in it fails; check by reading.
+    if done.returncode != 0 or saved(env) != token:
+        raise Error(f"couldn't save the sign-in in the keychain: {(done.stderr or done.stdout).strip()}")
+
+
+def forget(env: MutableMapping[str, str]) -> bool:
+    """Remove the kept token. Returns whether there was one."""
+    import subprocess
+
+    if sys.platform != "darwin":
+        return False
+    done = subprocess.run(  # noqa: S603 - Apple's tool by full path, fixed arguments
+        [SECURITY, "delete-generic-password", "-a", _account(), "-s", SERVICE, *_keychain(env)],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    return done.returncode == 0
+
+
+def looks(token: str) -> bool:
+    """A plausible token: one word of printable characters, not a sentence
+    pasted by mistake. Its real check is Claude Code's first request."""
+    return 20 <= len(token) <= 4096 and token.isascii() and token.isprintable() and " " not in token
+
+
+def login(binary: str, env: MutableMapping[str, str]) -> str:
+    """`hlyn claude --login`: run `claude setup-token` (unconfined: it opens a
+    browser to sign in), ask for the token it prints, and keep it."""
+    import getpass
+    import subprocess
+
+    if sys.platform != "darwin":
+        return ("hlyn claude: nothing to do on this system. Sign in with `claude` as usual: "
+                "its sign-in file is in ~/.claude, which hlyn claude lets it use.")
+    print("hlyn: running `claude setup-token`: sign in in the browser it opens, "
+          "then copy the token it prints.", file=sys.stderr)
+    subprocess.run([binary, "setup-token"], check=False)  # noqa: S603 - claude, found on PATH by command()
+    token = getpass.getpass("hlyn: paste the token here (it won't be shown): ").strip()
+    if not looks(token):
+        raise Error("that doesn't look like a token (expected one word, like sk-ant-oat01-...). "
+                    "Nothing was saved; run hlyn claude --login again.")
+    save(token, env)
+    return (f"hlyn: saved in your keychain as \"{SERVICE}\". hlyn claude will use it from now on; "
+            "hlyn claude --logout removes it.")
+
+
 # Ways to sign in that don't need the keychain.
 SIGNINS: tuple[str, ...] = (
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", TOKEN,
     "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
 )
 
 
 def signin(env: MutableMapping[str, str]) -> str | None:
-    """macOS: a note when Claude Code's sign-in can only be in the keychain.
+    """Sign Claude Code in without opening the keychain to the agent.
 
-    Claude Code reads it with the `security` tool, and the keychain stays
-    closed: opening it lets the agent's `security` read every item that tool
-    may read (other command-line tools' tokens too), not just Claude Code's.
+    A variable the person set wins (as in OpenAPPA's `credentials::resolve`).
+    Otherwise, on macOS, the token `hlyn claude --login` kept is put in `env`
+    as CLAUDE_CODE_OAUTH_TOKEN. Returns a note to print, or None.
     """
     if sys.platform != "darwin" or any(env.get(name) for name in SIGNINS):
         return None
     if os.path.exists(os.path.join(state(env), ".credentials.json")):
         return None  # signed in without the keychain
+    token = saved(env)
+    if token:
+        env[TOKEN] = token
+        return None
     return (
         "hlyn: Claude Code keeps its sign-in in the macOS keychain, which stays closed to the agent "
         "(opening it could expose other saved passwords too).\n"
-        "      Sign in without it: run `claude setup-token` once, outside hlyn, then "
-        "export CLAUDE_CODE_OAUTH_TOKEN=<the token>; or set ANTHROPIC_API_KEY."
+        "      Sign in for hlyn once with: hlyn claude --login"
     )
 
 
