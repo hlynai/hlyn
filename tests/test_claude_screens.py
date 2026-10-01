@@ -184,7 +184,13 @@ def test_expected_hides_only_the_known_probes(kind, target, hidden):
 
 # --- the opening screen -------------------------------------------------------
 
-def test_the_opening_screen_marks_what_it_can_and_cant_use(monkeypatch):
+def rows_of(text: str) -> list[list[str]]:
+    """The table's rows as [mark, what, where, access], from the box."""
+    return [[c.strip() for c in ln.strip().strip("│").split("│")] for ln in text.splitlines()
+            if ln.strip().startswith("│")]
+
+
+def test_the_opening_screen_is_a_table_of_what_it_can_and_cant_use(monkeypatch):
     monkeypatch.setenv("COLUMNS", "100")
     cwd = os.getcwd()
     base = Policy(read=(cwd,), write=(cwd, "/h/.claude"), net=("api.anthropic.com",), env=())
@@ -195,10 +201,15 @@ def test_the_opening_screen_marks_what_it_can_and_cant_use(monkeypatch):
     print(text)
     lines = text.splitlines()
     assert lines[0] == "hlyn claude: Claude Code, confined"
-    assert any(re.match(r"  ✓  network +api.anthropic.com, pypi.org$", ln) for ln in lines)
-    assert any(re.match(r"  ✓  also +/h/docs +read$", ln) for ln in lines)
-    assert any(re.match(r"  ✓  sign-in +from the keychain$", ln) for ln in lines)
-    assert any(ln.startswith("  ✗  everything else") for ln in lines)
+    rows = rows_of(text)
+    assert rows[0] == ["", "what", "where", "access"]
+    assert ["✓", "network", "api.anthropic.com, pypi.org", "connect"] in rows
+    assert ["✓", "also", "/h/docs", "read"] in rows
+    assert ["✓", "sign-in", "from the keychain", "use"] in rows
+    assert ["✗", "everything else", "other folders, hosts, your keys", "blocked"] in rows
+    box = [ln for ln in lines if ln.strip() and ln.strip()[0] in "┌├└│"]
+    assert len({len(ln) for ln in box}) == 1, "the box is ragged"
+    assert box[0].strip().startswith("┌") and box[-1].strip().startswith("└")
     assert max(len(ln) for ln in lines) <= 100
 
 
@@ -208,7 +219,19 @@ def test_an_unsigned_start_is_marked_with_a_bang():
     text = claude.describe(plan, base, (False, "not signed in: hlyn claude --login"), [], [], None,
                            Tty(False))
     print(text)
-    assert re.search(r"  !  sign-in +not signed in: hlyn claude --login", text)
+    assert ["!", "sign-in", "not signed in: hlyn claude --login", ""] in rows_of(text)
+
+
+def test_secrets_and_files_that_run_later_are_rows_with_a_note():
+    cwd = os.getcwd()
+    base = plan = Policy(read=(cwd,), write=(cwd,), net=("api.anthropic.com",), env=())
+    text = claude.describe(plan, base, (True, "x"), [os.path.join(cwd, ".env")],
+                           [os.path.join(cwd, ".git/hooks")], None, Tty(False))
+    print(text)
+    rows = rows_of(text)
+    assert ["!", "secret", "./.env", "readable"] in rows
+    assert ["!", "runs later", "./.git/hooks", "writable"] in rows
+    assert "! runs later: what's written there runs outside hlyn" in text
 
 
 @pytest.mark.parametrize("columns", [60, 72, 120])

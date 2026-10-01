@@ -527,69 +527,54 @@ def describe(plan: Policy, base: Policy, signed: tuple[bool, str], secrets: list
     at a glance: what it can use (✓), what it can't (✗), what to watch (!).
     Fitted to the window; nothing wraps."""
     from .report import tilde
-    from .term import Paint, fit, squeeze, width
+    from .term import Paint, table, width
 
     stream = stream or sys.stderr
     paint, cols = Paint(stream), width(stream)
-    label = 17
     cwd = os.getcwd()
-
-    def row(mark: str, colour: str, name: str, value: str | list[str], how: str = "") -> str:
-        """One line: a path is cut in its middle, a list ends in "+N more",
-        a sentence is cut at its end."""
-        room = cols - 5 - label - (len(how) + 2 if how else 0)
-        if isinstance(value, list):
-            shown = fit(value, room)
-        elif value.startswith(("/", "~", "./")):
-            shown = squeeze(value, room)
-        else:
-            shown = value if len(value) <= room else value[: room - 1] + "…"
-        line = f"  {paint(mark, colour, 'bold')}  {name:<{label}}{shown}"
-        if how:
-            line += " " * max(2, room - len(shown) + 2) + paint(how, "dim")
-        return line
 
     lines = [paint("hlyn claude: Claude Code, confined", "bold"), ""]
     danger = risky(cwd)
     if danger:
-        # A warning is a sentence, so it wraps to the window (a table row is cut instead).
+        # A warning is a sentence, so it wraps to the window (a table cell is cut instead).
         said = textwrap.wrap(danger[0].upper() + danger[1:] + ". Start it inside a project folder instead.",
                              cols - 5)
         lines += [f"  {paint('!', 'red', 'bold')}  {paint(said[0], 'red')}",
                   *(f"     {paint(more, 'red')}" for more in said[1:]), ""]
-    lines.append(row("✓", "green", "this folder", tilde(cwd), "read + write"))
+    rows: list[tuple[str, str, list[str | list[str]]]] = []
+
+    def add(mark: str, colour: str, what: str, where: str | list[str], access: str = "") -> None:
+        rows.append((mark, colour, [what, where, access]))
+
+    add("✓", "green", "this folder", tilde(cwd), "read + write")
     state = next((p for p in base.write or () if p not in (cwd, "/dev/tty")), None)
     if state:
-        lines.append(row("✓", "green", "Claude's state", tilde(state), "read + write"))
+        add("✓", "green", "Claude's state", tilde(state), "read + write")
     hosts = (["any host"] if plan.net is True
              else [str(h).removesuffix(":443") for h in plan.net or ()] or ["none"])
-    lines.append(row("✓", "green", "network", hosts))
-    lines.append(row("✓", "green", "programs", "any, confined the same way"))
+    add("✓", "green", "network", hosts, "connect")
+    add("✓", "green", "programs", "any, confined the same way", "run")
     ok, how = signed
-    lines.append(row("✓" if ok else "!", "green" if ok else "yellow", "sign-in", how))
+    add("✓" if ok else "!", "green" if ok else "yellow", "sign-in", how, "use" if ok else "")
     for field, word in (("read", "read"), ("write", "read + write")):
         mine, theirs = getattr(plan, field), getattr(base, field)
         if mine is True:
-            lines.append(row("✓", "green", "also", "every file", word))
+            add("✓", "green", "also", "every file", word)
         elif isinstance(mine, tuple):
             extra = [tilde(p) for p in mine if p not in (theirs or ())]
             if extra:
-                lines.append(row("✓", "green", "also", extra, word))
+                add("✓", "green", "also", extra, word)
     if plan.env is True:
-        lines.append(row("✓", "green", "also", "your whole environment, secrets included"))
-    lines.append(row("✗", "red", "everything else", "other folders, hosts, your keys"))
-
-    watch = []
+        add("✓", "green", "also", "your whole environment, secrets included")
+    add("✗", "red", "everything else", "other folders, hosts, your keys", "blocked")
     if secrets:
         names = _names(secrets)
-        watch.append(row("!", "yellow", "secret" if len(names) == 1 else "secrets", names))
+        add("!", "yellow", "secret" if len(names) == 1 else "secrets", names, "readable")
     if runs:
-        watch.append(row("!", "yellow", "runs later", _names(runs)))
-    if watch:
-        lines += ["", *watch]
-        if runs:
-            note = "these run later, outside hlyn"
-            lines.append(paint(f"     {'':<{label}}{note}", "dim"))
+        add("!", "yellow", "runs later", _names(runs), "writable")
+    lines += table(["what", "where", "access"], rows, cols, paint)
+    if runs:
+        lines.append(paint("  ! runs later: what's written there runs outside hlyn", "dim"))
     if log:
         lines += ["", paint(f"  record of what it's refused: {tilde(log)}", "dim")]
     return "\n".join(lines)

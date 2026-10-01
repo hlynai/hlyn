@@ -149,9 +149,9 @@ def test_risks_are_listed_last_and_short(place):
     (work / ".git" / "hooks").mkdir(parents=True)
     _code, screen = typed(work, env, "n")
     print(screen)
-    assert re.search(r"!  secret +\./\.env", screen)
-    assert re.search(r"!  runs later +\./\.git/hooks", screen)
-    assert "these run later, outside hlyn" in screen
+    assert re.search(r"│ ! │ secret +│ \./\.env +│ readable", screen)
+    assert re.search(r"│ ! │ runs later +│ \./\.git/hooks +│ writable", screen)
+    assert "runs later: what's written there runs outside hlyn" in screen
     # The long warnings are not printed as well.
     assert "Grant only the folders it needs" not in screen
     assert "Whatever it writes there runs unconfined" not in screen

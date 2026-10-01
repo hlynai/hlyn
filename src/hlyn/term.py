@@ -14,7 +14,7 @@ import os
 import shutil
 from typing import TextIO
 
-__all__ = ["Paint", "fit", "squeeze", "width"]
+__all__ = ["Paint", "fit", "squeeze", "table", "width"]
 
 STYLES = {
     "bold": "1", "dim": "2", "green": "32", "red": "31", "yellow": "33", "cyan": "36",
@@ -74,3 +74,43 @@ def fit(items: list[str], room: int, sep: str = ", ") -> str:
             return sep.join(shown) + f"  +{len(items) - len(shown)} more"
         shown.append(item)
     return sep.join(shown)
+
+
+def table(head: list[str], rows: list[tuple[str, str, list[str | list[str]]]], cols: int, paint: Paint,
+          flex: int = 1) -> list[str]:
+    """A box-drawn table fitted to `cols`. Each row is (mark, colour, cells);
+    the mark is the first column, the cells follow `head`. Column `flex` takes
+    what the others leave: a list there ends in "+N more", a path is cut in
+    its middle, a sentence at its end. Nothing wraps."""
+    def plain(cell: str | list[str]) -> str:
+        return ", ".join(cell) if isinstance(cell, list) else cell
+
+    count = len(head)
+    wide = [max([len(head[i]), *(len(plain(cells[i])) for _, _, cells in rows)]) for i in range(count)]
+    mark_cell = 1
+    # Indent, borders on both ends and between cells, a space either side of each cell.
+    spent = 2 + 1 + count + 1 + sum(w + 2 for w in [mark_cell, *wide]) - wide[flex]
+    wide[flex] = max(12, min(wide[flex], cols - spent))
+
+    def line(left: str, mid: str, right: str) -> str:
+        pieces = ["─" * (w + 2) for w in [mark_cell, *wide]]
+        return "  " + paint(left + mid.join(pieces) + right, "dim")
+
+    def cut(cell: str | list[str], room: int) -> str:
+        if isinstance(cell, list):
+            return fit(cell, room)
+        if cell.startswith(("/", "~", "./")):
+            return squeeze(cell, room)
+        return cell if len(cell) <= room else cell[: room - 1] + "…"
+
+    bar = paint("│", "dim")
+    out = [line("┌", "┬", "┐"),
+           "  " + bar + f" {' ':<{mark_cell}} " + bar + bar.join(
+               f" {paint(head[i].ljust(wide[i]), 'bold')} " for i in range(count)) + bar,
+           line("├", "┼", "┤")]
+    for mark, colour, cells in rows:
+        shown = [cut(cells[i], wide[i]).ljust(wide[i]) for i in range(count)]
+        out.append("  " + bar + f" {paint(mark, colour, 'bold')} " + bar
+                   + bar.join(f" {text} " for text in shown) + bar)
+    out.append(line("└", "┴", "┘"))
+    return out
