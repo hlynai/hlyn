@@ -16,6 +16,7 @@ hlyn is security software, and bugs hide in code only we have run. A kernel faci
 - Names are plain English, one word where possible: guessable from the name alone.
 - Every message says what to do next: a refusal names the flag or field that changes the outcome.
 - Human output by default, `--json` on every command that prints data.
+- **Understood at a glance.** Anything a person reads (a screen, a report, an error, a prompt) is designed to be taken in in one look: a table or short rows with a mark, never paragraphs; the answer first, detail after; examples drawn from the person's own situation; nothing repeated on screen that hasn't changed. Check it by looking at the real output at 60 and 100 columns, not by reading the code.
 - **Say "environment", never "sandbox"**, in code, comments, docs, messages, tests and commits: "the agent's environment", "outside the environment", "confined" for the adjective. Exceptions, kept exact: `sandbox_init`, `sandbox-exec`, `(target same-sandbox)`, the macOS log sender `Sandbox`, other products' names (Docker Sandboxes, sandbox-runtime), URLs, verbatim quotes, and the PyPI search keyword in `pyproject.toml`.
 
 ## Evidence

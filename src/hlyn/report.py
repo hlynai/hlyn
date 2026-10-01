@@ -942,7 +942,7 @@ class Report:
         sees where it came from."""
         import signal
 
-        from .term import Paint, squeeze, width
+        from .term import Paint, width
 
         if code == -signal.SIGSYS or (code and not self.items()):
             return self.text(code, cmd)
@@ -959,20 +959,15 @@ class Report:
         lines = ["", paint(f"Claude Code {how}. hlyn blocked "
                            f"{count} thing{'s' if count != 1 else ''}:", "bold"), ""]
         words = {"read": "read", "write": "write", "exec": "run", "net": "network", "bind": "listen"}
-        rows = []
+        from .term import table
+
+        grid: list[tuple[str, str, list[str | list[str]]]] = []
         for e in items:
             source = who(e) if who else ""
             right = source or e.allow or ("kept closed: a credential" if e.credential else (e.note or ""))
-            rows.append((e, source, squeeze(right, max(20, cols // 3))))
-        side = max(len(right) for _, _, right in rows)  # one right-hand column, so it lines up
-        room = cols - 5 - 9 - side - 2
-        for e, source, right in rows:
-            target = squeeze(e.target.removesuffix(":443") if e.kind == "net" else e.target, room)
-            mark = paint("✗", "red", "bold")
-            what = f"{words.get(e.kind, e.kind):<9}"
-            gap = " " * (room - len(target) + 2)
-            colour = "cyan" if e.allow and not source else "dim"
-            lines.append(f"  {mark}  {what}{target}{gap}{paint(right, colour)}")
+            target = e.target.removesuffix(":443") if e.kind == "net" else e.target
+            grid.append(("✗", "red", [words.get(e.kind, e.kind), target, right]))
+        lines += table(["what", "blocked", "from · to allow"], grid, cols, paint, flex=1)
         if self.more:
             lines.append(paint(f"     and {self.more} more, past the first {LIMIT}", "dim"))
         allows = list(dict.fromkeys(e.allow for e in items if e.allow and not e.quiet))

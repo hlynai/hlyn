@@ -88,6 +88,7 @@ def table(head: list[str], rows: list[tuple[str, str, list[str | list[str]]]], c
     count = len(head)
     wide = [max([len(head[i]), *(len(plain(cells[i])) for _, _, cells in rows)]) for i in range(count)]
     mark_cell = 1
+    wide = [w if i == flex else min(w, max(len(head[i]), cols // 3)) for i, w in enumerate(wide)]
     # Indent, borders on both ends and between cells, a space either side of each cell.
     spent = 2 + 1 + count + 1 + sum(w + 2 for w in [mark_cell, *wide]) - wide[flex]
     wide[flex] = max(12, min(wide[flex], cols - spent))

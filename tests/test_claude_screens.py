@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import io
 import os
-import re
 import signal
 
 import pytest
@@ -120,8 +119,10 @@ def test_the_end_report_is_a_table_with_one_next_command():
     print(text)
     lines = text.splitlines()
     assert "Claude Code ended. hlyn blocked 2 things:" in text
-    assert any(re.match(r"  ✗  network +example.com +--net example.com$", ln) for ln in lines)
-    assert any(re.match(r"  ✗  read +/opt/data/file.csv +--read /opt/data/file.csv$", ln) for ln in lines)
+    rows = rows_of(text)
+    assert rows[0] == ["", "what", "blocked", "from · to allow"]
+    assert ["✗", "network", "example.com", "--net example.com"] in rows
+    assert ["✗", "read", "/opt/data/file.csv", "--read /opt/data/file.csv"] in rows
     assert "  to allow:  hlyn claude --read /opt/data/file.csv --net example.com" in lines
     assert any("allow only hosts you recognise" in ln for ln in lines)
     assert all(len(ln) <= 100 for ln in lines)
@@ -331,9 +332,10 @@ def test_a_refused_host_is_traced_to_the_mcp_server_or_plugin_that_reached_for_i
                   ).brief(0, stream=Tty(False), who=lambda e: claude.whose(e, hosts))
     print(text)
     lines = text.splitlines()
-    assert any(re.match(r'  ✗  network +mcp.getrunpod.io +your MCP server "runpod"$', ln) for ln in lines)
-    assert any(re.match(r'  ✗  network +api.githubcopilot.com +the "github" plugin$', ln) for ln in lines)
-    assert any(re.match(r"  ✗  network +unknown.example +--net unknown.example$", ln) for ln in lines), \
+    rows = rows_of(text)
+    assert ["✗", "network", "mcp.getrunpod.io", 'your MCP server "runpod"'] in rows
+    assert ["✗", "network", "api.githubcopilot.com", 'the "github" plugin'] in rows
+    assert ["✗", "network", "unknown.example", "--net unknown.example"] in rows, \
         "a host nobody configured shows its flag instead"
     again = "  to allow:  hlyn claude " + " ".join(
         f"--net {h}" for h in ("api.githubcopilot.com", "mcp.getrunpod.io", "unknown.example"))
@@ -348,11 +350,12 @@ def test_whose_names_only_network_refusals_and_only_known_hosts():
     assert claude.whose(refused("read", "mcp.example.org:443"), hosts) == ""
 
 
-def test_the_right_hand_column_lines_up_across_rows(monkeypatch):
+def test_the_end_report_box_is_not_ragged(monkeypatch):
     monkeypatch.setenv("COLUMNS", "100")
     text = report(refused("net", "a.example:443", "--net a.example"),
                   refused("net", "much-longer-host.example.org:443", "--net much-longer-host.example.org"),
                   refused("read", "/opt/x", "--read /opt/x")).brief(0, stream=Tty(False))
     print(text)
-    starts = {ln.index("--") for ln in text.splitlines() if ln.startswith("  ✗")}
-    assert len(starts) == 1, starts
+    box = [ln for ln in text.splitlines() if ln.strip() and ln.strip()[0] in "┌├└│"]
+    assert len({len(ln) for ln in box}) == 1, "the box is ragged"
+    assert {ln.index("│", 5) for ln in box if ln.strip().startswith("│")} == {box[1].index("│", 5)}
