@@ -636,6 +636,38 @@ def classify(address: IPAddress | str, mine: Iterable[IPAddress | str] = ()) -> 
     return None
 
 
+# Single addresses a cloud's metadata service answers on that the table above
+# files under a broader range (a legitimate CGNAT network, a reserved block).
+_METADATA = frozenset({
+    ipaddress.ip_address("100.100.100.200"),  # Alibaba
+    ipaddress.ip_address("192.0.0.192"),  # Oracle
+})
+
+
+def metadata(address: IPAddress | str) -> bool:
+    """Whether `address` is where a machine's cloud hands out its own
+    credentials: a metadata address, or any link-local one (AWS, Azure and
+    GCP's IPv4 metadata address, 169.254.169.254, is link-local). Never a
+    host to suggest allowing: whoever reaches it gets the machine's role."""
+    parsed = _as_address(address)
+    if parsed is None:
+        return False
+    ip = unwrap(parsed)
+    return ip in _METADATA or classify(ip) in ("cloud-metadata", "link-local")
+
+
+def credentials_at(target: str) -> bool:
+    """Whether `target` ("ip:port", "[ip]:port" or a bare address) is an IP
+    literal where a cloud hands out its machine's credentials (`metadata`).
+    A name, or anything that isn't an address, is not."""
+    name = target.strip()
+    if name.startswith("["):
+        name = name[1:].split("]")[0]
+    elif name.count(":") == 1:
+        name = name.rsplit(":", 1)[0]
+    return metadata(name.split("%")[0])
+
+
 # ---------------------------------------------------------------------------
 # local-service port warnings (6.7)
 # ---------------------------------------------------------------------------

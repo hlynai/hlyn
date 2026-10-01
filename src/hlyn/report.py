@@ -202,6 +202,13 @@ WHY: dict[str, str] = {
     "busy": "the proxy was at its limit of connections at once",
 }
 
+# The note on a refused metadata address (`hosts.metadata`): never a flag.
+METADATA_NOTE = (
+    "A cloud metadata address: it hands out this machine's own credentials, so hlyn doesn't offer to "
+    "allow it. Claude Code goes there when it has none of its own. Pass yours: --env AWS_ACCESS_KEY_ID "
+    "--env AWS_SECRET_ACCESS_KEY (and --env AWS_SESSION_TOKEN if they are temporary)."
+)
+
 # Every machine key `--json` can carry as `why` on a `net` entry (4.6): the
 # proxy's reasons (WHY), the gate's own (`unix*`, `udp`, `gate-error`), and the
 # ones both say. Stable: scripts match on these, never on the prose.
@@ -590,12 +597,14 @@ class Report:
         not trusted: the proxy reads what the agent sends, so a suggested flag
         is used only if it parses as an entry and says exactly that."""
         from .error import Invalid
-        from .hosts import parse
+        from .hosts import credentials_at, parse
 
         why = denial.op
         if why not in WHY:
             return None
         target = safe(denial.target)[:300] or "a connection"
+        if credentials_at(denial.target):
+            return Entry("net", target, None, METADATA_NOTE, source="proxy")
         allow = denial.allow if denial.allow.startswith("--net ") else None
         if allow is not None:
             try:
@@ -946,7 +955,7 @@ class Report:
         sees where it came from."""
         import signal
 
-        from .term import Paint, width
+        from .term import Paint, squeeze, width
 
         if code == -signal.SIGSYS or (code and (self.silent or not self.items())):
             return self.text(code, cmd)
@@ -963,15 +972,26 @@ class Report:
         lines = ["", paint(f"Claude Code {how}. hlyn blocked "
                            f"{count} thing{'s' if count != 1 else ''}:", "bold"), ""]
         words = {"read": "read", "write": "write", "exec": "run", "net": "network", "bind": "listen"}
+        import textwrap
+
         from .term import table
 
         grid: list[tuple[str, str, list[str | list[str]]]] = []
+        below: dict[str, list[str]] = {}  # notes too long for a cell, said once in full under the table
+        room = max(20, cols // 3)
         for e in items:
             source = who(e) if who else ""
             right = source or e.allow or ("kept closed: a credential" if e.credential else (e.note or ""))
             target = e.target.removesuffix(":443") if e.kind == "net" else e.target
+            if not (source or e.allow or e.credential or e.quiet) and len(right) > room:
+                below.setdefault(right, []).append(target)
+                right = "see below"
             grid.append(("✗", "red", [words.get(e.kind, e.kind), target, right]))
         lines += table(["what", "blocked", "from · to allow"], grid, cols, paint, flex=1)
+        for note, targets in below.items():
+            heading = squeeze(", ".join(targets), cols - 4)
+            said = textwrap.wrap(note, cols - 6)
+            lines += ["", f"  {paint(heading, 'bold')}", *(f"    {row}" for row in said)]
         if self.more:
             lines.append(paint(f"     and {self.more} more, past the first {LIMIT}", "dim"))
         allows = list(dict.fromkeys(e.allow for e in items if e.allow and not e.quiet))

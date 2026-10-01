@@ -891,6 +891,8 @@ class Proxy:
             )
         allow = _flag(target)
         text = f"hlyn: {target} is not in --net" + (f" (allow with {allow})" if allow else "")
+        if hosts.credentials_at(target):
+            text += ": it hands out this machine's cloud credentials, so hlyn doesn't offer to allow it"
         if why == "dns":
             text += "; with --net hosts the proxy resolves names, so programs never need DNS"
         return _Refused(403, text, self._event(why, target, allow))
@@ -928,9 +930,10 @@ class Proxy:
         address, why = dropped[0]
         kind = _CLASS.get(why or "", f"a{'n' if (why or 'x')[0] in 'aeiou' else ''} {why} address")
         allow = _flag(_shown(hosts.unwrap(address), port))
-        text = (
-            f"hlyn: {name} resolves to {kind} ({address}); allow it by address: {allow}"
-        )
+        text = f"hlyn: {name} resolves to {kind} ({address})" + (
+            f"; allow it by address: {allow}" if allow
+            else ": it hands out this machine's cloud credentials, so hlyn doesn't offer to allow it"
+            if hosts.metadata(address) else "")
         raise _Refused(403, text, self._event("private-address", shown, allow, address=str(address)))
 
     async def _dial(
@@ -1079,7 +1082,11 @@ def _named(name: str | None, port: int) -> str:
 
 def _flag(target: str) -> str | None:
     """The `--net` flag that would allow `target`, or `None` if it isn't one
-    the grammar accepts (then no flag is suggested, per 4.6)."""
+    the grammar accepts (then no flag is suggested, per 4.6), or if it is an
+    address where a cloud hands out its machine's credentials: allowing that
+    gives the agent the machine's role, so it is never offered."""
+    if hosts.credentials_at(target):
+        return None
     try:
         return hosts.parse(target).flag()
     except Invalid:

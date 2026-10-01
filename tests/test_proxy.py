@@ -571,10 +571,12 @@ def test_row_9_a_wrapped_address_not_listed_is_refused(target):
 
     answer, events, net = run(scenario())
     print(target, "->", status(answer), events)
+    # The address a cloud answers credentials requests on: no flag is offered for it.
     assert status(answer) == (
-        "HTTP/1.1 403 hlyn: 169.254.169.254:443 is not in --net (allow with --net 169.254.169.254)"
+        "HTTP/1.1 403 hlyn: 169.254.169.254:443 is not in --net: it hands out this machine's cloud "
+        "credentials, so hlyn doesn't offer to allow it"
     )
-    assert net.dialled == []
+    assert net.dialled == [] and events[0]["allow"] is None
 
 
 @pytest.mark.parametrize("target", ["[fe80::1%25en0]:443", "[fe80::1%en0]:443", "a.example%00:443"])
@@ -648,9 +650,17 @@ def test_row_11_a_name_resolving_privately_is_refused(answer_, kind):
     print(answer_, "->", status(answer), events, sep="\n")
     shown = hosts.unwrap(ipaddress.ip_address(answer_))
     allow = f"--net [{shown}]" if shown.version == 6 else f"--net {shown}"
-    assert status(answer) == (
-        f"HTTP/1.1 403 hlyn: api.example.com resolves to {kind} ({answer_}); allow it by address: {allow}"
-    )
+    if hosts.metadata(answer_):
+        # Where a cloud hands out its machine's credentials: never offered as a flag.
+        assert status(answer) == (
+            f"HTTP/1.1 403 hlyn: api.example.com resolves to {kind} ({answer_}): it hands out this "
+            "machine's cloud credentials, so hlyn doesn't offer to allow it"
+        )
+        allow = None
+    else:
+        assert status(answer) == (
+            f"HTTP/1.1 403 hlyn: api.example.com resolves to {kind} ({answer_}); allow it by address: {allow}"
+        )
     assert net.dialled == []
     assert events[0]["why"] == "private-address" and events[0]["allow"] == allow
 

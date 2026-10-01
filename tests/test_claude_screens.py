@@ -438,3 +438,77 @@ def test_quiet_refusals_are_shown_only_when_the_run_failed_and_never_offer_their
     only = report()
     only.entries[("write", "/opt/noise/cache")] = book.entries[("write", "/opt/noise/cache")]
     assert only.brief(0, stream=Tty(False)) == ""
+
+
+# --- a metadata address is never offered as a flag -----------------------------
+
+METADATA = ["169.254.169.254:80", "[fd00:ec2::254]:80", "168.63.129.16:80", "100.100.100.200:80",
+            "[fe80::1]:443"]
+
+
+@pytest.mark.parametrize("target", METADATA)
+def test_a_cloud_metadata_address_is_refused_without_a_flag_and_with_the_real_fix(target):
+    book = report(refused("net", target, f"--net {target}"))
+    entry = book.items()[0]
+    print(entry.allow, "|", entry.note)
+    assert entry.allow is None, "a flag was offered for a credentials address"
+    assert "--env AWS_ACCESS_KEY_ID" in entry.note and "--env AWS_SECRET_ACCESS_KEY" in entry.note
+    assert book.json(1)["blocked"][0]["allow"] is None
+    for text in (book.text(1), book.brief(1, stream=Tty(False))):
+        print(text)
+        assert f"--net {target}" not in text and "  to allow:" not in text
+        assert "--env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY" in " ".join(text.split()), \
+            "the fix wasn't said (words may wrap, so whitespace is joined)"
+
+
+def test_other_hosts_beside_a_metadata_address_keep_their_flags_and_the_note_is_said_once():
+    book = report(refused("net", "169.254.169.254:80", "--net 169.254.169.254:80"),
+                  refused("net", "[fd00:ec2::254]:80", "--net [fd00:ec2::254]:80"),
+                  refused("net", "example.com:443", "--net example.com"))
+    text = book.brief(1, stream=Tty(False))
+    print(text)
+    rows = rows_of(text)
+    assert ["✗", "network", "169.254.169.254:80", "see below"] in rows
+    assert ["✗", "network", "example.com", "--net example.com"] in rows
+    assert text.count("A cloud metadata address") == 1, "the same note was repeated"
+    assert "  to allow:  hlyn claude --net example.com\n" in text
+    assert max(len(ln) for ln in text.splitlines()) <= 100
+
+
+@pytest.mark.parametrize("columns", [60, 100])
+def test_a_note_too_long_for_its_cell_is_said_in_full_below_the_table(columns, monkeypatch):
+    monkeypatch.setenv("COLUMNS", str(columns))
+    book = report(refused("net", "169.254.169.254:80", "--net 169.254.169.254:80"))
+    text = book.brief(1, stream=Tty(False))
+    print(text)
+    lines = text.splitlines()
+    below = lines[lines.index("  169.254.169.254:80") + 1:]
+    said = " ".join(ln.strip() for ln in below if ln.startswith("    "))
+    assert said.endswith("(and --env AWS_SESSION_TOKEN if they are temporary).")
+    assert max(len(ln) for ln in text.splitlines()) <= columns
+
+
+def test_many_metadata_addresses_still_fit_the_window(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "60")
+    book = report(*(refused("net", f"169.254.169.{n}:80", f"--net 169.254.169.{n}:80") for n in range(1, 13)))
+    text = book.brief(1, stream=Tty(False))
+    print(text)
+    assert max(len(ln) for ln in text.splitlines()) <= 60
+    assert text.count("A cloud metadata address") == 1
+
+
+def test_a_quiet_refusals_long_note_is_cut_in_its_cell_not_said_below():
+    from hlyn.report import Entry
+
+    book = report(refused("net", "169.254.169.254:80", "--net 169.254.169.254:80"))
+    book.entries[("write", "/opt/noise/cache")] = Entry(
+        "write", "/opt/noise/cache", None, "in your home folder: a grant would expose everything inside",
+        quiet=True, source="program")
+    text = book.brief(1, stream=Tty(False))
+    print(text)
+    rows = rows_of(text)
+    assert ["✗", "network", "169.254.169.254:80", "see below"] in rows
+    quiet = next(row for row in rows if row[2] == "/opt/noise/cache")
+    assert quiet[3].endswith("…") and quiet[3] != "see below"
+    assert "a grant would expose everything inside" not in text
+    assert text.count("\n  /opt/noise/cache\n") == 0

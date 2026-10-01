@@ -397,3 +397,26 @@ def test_parse_either_returns_a_rule_or_refuses_cleanly(text):
         assert str(exc)
     else:
         assert hosts.parse(str(rule)) == rule
+
+
+@pytest.mark.parametrize("address", [
+    "169.254.169.254", "169.254.0.1", "fe80::1", "fd00:ec2::254", "168.63.129.16", "fd20:ce::254",
+    "100.100.100.200", "192.0.0.192", "::ffff:169.254.169.254", "64:ff9b::a9fe:a9fe",
+    "::ffff:100.100.100.200", "::ffff:192.0.0.192",
+    ipaddress.ip_address("169.254.169.254"),
+])
+def test_metadata_addresses_are_where_a_machine_hands_out_its_credentials(address):
+    found = hosts.metadata(address)
+    print(f"{address} -> {found}")
+    assert found is True
+
+
+@pytest.mark.parametrize("address", [
+    "93.184.215.14", "8.8.8.8", "10.0.0.1", "127.0.0.1", "::1", "192.168.1.1",
+    "100.64.0.1",  # carrier-grade NAT, which Tailscale uses: not a metadata service
+    "100.100.100.201", "192.0.0.1", "2606:4700:4700::1111", "not-an-address", "example.com", "",
+])
+def test_other_addresses_and_names_are_not_metadata(address):
+    found = hosts.metadata(address)
+    print(f"{address!r} -> {found}")
+    assert found is False

@@ -381,6 +381,31 @@ def test_a_silent_report_lists_nothing_but_json_keeps_everything():
 
 
 @here
+def test_a_cloud_metadata_address_is_refused_with_no_flag_beside_an_ordinary_host(tmp_path):
+    # What Claude Code does on Bedrock with no keys of its own: it asks the
+    # metadata address. The report must not tell the person to allow it.
+    done = run(tmp_path, """
+        import urllib.request
+        for url in ("https://169.254.169.254/latest/meta-data/", "https://example.com/"):
+            try:
+                urllib.request.urlopen(url, timeout=10)
+            except Exception as exc:
+                print("REFUSED", url, exc)
+    """, "--net", "api.openai.com")
+    entries = {item["target"]: item for item in report(done)["blocked"]}
+    print(entries)
+    assert done.stdout.count("REFUSED") == 2 and done.stdout.count("403") == 2
+    meta = entries["169.254.169.254:443"]
+    assert meta["allow"] is None and "--env AWS_ACCESS_KEY_ID" in meta["note"]
+    assert entries["example.com:443"]["allow"] == "--net example.com"
+    assert "169.254.169.254" not in " ".join(item["allow"] or "" for item in entries.values())
+    # What the program itself is told is the same: no "allow with" for that address.
+    assert "169.254.169.254:443 is not in --net: it hands out this machine's cloud credentials" in done.stdout
+    assert "allow with --net 169.254" not in done.stdout
+    assert "(allow with --net example.com)" in done.stdout
+
+
+@here
 def test_refusals_reach_the_log_as_they_happen(tmp_path, outside):
     target = outside / "secret.txt"
     record = tmp_path / "log.jsonl"
