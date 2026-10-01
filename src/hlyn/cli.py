@@ -1104,7 +1104,9 @@ def _run(argv: Sequence[str] | None = None) -> int:
             print(file=sys.stderr)
         jail.unbuilt(plan)
         jail._ready(plan)
-        brief = {"log": plan.log if isinstance(plan.log, str) else None, "hide": claude.expected}
+        hosts = claude.mcp_hosts()
+        brief = {"log": plan.log if isinstance(plan.log, str) else None, "hide": claude.expected,
+                 "who": lambda entry: claude.whose(entry, hosts)}
         return _launch(full, plan, args.no_report, args.json, own=True, brief=brief)
 
     if args.verb == "watch":

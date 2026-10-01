@@ -119,17 +119,17 @@ def test_the_end_report_is_a_table_with_one_next_command():
     text = book.brief(0, ["claude"], log="/home/x/claude.jsonl", stream=Tty(False))
     print(text)
     lines = text.splitlines()
-    assert "Claude Code ended. hlyn refused it 2 things:" in text
-    assert any(re.match(r"  ✗  network +example.com:443 +--net example.com$", ln) for ln in lines)
+    assert "Claude Code ended. hlyn blocked 2 things:" in text
+    assert any(re.match(r"  ✗  network +example.com +--net example.com$", ln) for ln in lines)
     assert any(re.match(r"  ✗  read +/opt/data/file.csv +--read /opt/data/file.csv$", ln) for ln in lines)
-    assert "  next time:  hlyn claude --read /opt/data/file.csv --net example.com" in lines
+    assert "  to allow:  hlyn claude --read /opt/data/file.csv --net example.com" in lines
     assert any("allow only hosts you recognise" in ln for ln in lines)
     assert all(len(ln) <= 100 for ln in lines)
 
 
 def test_one_refusal_says_thing_not_things():
     text = report(refused("net", "example.com:443", "--net example.com")).brief(0, stream=Tty(False))
-    assert "refused it 1 thing:" in text
+    assert "blocked 1 thing:" in text
 
 
 @pytest.mark.parametrize("columns", [60, 80, 120])
@@ -149,7 +149,7 @@ def test_hidden_refusals_leave_the_report_but_not_the_data():
     book = report(keychain(), refused("net", "example.com:443", "--net example.com"))
     text = book.brief(0, hide=claude.expected, stream=Tty(False))
     print(text)
-    assert "SecurityServer" not in text and "refused it 1 thing:" in text
+    assert "SecurityServer" not in text and "blocked 1 thing:" in text
     assert any("SecurityServer" in e.target for e in book.items()), "the record must keep it"
     assert "SecurityServer" in book.brief(0, stream=Tty(False)), "shown when not hidden"
 
@@ -272,3 +272,54 @@ def test_the_home_folder_warning_wraps_to_the_window_and_keeps_every_word(column
     warning = " ".join(ln.strip().removeprefix("!").strip() for ln in lines[2:blank])
     assert "home folder" in warning and "Claude Code could read and change" in warning
     assert warning.endswith("Start it inside a project folder instead."), warning
+
+
+# --- who started a refused connection ----------------------------------------
+
+def test_a_refused_host_is_traced_to_the_mcp_server_or_plugin_that_reached_for_it(tmp_path, monkeypatch):
+    import json
+
+    home, work = tmp_path / "home", tmp_path / "work"
+    plugin = home / ".claude/plugins/cache/market/github/abc123"
+    plugin.mkdir(parents=True)
+    work.mkdir()
+    (home / ".claude.json").write_text(json.dumps({
+        "mcpServers": {"runpod": {"url": "https://mcp.getrunpod.io/"}, "local": {"command": "node"}},
+        "projects": {"/p": {"mcpServers": {"docs": {"url": "https://docs.example.org/mcp"}}}}}))
+    (plugin / ".mcp.json").write_text(json.dumps({"github": {"type": "http", "url": "https://api.githubcopilot.com/mcp/"}}))
+    (work / ".mcp.json").write_text(json.dumps({"mcpServers": {"mine": {"url": "http://tools.internal:8080/x"}}}))
+    junk = home / ".claude/plugins/cache/market/broken/1"
+    junk.mkdir(parents=True)
+    (junk / ".mcp.json").write_text("{not json")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("COLUMNS", "120")
+    monkeypatch.chdir(work)
+    hosts = claude.mcp_hosts({})
+    print(hosts)
+    assert hosts == {
+        "mcp.getrunpod.io": 'your MCP server "runpod"',
+        "docs.example.org": 'your MCP server "docs"',
+        "tools.internal": 'this project\'s MCP server "mine"',
+        "api.githubcopilot.com": 'the "github" plugin',
+    }
+    text = report(refused("net", "mcp.getrunpod.io:443", "--net mcp.getrunpod.io"),
+                  refused("net", "api.githubcopilot.com:443", "--net api.githubcopilot.com"),
+                  refused("net", "unknown.example:443", "--net unknown.example"),
+                  ).brief(0, stream=Tty(False), who=lambda e: claude.whose(e, hosts))
+    print(text)
+    lines = text.splitlines()
+    assert any(re.match(r'  ✗  network +mcp.getrunpod.io +your MCP server "runpod"$', ln) for ln in lines)
+    assert any(re.match(r'  ✗  network +api.githubcopilot.com +the "github" plugin$', ln) for ln in lines)
+    assert any(re.match(r"  ✗  network +unknown.example +--net unknown.example$", ln) for ln in lines), \
+        "a host nobody configured shows its flag instead"
+    again = "  to allow:  hlyn claude " + " ".join(
+        f"--net {h}" for h in ("api.githubcopilot.com", "mcp.getrunpod.io", "unknown.example"))
+    assert again in lines
+
+
+def test_whose_names_only_network_refusals_and_only_known_hosts():
+    hosts = {"mcp.example.org": "the thing"}
+    assert claude.whose(refused("net", "mcp.example.org:443"), hosts) == "the thing"
+    assert claude.whose(refused("net", "mcp.example.org"), hosts) == "the thing"
+    assert claude.whose(refused("net", "other.example.org:443"), hosts) == ""
+    assert claude.whose(refused("read", "mcp.example.org:443"), hosts) == ""

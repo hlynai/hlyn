@@ -29,6 +29,7 @@ Each flag adds to this, as for `hlyn run`.
 
 from __future__ import annotations
 
+import glob
 import os
 import re
 import shutil
@@ -455,6 +456,54 @@ def expected(entry: object) -> bool:
         return True
     return kind == "read" and (
         target.startswith("/var/db/mds/messages/") or os.path.basename(target) == ".CFUserTextEncoding")
+
+
+def mcp_hosts(env: MutableMapping[str, str] | None = None) -> dict[str, str]:
+    """Hosts Claude Code's own MCP servers and plugins reach, by what started
+    them, read from the files that configure them (`~/.claude.json`, this
+    folder's `.mcp.json`, installed plugins' `.mcp.json`). When Claude Code
+    reaches for one, nothing you typed asked for it; this says whose it is.
+    Best effort: a file that isn't there or isn't JSON adds nothing."""
+    import json
+
+    env = os.environ if env is None else env
+    found: dict[str, str] = {}
+
+    def servers(data: object, label: str) -> None:
+        if not isinstance(data, dict):
+            return
+        inner = data.get("mcpServers")
+        for name, conf in (inner if isinstance(inner, dict) else data).items():
+            url = conf.get("url") if isinstance(conf, dict) else None
+            host = urlsplit(url).hostname if isinstance(url, str) else None
+            if host:
+                found.setdefault(host, label.format(name=name))
+
+    def load(path: str) -> object:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return None
+
+    top = load(os.path.expanduser("~/.claude.json"))
+    if isinstance(top, dict):
+        servers(top, 'your MCP server "{name}"')
+        for project in (top.get("projects") or {}).values():
+            servers(project, 'your MCP server "{name}"')
+    servers(load(os.path.join(os.getcwd(), ".mcp.json")), 'this project\'s MCP server "{name}"')
+    plugins = os.path.join(state(env), "plugins", "cache")
+    for path in sorted(glob.glob(os.path.join(plugins, "*", "*", "*", ".mcp.json"))):
+        plugin = path[len(plugins) + 1:].split(os.sep)[1]
+        servers(load(path), f'the "{plugin}" plugin')
+    return found
+
+
+def whose(entry: object, hosts: dict[str, str]) -> str:
+    """What started a refused connection, if `hosts` says."""
+    if getattr(entry, "kind", "") != "net":
+        return ""
+    return hosts.get(getattr(entry, "target", "").rsplit(":", 1)[0], "")
 
 
 def _names(paths: list[str]) -> list[str]:

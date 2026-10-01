@@ -931,12 +931,15 @@ class Report:
         return "\n".join(out) + "\n" if out else ""
 
     def brief(self, code: int, cmd: Iterable[str] = (), log: str | None = None,
-              hide: Callable[[Entry], bool] | None = None, stream: TextIO | None = None) -> str:
+              hide: Callable[[Entry], bool] | None = None, stream: TextIO | None = None,
+              who: Callable[[Entry], str] | None = None) -> str:
         """`text`, as a table for `hlyn claude`: one line per refusal fitted
         to the window, the flag that allows it on the right, then a single
         line to start with next time. `hide` drops refusals the caller
         expects (Claude Code asking the keychain after hlyn signed it in);
-        `--json` and the record keep them."""
+        `--json` and the record keep them. `who` names what started a
+        refusal when it can ("the github plugin"), so a person who did nothing
+        sees where it came from."""
         import signal
 
         from .term import Paint, squeeze, width
@@ -953,18 +956,20 @@ class Report:
         count = len(items) + self.more
         ending = {0: "ended"}.get(code)
         how = ending or (f"stopped (signal {-code})" if code < 0 else f"exited with code {code}")
-        lines = ["", paint(f"hlyn claude: Claude Code {how}. hlyn refused it "
+        lines = ["", paint(f"Claude Code {how}. hlyn blocked "
                            f"{count} thing{'s' if count != 1 else ''}:", "bold"), ""]
         words = {"read": "read", "write": "write", "exec": "run", "net": "network", "bind": "listen"}
         for e in items:
-            right = e.allow or ("kept closed: a credential" if e.credential else (e.note or ""))
+            source = who(e) if who else ""
+            right = source or e.allow or ("kept closed: a credential" if e.credential else (e.note or ""))
             right = squeeze(right, max(20, cols // 3))
             room = cols - 5 - 9 - len(right) - 2
-            target = squeeze(e.target, room)
+            target = squeeze(e.target.removesuffix(":443") if e.kind == "net" else e.target, room)
             mark = paint("✗", "red", "bold")
             what = f"{words.get(e.kind, e.kind):<9}"
             gap = " " * max(2, room - len(target) + 2)
-            lines.append(f"  {mark}  {what}{target}{gap}{paint(right, 'dim' if not e.allow else 'cyan')}")
+            colour = "cyan" if e.allow and not source else "dim"
+            lines.append(f"  {mark}  {what}{target}{gap}{paint(right, colour)}")
         if self.more:
             lines.append(paint(f"     and {self.more} more, past the first {LIMIT}", "dim"))
         allows = list(dict.fromkeys(e.allow for e in items if e.allow and not e.quiet))
@@ -972,9 +977,9 @@ class Report:
             lines.append("")
             again = "hlyn claude " + " ".join(allows)
             if len(again) + 15 <= cols:
-                lines.append(f"  next time:  {paint(again, 'bold')}")
+                lines.append(f"  to allow:  {paint(again, 'bold')}")
             else:
-                lines.append("  next time: add the flags above you trust to hlyn claude")
+                lines.append("  to allow: add the flags above you trust to hlyn claude")
             if any(a.startswith("--net ") and not a[6:].isdigit() for a in allows):
                 lines.append(paint("  allow only hosts you recognise", "dim"))
         if log:
