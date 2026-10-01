@@ -21,7 +21,7 @@ from hypothesis import strategies as st
 
 from hlyn.core import oslog, preload
 from hlyn.policy import Policy
-from hlyn.report import LIMIT, Denial, Report, credential, flag, removed, safe, secret
+from hlyn.report import LIMIT, REASONS, WHY, Denial, Report, credential, flag, removed, safe, secret
 
 HOME = os.path.expanduser("~")
 
@@ -586,6 +586,97 @@ def test_a_refusal_no_flag_can_allow_says_why_instead_of_same_as_above(tmp_path)
     assert "(also invalid)" in rows[1] and "(invalid host name)" in rows[2]
 
 
+# ---------------------------------------------------------------------------
+# `why`: the machine key of a network refusal (design 4.6)
+# ---------------------------------------------------------------------------
+
+# One refusal per reason the proxy and the gate emit, as each really sends it
+# (src/hlyn/proxy.py `_event`, src/hlyn/core/guard.py `_event`): source, target, flag.
+PROXY_SAYS = {
+    "not-listed": ("evil.example:443", "--net evil.example"),
+    "private-address": ("internal.example:443", "--net 10.0.0.5"),
+    "sni-mismatch": ("api.example.com:443", ""),
+    "dns": ("8.8.8.8:53", ""),
+    "resolve-failed": ("nope.example:443", ""),
+    "direct": ("1.1.1.1:443", "--net 1.1.1.1:443"),
+    "busy": ("", ""),
+}
+GATE_SAYS = {
+    "udp": ("UDP", ""),
+    "unix": ("/run/some.sock", "--write /run"),
+    "unix-send": ("/run/some.sock", "--net-any"),
+    "unix-bound": ("/run/some.sock", "--net-any"),
+    "unix-abstract": ("@own-agent", "--net-any"),
+    "gate-error": ("ValueError", ""),
+    "direct": ("1.1.1.1:443", "--net 1.1.1.1:443"),
+    "dns": ("8.8.8.8:53", ""),
+    "proxy-gone": ("1.1.1.1:443", ""),
+}
+
+
+def _cases():
+    out = [("proxy", why, *said) for why, said in PROXY_SAYS.items()]
+    out += [("gate", why, *said) for why, said in GATE_SAYS.items()]
+    return out
+
+
+def test_every_reason_is_covered_by_a_case():
+    """The list can't pass by being empty or by missing a key: the cases cover
+    exactly the reasons, and every key of the report's WHY table is one."""
+    print("REASONS:", REASONS)
+    print("covered by the proxy:", sorted(PROXY_SAYS), "| by the gate:", sorted(GATE_SAYS))
+    assert len(_cases()) == len(PROXY_SAYS) + len(GATE_SAYS) >= 16
+    assert len(REASONS) == len(set(REASONS)) >= 13
+    assert set(WHY) <= set(REASONS)
+    assert set(PROXY_SAYS) | set(GATE_SAYS) == set(REASONS)
+
+
+@pytest.mark.parametrize(("source", "why", "target", "allow"), _cases(),
+                         ids=[f"{src}-{why}" for src, why, *_ in _cases()])
+def test_a_network_refusal_carries_its_machine_key_in_json(tmp_path, source, why, target, allow):
+    report = book(tmp_path, net=["api.example.com"])
+    entry = report.add(Denial("net", target, op=why, allow=allow, source=source))
+    assert entry is not None, f"{source} {why} was dropped"
+    out = json.loads(json.dumps(report.json(1)))["blocked"]
+    print(f"{source} {why!r} -> {out}")
+    assert [item["why"] for item in out] == [why]  # exactly the key, never the prose
+    assert out[0]["source"] == source and out[0]["kind"] == "net"
+
+
+def test_an_unknown_reason_is_dropped_not_given_a_made_up_key(tmp_path):
+    report = book(tmp_path, net=["api.example.com"])
+    assert report.add(Denial("net", "evil.example:443", op="because", source="proxy")) is None
+    assert report.json(1)["blocked"] == []
+
+
+@pytest.mark.parametrize(
+    ("platform", "op", "rest", "port", "why"),
+    [
+        ("darwin", "connect", "127.0.0.1", 9, "direct"),
+        ("darwin", "connect", "*", 9, "direct"),
+        ("linux", "sendto", "1.1.1.1", 443, "direct"),
+        ("linux", "sendto", "8.8.8.8", 53, "dns"),
+    ],
+)
+def test_a_direct_connection_heard_by_the_os_carries_its_key(tmp_path, monkeypatch, platform, op, rest, port, why):
+    monkeypatch.setattr("hlyn.report.sys.platform", platform)
+    entry = one(book(tmp_path, net=["api.example.com"]), kind="net", target=f"{port} {rest}", op=op,
+                source="kernel")
+    assert entry is not None
+    print(platform, op, rest, port, "->", entry.json())
+    assert entry.json()["why"] == why and entry.json()["source"] == "kernel"
+
+
+def test_a_port_refusal_with_no_hosts_has_no_reason_to_give(tmp_path):
+    """Ports mode (no host list) has no proxy or gate reason: `why` is null,
+    not a guess."""
+    report = book(tmp_path, net=False)
+    entry = one(report, kind="net", target="8080", source="kernel")
+    assert entry is not None
+    print(entry.json())
+    assert entry.json()["why"] is None
+
+
 def test_a_long_list_is_cut_short_and_points_at_json(tmp_path):
     report = book(tmp_path)
     for i in range(40):
@@ -690,6 +781,10 @@ def test_json_carries_everything(tmp_path):
     assert out["blocked"][0]["allow"] == f"--write {tmp_path}"
     assert set(out) == {"exit", "blocked", "more", "unlogged", "system", "removed_env", "why"}
     assert out["unlogged"] == 0
+    print("entry:", out["blocked"][0])
+    assert set(out["blocked"][0]) == {
+        "kind", "target", "allow", "why", "note", "credential", "quiet", "count", "by", "source",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1058,3 +1153,36 @@ def test_a_use_record_is_read_only_by_a_listener_that_asked_for_uses():
     assert preload.parse(use) is None
     assert preload.parse(use, uses=True) is not None
     assert preload.parse(GOOD, uses=True) is None
+
+
+# ---------------------------------------------------------------------------
+# the real thing: `hlyn run --json`, one proxy denial
+# ---------------------------------------------------------------------------
+
+_CONNECT = """
+import os, socket
+host, port = os.environ["HTTPS_PROXY"].rsplit("//")[1].split(":")
+s = socket.create_connection((host, int(port)))
+s.sendall(b"CONNECT evil.example:443 HTTP/1.1\\r\\nHost: evil.example:443\\r\\n\\r\\n")
+print(s.recv(300).decode().splitlines()[0])
+"""
+
+
+def test_hlyn_run_json_names_why_a_proxy_blocked_a_host(tmp_path):
+    import subprocess
+
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+    env = {"PYTHONPATH": src, "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path)}
+    done = subprocess.run(
+        [sys.executable, "-m", "hlyn.cli", "run", "--no-log", "--json", "--net", "api.example.com",
+         "--", sys.executable, "-c", _CONNECT],
+        capture_output=True, text=True, timeout=120, env=env, cwd=str(tmp_path), check=False,
+    )
+    print(f"exit {done.returncode}\nstdout:\n{done.stdout}stderr:\n{done.stderr}")
+    assert "403 hlyn: evil.example:443 is not in --net" in done.stdout
+    line = next(row for row in reversed(done.stderr.splitlines()) if row.startswith('{"exit"'))
+    net = [item for item in json.loads(line)["blocked"] if item["kind"] == "net"]
+    print("the net entry:", json.dumps(net))
+    assert len(net) == 1
+    assert net[0]["target"] == "evil.example:443" and net[0]["allow"] == "--net evil.example"
+    assert net[0]["why"] == "not-listed" and net[0]["source"] == "proxy"

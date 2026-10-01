@@ -50,7 +50,7 @@ from .policy import Policy, under
 from .secret import credential, secret, secret_file
 
 __all__ = [
-    "HOSTED", "SERVICES", "WHY", "Denial", "Entry", "Listener", "Quiet", "Report",
+    "HOSTED", "REASONS", "SERVICES", "WHY", "Denial", "Entry", "Listener", "Quiet", "Report",
     "credential", "removed", "safe", "secret",
 ]
 
@@ -199,6 +199,13 @@ WHY: dict[str, str] = {
     "busy": "the proxy was at its limit of connections at once",
 }
 
+# Every machine key `--json` can carry as `why` on a `net` entry (4.6): the
+# proxy's reasons (WHY), the gate's own (`unix*`, `udp`, `gate-error`), and the
+# ones both say. Stable: scripts match on these, never on the prose.
+REASONS: tuple[str, ...] = (
+    *WHY, "udp", "unix", "unix-send", "unix-bound", "unix-abstract", "gate-error",
+)
+
 # Why a resolver, D-Bus or container-runtime socket is never allowed while
 # the network is limited, whatever the grants (5.3): with hosts, and on
 # Linux before 7.1 with ports or no network too (core/linux.watched).
@@ -339,12 +346,16 @@ class Entry:
     quiet: bool = False
     counts: dict[Any, int] = field(default_factory=dict)  # see `Report.add`
     folded: int = 0
+    # The machine key for a network refusal, one of `REASONS`; None when no
+    # connection-level reason applies (a path, a macOS service ...).
+    why: str | None = None
 
     def json(self) -> dict[str, Any]:
         return {
             "kind": self.kind,
             "target": self.target,
             "allow": self.allow,
+            "why": self.why,
             "note": self.note or None,
             "credential": self.credential,
             "quiet": self.quiet,
@@ -444,10 +455,11 @@ class Report:
     def judge(self, denial: Denial) -> Entry | None:
         """What a refusal means and how to allow it, or None to drop it."""
         kind, target = denial.kind, denial.target
-        if denial.source == "proxy":
-            return self._host(denial)
-        if denial.source == "gate":
-            return self._gate(denial)
+        if denial.source in ("proxy", "gate"):
+            entry = self._host(denial) if denial.source == "proxy" else self._gate(denial)
+            if entry is not None and denial.op in REASONS:
+                entry.why = denial.op  # the machine key, never the prose
+            return entry
         if kind in ("read", "write", "exec"):
             return self._path(denial)
         if kind == "net" and target.startswith("socket:"):
@@ -659,7 +671,8 @@ class Report:
             # itself is the flag -- except DNS: the proxy resolves names.
             local = rest in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
             if local:
-                return Entry("net", shown, f"--net localhost:{port}", WHY["direct"], source=denial.source)
+                return Entry("net", shown, f"--net localhost:{port}", WHY["direct"], source=denial.source,
+                             why="direct")
             if sys.platform == "darwin":
                 # Seatbelt reports `remote:*:PORT` without the address, so a
                 # local service can't be told from anywhere else: no flag, but
@@ -667,9 +680,9 @@ class Report:
                 return Entry("net", shown, None,
                              WHY["direct"] + "; on macOS a program must use the proxy for anything but "
                              "localhost entries: if it was a service on this machine, allow it with "
-                             f"--net localhost:{port}", source=denial.source)
+                             f"--net localhost:{port}", source=denial.source, why="direct")
             if port == 53:
-                return Entry("net", shown, None, WHY["dns"], source=denial.source)
+                return Entry("net", shown, None, WHY["dns"], source=denial.source, why="dns")
             from .error import Invalid
             from .hosts import parse
 
@@ -677,7 +690,7 @@ class Report:
                 flag = parse(f"[{rest}]:{port}" if ":" in rest else f"{rest}:{port}").flag()
             except Invalid:
                 flag = None
-            return Entry("net", shown, flag, WHY["direct"], source=denial.source)
+            return Entry("net", shown, flag, WHY["direct"], source=denial.source, why="direct")
         if denial.op in ("sendto", "sendmsg"):
             # TCP Fast Open, which hlyn refuses whenever ports are named: Linux
             # before 7.2 lets it past Landlock's port rules, allowed port or not.
@@ -720,7 +733,7 @@ class Report:
         if family in (2, 10) and self.plan.hosts():
             # Host mode allows only TCP (5.3), so a refused IP socket is UDP:
             # a name looked up by the program itself, or QUIC (5.6, 5.7).
-            return Entry("net", "a name lookup or QUIC (UDP)", None, LOOKUP, source=denial.source)
+            return Entry("net", "a name lookup or QUIC (UDP)", None, LOOKUP, source=denial.source, why="udp")
         if family in (2, 10, 17):
             if self.plan.net is not False:
                 return None  # the network is open, so something else refused it
@@ -746,10 +759,12 @@ class Report:
             # (5.3, 5.4), except the always-refused ones.
             if _refused(where):
                 return Entry("net", f"local socket {safe(tilde(where))}", None,
-                             LOOKUP if _resolver(where) else REFUSED_NOTE, source=denial.source)
+                             LOOKUP if _resolver(where) else REFUSED_NOTE, source=denial.source,
+                             why="unix")
             return Entry("net", f"local socket {safe(tilde(where))}",
                          flag("--write", os.path.dirname(where) or "/"),
-                         "a local socket needs write access to its folder", source=denial.source)
+                         "a local socket needs write access to its folder", source=denial.source,
+                         why="unix")
         return Entry("net", f"local socket {safe(tilde(where))}", "--net-any",
                      "on macOS only the whole network allows local sockets", source=denial.source)
 
