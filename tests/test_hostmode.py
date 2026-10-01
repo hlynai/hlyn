@@ -135,6 +135,19 @@ def gone(pid: int, timeout: float = 10) -> bool:
     return not alive(pid)
 
 
+def dead(pid: int, timeout: float = 10) -> bool:
+    """`gone`, but a process that was killed and not yet reaped (a zombie: its
+    parent is still waiting on something else) counts as dead."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                               check=False).stdout.strip()
+        if not state or state.startswith("Z"):
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def records(path: str) -> list[dict]:
     with open(path) as fh:
         return [json.loads(line) for line in fh if line.strip()]
@@ -351,12 +364,76 @@ def test_cli_explains_a_direct_connect_without_a_wrong_flag():
 # ---------------------------------------------------------------------------
 
 
-def test_row_15_clients_that_ignore_the_proxy_fail_closed():
+ENTRIES = ["on", "run", "spawn", "cli"]
+
+
+def entry_argv(entry: str, body: str, net: list[str], prelude: str = "") -> list[str]:
+    """The command that runs `body` confined for `net` through one of the four
+    entry points (5.8). `prelude` runs before hlyn is asked for anything, in
+    the caller (`on`, `run`), which is where a library has to be imported
+    for it to be loaded before the seal. `spawn` and `cli` start `body` as a
+    new interpreter, so it imports its own."""
+    if entry == "cli":
+        hosts = [arg for host in net for arg in ("--net", host)]
+        return [*HLYN, "run", "--no-log", "--no-report", *hosts, "--", sys.executable, "-c", body]
+    head = f"import sys\nsys.path.insert(0, {SRC!r})\n{prelude}\nimport hlyn\n"
+    if entry == "on":
+        code = head + f"got = hlyn.on(net={net!r}, log=False)\n" + body
+    elif entry == "run":
+        code = head + f"hlyn.run(lambda: exec({body!r}, {{}}), net={net!r}, log=False)\n"
+    else:
+        code = head + f"hlyn.spawn([sys.executable, '-c', {body!r}], net={net!r}, log=False)\n"
+    return [sys.executable, "-c", code]
+
+
+def start(entry: str, body: str, net: list[str], prelude: str = "") -> subprocess.Popen:
+    """Start the entry point on its own session, so a signal sent to the
+    caller's group (or a refused one that isn't) can never reach pytest."""
+    return subprocess.Popen(
+        entry_argv(entry, body, net, prelude), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, env=ENV, cwd="/tmp", start_new_session=True)
+
+
+def through(entry: str, body: str, net: list[str], prelude: str = "",
+            timeout: float = 60) -> subprocess.CompletedProcess:
+    from conftest import skip_if_too_old
+
+    process = start(entry, body, net, prelude)
+    try:
+        out, err = process.communicate("", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        out, err = process.communicate()
+        pytest.fail(f"[{entry}] still running after {timeout} s; it printed:\n{out}\n{err[-800:]}")
+    done = subprocess.CompletedProcess(process.args, process.returncode, out, err)
+    for fault in ("SyntaxError", "IndentationError", "ModuleNotFoundError", "NameError"):
+        assert fault not in err, f"the test body is broken, not the environment:\n{err}"
+    skip_if_too_old(done)
+    return done
+
+
+def helper_pid(host: str) -> int:
+    """The pid of the proxy that was started for the one entry listing `host`
+    (a name no other run uses). Found from outside: the agent can't ask."""
+    ps = subprocess.run(["ps", "-ww", "-eo", "pid,args"], capture_output=True, text=True, check=True).stdout
+    found = [int(line.split()[0]) for line in ps.splitlines()
+             if "main() proxy --json" in line and f"--net {host}:443" in line]
+    assert len(found) == 1, (host, found)
+    return found[0]
+
+
+def token() -> str:
+    return f"t{os.urandom(4).hex()}.example.com"
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_row_15_clients_that_ignore_the_proxy_fail_closed(entry):
     """Clients that never read HTTPS_PROXY connect directly, and are refused
     by the kernel: EACCES from the gate (Linux), EPERM from Seatbelt (macOS).
     Both clients must be installed: the child imports them before it seals,
     and without them the test used to pass on the exception from the import
-    (review, 2026-09-30: the Linux test image had neither)."""
+    (review, 2026-09-30: the Linux test image had neither). Under all four
+    entry points (5.8)."""
     pytest.importorskip("urllib3")
     pytest.importorskip("aiohttp")
     body = PROBE + """
@@ -376,8 +453,8 @@ try:
 except Exception as e:
     print("aiohttp:", type(e).__name__, str(e)[:300])
 """
-    done = boot("import aiohttp, urllib3, hlyn\nhlyn.on(net=['api.example.com'], log=False)\n" + body)
-    print(done.stdout, done.stderr[-800:], sep="\n")
+    done = through(entry, body, ["api.example.com"], prelude="import aiohttp, urllib3")
+    print(f"[{entry}]", done.stdout, done.stderr[-800:], sep="\n")
     assert "REACHED" not in done.stdout
     refused = ("Permission denied", "Operation not permitted", "Errno 13", "Errno 1]")
     for client in ("urllib3:", "aiohttp:"):
@@ -385,75 +462,114 @@ except Exception as e:
         assert any(word in said for word in refused), said
 
 
-def test_row_16_the_agent_cannot_touch_the_helpers_or_another_runs_proxy():
-    other = subprocess.Popen(
-        [sys.executable, "-m", "hlyn.proxy", "--json", "--quiet", "--net", "example.com"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=ENV)
-    try:
-        theirs = json.loads(other.stdout.readline())
-        done = boot(PROBE + f"""
-import hlyn
-got = hlyn.on(net=["api.example.com"], log=False)
-for name, pid in zip(("gate", "proxy") if len(got["helpers"]) == 2 else ("proxy",), got["helpers"]):
-    for what, call in ((f"kill the {{name}}", lambda: os.kill(pid, 15)),
-                       (f"kill the {{name}}'s group", lambda: os.killpg(os.getpgid(pid), 15)),
-                       (f"signal 0 to the {{name}}", lambda: os.kill(pid, 0))):
+ATTACK = """
+import os, sys
+def attack(name, pid):
+    for what, call in ((f"kill the {name}", lambda: os.kill(pid, 15)),
+                       (f"kill the {name}'s group", lambda: os.killpg(os.getpgid(pid), 15)),
+                       (f"signal 0 to the {name}", lambda: os.kill(pid, 0))):
         try:
             call(); print(what + ": ALLOWED")
         except OSError as e:
             print(what + ":", e.errno, e.strerror)
+"""
+
+# Who the gate is, from inside the environment: the process that started the
+# agent (`run`, `spawn`, `cli`: 5.8's layouts), or the one `on()` reports.
+GATE = {"on": "got['helpers'][0] if len(got['helpers']) == 2 else None", "run": "os.getppid()",
+        "spawn": "os.getppid()", "cli": "os.getppid()"}
+
+
+def tell_proxy(process: subprocess.Popen, host: str) -> list[str]:
+    """Read the agent's output up to its READY line, then give it the proxy's
+    pid (found from outside, by the one name it lists)."""
+    lines = []
+    for line in process.stdout:
+        lines.append(line)
+        if line.startswith("READY"):
+            break
+    else:
+        pytest.fail("the agent never got ready:\n" + "".join(lines) + process.stderr.read())
+    process.stdin.write(f"{helper_pid(host)}\n")
+    process.stdin.flush()
+    return lines
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_row_16_the_agent_cannot_touch_the_helpers_or_another_runs_proxy(entry):
+    other = subprocess.Popen(
+        [sys.executable, "-m", "hlyn.proxy", "--json", "--quiet", "--net", "example.com"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=ENV)
+    host = token()
+    try:
+        theirs = json.loads(other.stdout.readline())
+        body = PROBE + ATTACK + f"""
+gate = {GATE[entry]}
+print("READY", gate, flush=True)
+proxy = int(sys.stdin.readline())
+attack("proxy", proxy)
+if {sys.platform == "linux"!r} and gate:
+    attack("gate", gate)
 print("another run's proxy:", direct("127.0.0.1", {theirs["port"]}))
 print("own proxy still up:", proxied("https://evil.example.net/")[:60])
-""")
+"""
+        process = start(entry, body, [host])
+        lines = tell_proxy(process, host)
+        out, err = process.communicate(timeout=120)
+        out = "".join(lines) + out
     finally:
         other.kill()
         other.wait()
-    print(done.stdout, done.stderr[-800:], sep="\n")
-    assert said(done.stdout, "kill the proxy") == "1 Operation not permitted"
+    print(f"[{entry}]", out, err[-800:], sep="\n")
+    assert said(out, "kill the proxy") == "1 Operation not permitted"
+    assert said(out, "kill the proxy's group") == "1 Operation not permitted"
+    assert said(out, "signal 0 to the proxy") == "1 Operation not permitted"
     if sys.platform == "linux":
-        assert said(done.stdout, "kill the gate") == "1 Operation not permitted"
-    assert "ALLOWED" not in done.stdout
-    assert said(done.stdout, "another run's proxy") == f"REFUSED errno {DENIED}"
-    assert "own proxy still up: FAILED <urlopen error Tunnel connection failed: 403" in done.stdout
+        assert said(out, "kill the gate") == "1 Operation not permitted"
+        assert said(out, "kill the gate's group") == "1 Operation not permitted"
+        assert said(out, "signal 0 to the gate") == "1 Operation not permitted"
+    assert "ALLOWED" not in out
+    assert said(out, "another run's proxy") == f"REFUSED errno {DENIED}"
+    assert "own proxy still up: FAILED <urlopen error Tunnel connection failed: 403" in out
 
 
 HELPERS = ["proxy"] + (["gate"] if sys.platform == "linux" else [])
 
 
 @pytest.mark.parametrize("which", HELPERS)
-def test_row_17_a_helper_killed_mid_run_closes_the_network_and_opens_nothing(which):
+@pytest.mark.parametrize("entry", ENTRIES)
+def test_row_17_a_helper_killed_mid_run_closes_the_network_and_opens_nothing(entry, which):
     """Killing the proxy: connections through it are refused. Killing the
     gate (Linux): the kernel answers every trapped connect with ENOSYS,
     because no one holds the notification descriptor. Neither opens a
-    single connection."""
-    code = textwrap.dedent(f"""
-        import sys
-        sys.path.insert(0, {SRC!r})
-    """) + PROBE + textwrap.dedent("""
-        import hlyn, time
-        got = hlyn.on(net=["api.example.com"], log=False)
-        port = int(got["proxy"].split(":")[1])
-        print("before:", proxied("https://evil.example.net/")[:70], flush=True)
-        print("HELPERS", *got["helpers"], flush=True)
-        sys.stdin.readline()
-        print("after, through the proxy:", proxied("https://evil.example.net/")[:60])
-        print("after, straight to its port:", direct("127.0.0.1", port))
-        print("after, direct elsewhere:", direct("1.1.1.1", 443))
-    """)
-    process = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True)
+    single connection. Under all four entry points (5.8)."""
+    host = token()
+    body = PROBE + f"""
+import sys
+from urllib.parse import urlparse
+gate = {GATE[entry]}
+port = urlparse(os.environ["HTTPS_PROXY"]).port
+print("before:", proxied("https://evil.example.net/")[:70], flush=True)
+print("READY", gate, flush=True)
+sys.stdin.readline()
+print("after, through the proxy:", proxied("https://evil.example.net/")[:60])
+print("after, straight to its port:", direct("127.0.0.1", port))
+print("after, direct elsewhere:", direct("1.1.1.1", 443))
+"""
+    process = start(entry, body, [host])
     lines = []
     for line in process.stdout:
         lines.append(line)
-        if line.startswith("HELPERS"):
+        if line.startswith("READY"):
             break
-    pids = [int(pid) for pid in lines[-1].split()[1:]]
-    victim = pids[-1] if which == "proxy" else pids[0]
+    else:
+        pytest.fail("the agent never got ready:\n" + "".join(lines) + process.stderr.read())
+    victim = helper_pid(host) if which == "proxy" else int(lines[-1].split()[1])
     os.kill(victim, signal.SIGKILL)
-    assert gone(victim)
+    assert dead(victim)
     out, err = process.communicate("go\n", timeout=60)
     out = "".join(lines) + out
-    print(f"killed the {which} ({victim})", out, err[-800:], sep="\n")
+    print(f"[{entry}] killed the {which} ({victim})", out, err[-800:], sep="\n")
     assert "before: FAILED <urlopen error Tunnel connection failed: 403" in out
     assert said(out, "after, through the proxy").startswith("FAILED")
     assert "403" not in out.split("after, through")[1]
@@ -618,21 +734,14 @@ print("descriptors that answer NOTIF_RECV:", answered)
 
 
 @linux
-@pytest.mark.parametrize("entry", ["on", "run", "spawn"])
+@pytest.mark.parametrize("entry", ENTRIES)
 def test_row_19_the_agent_holds_no_notification_descriptor(entry):
     """The sealed process closes its copy of the notification descriptor
     before any agent code runs (5.2, step 5): no descriptor it holds answers
-    SECCOMP_IOCTL_NOTIF_RECV, so it can't answer its own connection checks."""
-    if entry == "on":
-        code = "import hlyn\nhlyn.on(net=['api.example.com'], log=False)\n" + HUNT
-    elif entry == "run":
-        code = ("import hlyn\ndef hunt():\n    exec(" + repr(HUNT) + ", {})\n"
-                "hlyn.run(hunt, net=['api.example.com'], log=False)\n")
-    else:
-        code = (f"import hlyn, sys\nhlyn.spawn([sys.executable, '-c', {HUNT!r}], "
-                "net=['api.example.com'], log=False)\n")
-    done = boot(code)
-    print(done.stdout, done.stderr[-800:], sep="\n")
+    SECCOMP_IOCTL_NOTIF_RECV, so it can't answer its own connection checks.
+    Under all four entry points, `hlyn run -- cmd` included."""
+    done = through(entry, HUNT, ["api.example.com"])
+    print(f"[{entry}]", done.stdout, done.stderr[-800:], sep="\n")
     assert "descriptors held: [" in done.stdout
     assert said(done.stdout, "descriptors that answer NOTIF_RECV") == "[]"
 
@@ -708,6 +817,81 @@ print(hlyn.run(nested, net=["api.example.com"], exec=[sys.executable], read=[{SR
             in done.stdout)
     assert ("Use ports (--net 443) or net=False here, or run hlyn outside it. "
             "Nothing was sealed.") in done.stdout
+
+
+NEST = """
+import sys; sys.path.insert(0, SRC)
+POLICY
+"""
+
+
+ATTEMPT = """
+import errno, os, socket
+def attempt(port):
+    try:
+        s = socket.socket(); s.settimeout(5)
+        s.connect(("127.0.0.1", port)); s.sendall(b"ping"); return "CONNECTED " + s.recv(20).decode()
+    except OSError as e:
+        return f"REFUSED errno {e.errno} ({errno.errorcode[e.errno]})"
+"""
+
+
+@linux
+@pytest.mark.parametrize("outer", ["host", "ports"])
+@pytest.mark.parametrize("inner", ["on", "run"])
+@pytest.mark.parametrize("net", ["ports", "off"])
+def test_row_21_ports_and_net_false_nested_inside_a_confined_process_still_work(service, outer, inner, net):
+    """Row 21's second half: Linux allows one notification listener per
+    process tree, so a nested policy naming hosts is refused (the test above).
+    One that names ports or turns the network off needs none: it must still
+    seal, and its own rules (and the outer ones) must hold. The outer process
+    is `hlyn.run(fn)` with a host (`outer="host"`: it has the gate) or the
+    service's port (`"ports"`); the inner one seals itself, as `hlyn.on()` and
+    as `hlyn.run(fn)`, from a program the outer one started."""
+    other = Server()  # a listener neither policy names
+    try:
+        policy = [service.port] if net == "ports" else False
+        outer_net = ["api.example.com"] if outer == "host" else [service.port]
+        work = ATTEMPT + f"""
+print("listed port:", attempt({service.port}))
+print("unlisted port:", attempt({other.port}))
+"""
+        if inner == "on":
+            seal = f"import hlyn\ngot = hlyn.on(net={policy!r}, log=False)\nprint('inner: SEALED')\n"
+        else:
+            seal = (f"import hlyn\ndef fn():\n    print('inner: SEALED')\n    exec({work!r}, {{}})\n"
+                    f"hlyn.run(fn, net={policy!r}, log=False)\nraise SystemExit\n")
+        script = NEST.replace("SRC", repr(SRC)).replace("POLICY", seal) + ("" if inner == "run" else work)
+        done = boot(f"""
+import hlyn, subprocess, sys
+def nested():
+    done = subprocess.run([sys.executable, "-c", {script!r}], capture_output=True, text=True)
+    return done.stdout + done.stderr[-1500:]
+print(hlyn.run(nested, net={outer_net!r}, exec=[sys.executable], read=[{os.path.dirname(SRC)!r}], log=False))
+""")
+    finally:
+        other.close()
+    print(f"[outer: {outer} mode, inner: {inner}(net={policy!r})]", done.stdout, done.stderr[-800:], sep="\n")
+    assert "inner: SEALED" in done.stdout
+    assert "can't restrict hosts here" not in done.stdout
+    refused = f"REFUSED errno {errno.EACCES} (EACCES)"
+    if net == "off":
+        # No socket can be made at all.
+        assert said(done.stdout, "listed port") == f"REFUSED errno {errno.EPERM} (EPERM)"
+        assert said(done.stdout, "unlisted port") == f"REFUSED errno {errno.EPERM} (EPERM)"
+        assert service.got == []
+    elif outer == "host":
+        # The outer gate refuses every direct connect that isn't to its
+        # proxy: the inner policy can't widen what the outer one allows,
+        # even for a port it names.
+        assert said(done.stdout, "listed port") == refused
+        assert said(done.stdout, "unlisted port") == refused
+        assert service.got == []
+    else:
+        assert said(done.stdout, "listed port") == "CONNECTED hi ping"
+        assert said(done.stdout, "unlisted port") == refused
+        assert service.got == [b"ping"]
+    assert other.got == []
 
 
 @linux

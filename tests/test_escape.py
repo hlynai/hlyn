@@ -16,6 +16,7 @@ the intended case cannot see either.
 
 from __future__ import annotations
 
+import ast
 import sys
 
 import pytest
@@ -154,6 +155,73 @@ def test_sealing_a_process_with_another_thread_is_refused():
     )
     assert "refused:" in done.stdout, done.stdout + done.stderr
     assert "threads" in done.stdout
+
+
+def test_row_18_host_mode_refusal_from_a_threaded_process_tears_the_helpers_down():
+    """Host mode starts the proxy (and on Linux the gate) BEFORE the seal; the
+    seal then refuses a threaded caller, and `on()`'s cleanup must take the
+    helpers with it. The pids are captured by wrapping `route.start` and
+    `gate.detached` inside the confined-to-be process, so they are seen live
+    before the refusal tears them down; the check that they are gone runs in
+    that same process after the refusal (the helpers would also exit when the
+    process does, which would hide an orphan from a check made afterwards)."""
+    done = boot(
+        """
+        import os, threading, time, hlyn
+        from hlyn import route, gate
+
+        def alive(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            return True
+
+        seen = {}
+        real_start, real_detached = route.start, gate.detached
+        def start(*a, **k):
+            way = real_start(*a, **k)
+            seen["proxy"] = way.pid
+            seen["proxy_alive_at_start"] = alive(way.pid)
+            return way
+        def detached(*a, **k):
+            pid = real_detached(*a, **k)
+            seen["gate"] = pid
+            seen["gate_alive_at_start"] = alive(pid)
+            return pid
+        route.start, gate.detached = start, detached
+
+        threading.Thread(target=lambda: time.sleep(30), daemon=True).start()
+        time.sleep(0.2)
+        try:
+            hlyn.on(net=["api.example.com"], log=False)
+            print("SEALED ANYWAY")
+        except hlyn.Unsupported as exc:
+            print("refused:", exc)
+        print("seen:", seen)
+        end = time.monotonic() + 10
+        pids = [seen[n] for n in ("proxy", "gate") if n in seen]
+        while any(alive(p) for p in pids) and time.monotonic() < end:
+            time.sleep(0.05)
+        print("orphans:", [p for p in pids if alive(p)])
+        print("sealed:", hlyn.sealed())
+        """
+    )
+    print(done.stdout, done.stderr[-1500:], sep="\n")
+    out = done.stdout
+    # The same refusal the plain-policy tests assert.
+    assert "refused:" in out and "threads" in out, out + done.stderr
+    assert "SEALED ANYWAY" not in out, out
+    # Not vacuous: the helpers existed and were alive before the refusal.
+    seen = ast.literal_eval(out.split("seen: ")[1].splitlines()[0])
+    assert seen.get("proxy_alive_at_start") is True, seen
+    if sys.platform == "linux":
+        assert seen.get("gate_alive_at_start") is True, seen
+    assert len(seen) == 4, seen
+    assert "orphans: []" in out, f"helpers outlived the refused seal: {out}"
+    assert "sealed: False" in out, out
 
 
 def test_the_refusal_says_how_to_fix_it():

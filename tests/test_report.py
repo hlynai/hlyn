@@ -658,7 +658,9 @@ def test_an_unknown_reason_is_dropped_not_given_a_made_up_key(tmp_path):
         ("linux", "sendto", "8.8.8.8", 53, "dns"),
     ],
 )
-def test_a_direct_connection_heard_by_the_os_carries_its_key(tmp_path, monkeypatch, platform, op, rest, port, why):
+def test_a_direct_connection_heard_by_the_os_carries_its_key(
+    tmp_path, monkeypatch, platform, op, rest, port, why
+):
     monkeypatch.setattr("hlyn.report.sys.platform", platform)
     entry = one(book(tmp_path, net=["api.example.com"]), kind="net", target=f"{port} {rest}", op=op,
                 source="kernel")

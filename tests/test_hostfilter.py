@@ -271,3 +271,34 @@ def test_a_second_listener_is_refused_with_the_reason_and_what_to_use_instead():
     assert "busy() True" in done.stdout
     assert "load: can't restrict hosts here" in done.stdout
     assert "Use ports (--net 443) or net=False" in done.stdout
+
+
+def said_line(out: str, label: str) -> str:
+    for line in out.splitlines():
+        if line.startswith(label + ": "):
+            return line[len(label) + 2:]
+    return f"(no line {label!r})"
+
+
+@pytest.mark.parametrize("net", [[443], False], ids=["ports", "off"])
+def test_ports_and_net_false_still_load_inside_a_listener(net):
+    """Row 21's other half: a filter that names no hosts asks for no
+    notification listener, so inside one (the process under `sealed` has the
+    listener's filter) it loads, and does its own work: with the network off
+    the inner filter refuses even a TCP socket, with ports it leaves TCP
+    alone. Compare `NESTED`, where hosts are refused."""
+    done, _ = sealed(f"""
+        import subprocess
+        inner = {NESTED!r}.replace('Policy(net=["example.com"])', 'Policy(net={net!r})')
+        inner += '\\nimport socket\\ntry:\\n    socket.socket().close(); print("tcp socket: OK")\\n' \\
+                 'except OSError as exc:\\n    print("tcp socket:", exc.errno, exc.strerror)\\n'
+        subprocess.run([sys.executable, "-c", inner], check=False)
+    """, exec=True)
+    print("inner policy: net =", net)
+    assert "busy() True" in done.stdout  # the outer listener is there
+    assert "load: sealed" in done.stdout
+    assert "can't restrict hosts here" not in done.stdout
+    if net is False:
+        assert said_line(done.stdout, "tcp socket") == f"{errno.EPERM} Operation not permitted"
+    else:
+        assert said_line(done.stdout, "tcp socket") == "OK"
