@@ -239,20 +239,25 @@ def setup_token(tmp_path):
     return str(fake)
 
 
-def test_login_runs_setup_token_and_keeps_what_is_pasted(keychain, setup_token, monkeypatch, capsys):
+def test_login_keeps_what_is_pasted_when_the_screen_has_no_heading_it_knows(keychain, setup_token,
+                                                                            monkeypatch, capsys):
+    # This stand-in prints "Your token: ..." on one line, not the real screen,
+    # so the token isn't read off it; what's pasted is kept.
     monkeypatch.setattr("getpass.getpass", lambda prompt: f"  {TOKEN}\n")
-    said = claude.login(setup_token, {})
-    print(said)
-    assert claude.saved({}) == TOKEN
-    assert "hlyn claude --logout" in said
+    with pytest.raises(Error, match="ended without making a token"):
+        claude.login(setup_token, {})
+    assert stored(keychain) == {}
 
 
 @pytest.mark.parametrize("pasted", ["", "yes", "Your token: sk-ant-oat01-abcdefghijklmnop", "sk-ant-é" * 5])
-def test_login_refuses_something_that_is_not_a_token_and_keeps_nothing(keychain, setup_token,
-                                                                       monkeypatch, pasted):
+def test_login_refuses_a_paste_that_is_not_a_token_and_keeps_nothing(keychain, setup_drawing,
+                                                                     monkeypatch, pasted):
+    # The screen has a token but can't be read (boxed), so it asks; what's
+    # pasted is checked before anything is kept.
+    monkeypatch.setenv("FAKE_MODE", "boxed")
     monkeypatch.setattr("getpass.getpass", lambda prompt: pasted)
     with pytest.raises(Error, match="doesn't look like a token"):
-        claude.login(setup_token, {})
+        claude.login(setup_drawing, {})
     assert stored(keychain) == {}
 
 
@@ -271,3 +276,123 @@ def test_a_user_name_that_could_break_the_command_is_refused(keychain, monkeypat
 
 def test_security_is_called_by_its_full_path():
     assert os.path.isabs(claude.SECURITY) and claude.SECURITY == "/usr/bin/security"
+
+
+# ---------------------------------------------------------------------------
+# reading the token off `claude setup-token`'s screen
+# ---------------------------------------------------------------------------
+#
+# Modelled on what Claude Code 2.1.269 draws (seen in a screenshot of a real
+# run, 2026-10-01): a heading, a blank line, the token wrapped to the width
+# with one space of indent, a blank line, then "Store this token securely".
+
+LONG = "sk-ant-oat01-" + "Ab3_x-Z9" * 12  # a fake, the length of a real one
+
+
+def drawn(token=LONG, width=80, indent=" ", colour=True):
+    """The token's part of the screen, as setup-token draws it."""
+    on, off = ("\x1b[38;5;220m", "\x1b[39m") if colour else ("", "")
+    body = width - len(indent)
+    lines = [token[i:i + body] for i in range(0, len(token), body)]
+    shown = "\r\n".join(f"{indent}{on}{line}{off}" for line in lines)
+    return (f"\r\n{indent}\x1b[1mYour OAuth token (valid for 1 year):\x1b[22m\r\n\r\n{shown}\r\n\r\n"
+            f"{indent}\x1b[2mStore this token securely. You won't be able to see it again.\x1b[22m\r\n")
+
+
+@pytest.mark.parametrize("width", [200, 80, 41, 20, 9])
+def test_the_token_is_read_whatever_the_width(width):
+    # At 9 columns even "sk-ant-" is split across lines.
+    screen = drawn(width=width).encode()
+    assert claude.scrape(screen) == LONG
+
+
+def test_the_last_frame_wins_when_the_screen_is_redrawn():
+    # A full-screen program redraws by moving the cursor up and erasing; an
+    # earlier frame may hold a half-drawn token.
+    half = drawn(token=LONG[:50]).replace("Store this token", "")
+    redraw = "\x1b[2K\x1b[1A" * 8
+    assert claude.scrape((half + redraw + drawn()).encode()) == LONG
+
+
+def test_cursor_movement_and_links_inside_the_token_are_ignored():
+    split = LONG[:30] + "\x1b[1C" + "\x1b]8;;https://x.example\x07" + LONG[30:] + "\x1b]8;;\x07"
+    screen = drawn(colour=False).replace(LONG, split)
+    assert claude.scrape(screen.encode()) == LONG
+
+
+@pytest.mark.parametrize(("why", "screen"), [
+    ("nothing drawn", ""),
+    ("cancelled before a token", "\x1b[1mSign in to Claude\x1b[22m\r\nPress Esc to cancel\r\n"),
+    ("no line after the token", drawn().split("Store this token")[0]),
+    ("a box drawn around it", drawn().replace("\r\n ", "\r\n│ ")),
+    ("cut short with an ellipsis", drawn(token=LONG[:60] + "…")),
+    ("too short to be a token", drawn(token="sk-ant-oat01-short")),  # noqa: S106 - a fake
+    ("two tokens run together", drawn(token=LONG + LONG)),
+])
+def test_anything_that_is_not_exactly_one_token_reads_as_none(why, screen):
+    print(why)
+    assert claude.scrape(screen.encode()) is None
+
+
+FAKE_CLAUDE = r'''#!{python}
+"""A stand-in `claude setup-token` that draws like the real one, at the width
+of its own terminal, and says what width it saw."""
+import os, sys
+assert sys.argv[1:] == ["setup-token"], sys.argv
+mode = os.environ.get("FAKE_MODE", "token")
+width = os.get_terminal_size(1).columns
+print(f"drawn at {{width}} columns", flush=True)
+if mode == "cancel":
+    print("Press Esc to cancel"); sys.exit(1)
+token = {token!r}
+body = width - 1
+for i in range(0, len(token), body) if mode == "token" else []:
+    pass
+lines = [token[i:i + body] for i in range(0, len(token), body)]
+border = "│" if mode == "boxed" else " "
+print("\x1b[1mYour OAuth token (valid for 1 year):\x1b[22m\n")
+print("\n".join(f"{{border}}\x1b[33m{{line}}\x1b[39m" for line in lines))
+print("\nStore this token securely. You won't be able to see it again.")
+'''
+
+
+@pytest.fixture
+def setup_drawing(tmp_path, monkeypatch):
+    fake = tmp_path / "claude-draws"
+    fake.write_text(FAKE_CLAUDE.format(python=sys.executable, token=LONG))
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    # The size hlyn gives the new terminal comes from this one; under pytest
+    # that is COLUMNS.
+    monkeypatch.setenv("COLUMNS", "57")
+    monkeypatch.setenv("LINES", "20")
+    return str(fake)
+
+
+def test_login_reads_the_token_off_the_screen_without_asking(keychain, setup_drawing, monkeypatch, capfd):
+    def ask(prompt):
+        raise AssertionError("asked to paste although the token was on the screen")
+    monkeypatch.setattr("getpass.getpass", ask)
+    said = claude.login(setup_drawing, {})
+    out = capfd.readouterr()
+    print(out.out[-400:], out.err, said, sep="\n")
+    assert "drawn at 57 columns" in out.out, "the new terminal didn't get this one's size"
+    assert claude.saved({}) == LONG
+    assert f"({LONG[:16]}...{LONG[-4:]})" in out.err
+
+
+def test_login_asks_to_paste_when_the_screen_cannot_be_read(keychain, setup_drawing, monkeypatch):
+    monkeypatch.setenv("FAKE_MODE", "boxed")
+    asked = []
+    monkeypatch.setattr("getpass.getpass", lambda prompt: asked.append(prompt) or LONG)
+    claude.login(setup_drawing, {})
+    print(asked)
+    assert asked and "couldn't read the token from the screen" in asked[0]
+    assert claude.saved({}) == LONG
+
+
+def test_a_cancelled_setup_saves_nothing_and_asks_nothing(keychain, setup_drawing, monkeypatch):
+    monkeypatch.setenv("FAKE_MODE", "cancel")
+    monkeypatch.setattr("getpass.getpass", lambda prompt: pytest.fail("asked to paste after a cancel"))
+    with pytest.raises(Error, match="ended without making a token"):
+        claude.login(setup_drawing, {})
+    assert stored(keychain) == {}

@@ -30,6 +30,7 @@ Each flag adds to this, as for `hlyn run`.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -252,19 +253,94 @@ def looks(token: str) -> bool:
     return 20 <= len(token) <= 4096 and token.isascii() and token.isprintable() and " " not in token
 
 
+# What `claude setup-token` draws around the token (Claude Code 2.1.269):
+# "Your OAuth token (valid for 1 year):", the token, wrapped to the terminal's
+# width, then "Store this token securely. You won't be able to see it again."
+# It has no option to print the token anywhere else, so it is read off the
+# screen, strictly: anything that doesn't fit falls back to pasting it.
+HEADING = "Your OAuth token"
+AFTER = "Store this token"
+# Terminal control sequences: OSC (titles, links), CSI (colours, cursor
+# movement, erasing), and the two-byte ones.
+ESCAPES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+SHAPE = re.compile(r"sk-ant-[a-z]{2,8}[0-9]{0,3}-[A-Za-z0-9_-]{40,400}")
+KEEP = 256 * 1024  # bytes of screen kept: the token is in the last frame
+
+
+def scrape(seen: bytes) -> str | None:
+    """The token in what `setup-token` drew, or None.
+
+    The last frame between the heading and the line after the token, with
+    control sequences and every bit of white space removed: wrapping only ever
+    adds line breaks and indentation, never characters, and a token has no
+    white space in it. Then it must be exactly one token, or nothing.
+    """
+    text = ESCAPES.sub("", seen.decode("utf-8", "replace"))
+    start = text.rfind(HEADING)
+    end = text.find(AFTER, start) if start >= 0 else -1
+    if start < 0 or end < 0:
+        return None
+    compact = "".join(text[start:end].split())
+    found = compact.find("sk-ant-")
+    if found < 0 or compact.count("sk-ant-") != 1:
+        return None
+    token = compact[found:]
+    return token if SHAPE.fullmatch(token) else None
+
+
+def _draw(binary: str) -> bytes:
+    """Run `claude setup-token` on a pseudo-terminal the size of this one,
+    keystrokes and screen relayed both ways (the standard library's
+    `pty.spawn`), and keep what it drew.
+
+    `pty.spawn` gives the new terminal no size, and a full-screen program then
+    lays itself out for 80 columns. So the child sets the size on its own
+    terminal, then becomes `claude`.
+    """
+    import pty
+
+    seen = bytearray()
+
+    def read(fd: int) -> bytes:
+        data = os.read(fd, 4096)
+        seen.extend(data)
+        if len(seen) > KEEP:
+            del seen[: len(seen) - KEEP]
+        return data
+
+    size = shutil.get_terminal_size()
+    sizer = (
+        "import fcntl, os, struct, sys, termios\n"
+        "try:\n"
+        "    size = struct.pack('HHHH', int(sys.argv[1]), int(sys.argv[2]), 0, 0)\n"
+        "    fcntl.ioctl(0, termios.TIOCSWINSZ, size)\n"
+        "except OSError:\n"
+        "    pass\n"
+        "os.execv(sys.argv[3], sys.argv[3:])\n"
+    )
+    pty.spawn([sys.executable, "-c", sizer, str(size.lines), str(size.columns), binary, "setup-token"], read)
+    return bytes(seen)
+
+
 def login(binary: str, env: MutableMapping[str, str]) -> str:
     """`hlyn claude --login`: run `claude setup-token` (unconfined: it opens a
-    browser to sign in), ask for the token it prints, and keep it."""
+    browser to sign in), read the token it shows, and keep it."""
     import getpass
-    import subprocess
 
     if sys.platform != "darwin":
         return ("hlyn claude: nothing to do on this system. Sign in with `claude` as usual: "
                 "its sign-in file is in ~/.claude, which hlyn claude lets it use.")
-    print("hlyn: running `claude setup-token`: sign in in the browser it opens, "
-          "then copy the token it prints.", file=sys.stderr)
-    subprocess.run([binary, "setup-token"], check=False)  # noqa: S603 - claude, found on PATH by command()
-    token = getpass.getpass("hlyn: paste the token here (it won't be shown): ").strip()
+    print("hlyn: running `claude setup-token`: sign in in the browser it opens.", file=sys.stderr)
+    seen = _draw(binary)
+    token = scrape(seen)
+    if token:
+        print(f"hlyn: read the token from the screen ({token[:16]}...{token[-4:]}).", file=sys.stderr)
+    elif HEADING not in ESCAPES.sub("", seen.decode("utf-8", "replace")):
+        raise Error("claude setup-token ended without making a token. Nothing was saved.")
+    else:
+        token = getpass.getpass(
+            "hlyn: couldn't read the token from the screen. Paste it here (it won't be shown): "
+        ).strip()
     if not looks(token):
         raise Error("that doesn't look like a token (expected one word, like sk-ant-oat01-...). "
                     "Nothing was saved; run hlyn claude --login again.")
