@@ -394,3 +394,96 @@ def prepare(env: MutableMapping[str, str]) -> str:
         # every app shares, and prints an error on each call when refused.
         env.setdefault("xcrun_db", os.path.join(box, "xcrun_db"))
     return box
+
+
+# -- what it will get, before it starts ---------------------------------------
+
+
+def record() -> str:
+    """Where `hlyn claude` keeps its record of what was allowed and refused.
+
+    Not the terminal: the record's lines would draw over Claude Code's
+    screen. A file in the person's own log folder instead, outside the
+    project; `--log PATH` puts it elsewhere and `--no-log` turns it off.
+    """
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        folder = os.path.join(home, "Library", "Logs", "hlyn")
+    else:
+        state_home = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
+        folder = os.path.join(state_home, "hlyn")
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    return os.path.join(folder, "claude.jsonl")
+
+
+def risky(where: str) -> str | None:
+    """Why starting in `where` gives Claude Code far more than a project,
+    or None. The project folder is granted whole, read and write."""
+    real = os.path.realpath(where)
+    home = os.path.realpath(os.path.expanduser("~"))
+    if real == home:
+        return "this is your home folder: Claude Code could read and change everything in it"
+    if real == "/" or real == os.path.dirname(home) or (len(real.split(os.sep)) <= 2 and real != home):
+        return f"{real} holds much more than a project: Claude Code could read and change all of it"
+    return None
+
+
+def _few(paths: list[str], shown: int = 3) -> str:
+    from .report import safe, tilde
+
+    here = os.path.realpath(os.getcwd())
+    names: list[str] = []
+    for path in paths:
+        real = os.path.realpath(path)
+        name = "./" + os.path.relpath(real, here) if real.startswith(here + os.sep) else tilde(real)
+        if name not in names:
+            names.append(safe(name))
+    text = ", ".join(names[:shown])
+    return text + (f" (and {len(names) - shown} more)" if len(names) > shown else "")
+
+
+def describe(plan: Policy, base: Policy, signed: str, secrets: list[str], runs: list[str],
+             log: str | None) -> str:
+    """What `hlyn claude` is about to give Claude Code, for a person to read
+    before saying yes: a few lines, the risks last, nothing else."""
+    from .report import tilde
+
+    cwd = os.getcwd()
+    rows = [("this folder", f"{tilde(cwd)}", "read and write")]
+    state = next((p for p in base.write or () if p != cwd and p != "/dev/tty"), None)
+    if state:
+        rows.append(("its own state", tilde(state), "read and write"))
+    hosts = "any host" if plan.net is True else ", ".join(str(h).removesuffix(":443") for h in plan.net or ())
+    rows.append(("network", hosts or "none", ""))
+    rows.append(("programs", "any, and they are confined the same way", ""))
+    rows.append(("sign-in", signed, ""))
+    for field, label in (("read", "read"), ("write", "write")):
+        mine, theirs = getattr(plan, field), getattr(base, field)
+        if mine is True:
+            rows.append(("also", "every file", label))
+        elif isinstance(mine, tuple):
+            extra = [p for p in mine if p not in (theirs or ())]
+            if extra:
+                rows.append(("also", ", ".join(tilde(p) for p in extra), label))
+    if plan.env is True:
+        rows.append(("also", "your whole environment, secrets included", ""))
+    width = max(len(name) for name, _, _ in rows)
+    lines = ["hlyn claude: Claude Code will start confined, with:", ""]
+    for name, what, how in rows:
+        lines.append(f"  {name:<{width}}  {what}" + (f"  ({how})" if how else ""))
+    lines += ["", "  Everything else is refused: other folders, other hosts, your keys and passwords."]
+    if log:
+        lines.append(f"  A record of what it was refused goes to {tilde(log)}.")
+    warnings = []
+    danger = risky(cwd)
+    if danger:
+        warnings.append(danger + ". Start it inside a project folder instead.")
+    if secrets:
+        one = len(set(map(os.path.realpath, secrets))) == 1
+        warnings.append(f"it can read {'a secret file' if one else 'secret files'}: {_few(secrets)}")
+    if runs:
+        warnings.append(f"it can change files that run later, outside hlyn: {_few(runs)}")
+    if warnings:
+        lines.append("")
+        lines += [f"  ! {text}" for text in warnings]
+    return "\n".join(lines)

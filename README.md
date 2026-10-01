@@ -189,6 +189,8 @@ hlyn claude --read ~/docs        # plus one more folder to read
 hlyn claude -- --resume          # arguments after -- go to claude
 ```
 
+At a terminal, `hlyn claude` first lists what Claude Code will get and asks before starting. Press Enter to start, `n` to stop, or type more access (`--read ~/docs --net pypi.org`) to add it and see the list again. In your home folder, Enter means no. `-y` skips the question; scripts are never asked. The record of what was refused goes to `~/Library/Logs/hlyn/claude.jsonl` (macOS) or `~/.local/state/hlyn/claude.jsonl`, not the screen.
+
 Claude Code can read and write this folder, write its own state (`~/.claude`), read `~/.claude.json`, run any program, and reach Anthropic's API (`api.anthropic.com`, or the host in `ANTHROPIC_BASE_URL`) and the sign-in refresh (`platform.claude.com`). Nothing else: not `~/.ssh`, not your other projects, not any other host. git works, with your `~/.gitconfig`; `~/.git-credentials` stays closed. Flags add to this, as for `hlyn run`.
 
 - **Sign-in on macOS:** run `hlyn claude --login` once. It runs `claude setup-token` (a browser sign-in), asks you to paste the token, and keeps it in your keychain as "hlyn: Claude Code sign-in". Each `hlyn claude` reads it from outside the environment and gives it to Claude Code alone; the keychain itself stays closed to the agent, and Claude Code keeps the token out of the commands its Bash tool runs (an `ANTHROPIC_API_KEY`, by contrast, reaches them). A variable you set (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock, Vertex) always wins. `hlyn claude --logout` removes it. On Linux nothing is needed: the sign-in file in `~/.claude` works as it is.

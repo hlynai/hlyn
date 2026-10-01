@@ -78,6 +78,8 @@ def build() -> argparse.ArgumentParser:
                     help="do not list what was blocked when Claude Code ends")
     cc.add_argument("--json", action="store_true",
                     help="print the list of what was blocked as JSON (on stderr)")
+    cc.add_argument("-y", "--yes", action="store_true",
+                    help="start without showing what Claude Code gets and asking first")
     cc.add_argument("--login", action="store_true",
                     help="macOS: sign in once with `claude setup-token` and keep the token in your "
                          "keychain, outside the agent's reach")
@@ -711,7 +713,71 @@ def _starting(way: Any, final: bool = False) -> None:
         print(f"hlyn: {trouble}", file=sys.stderr)
 
 
-def _later(plan: Policy, known: tuple[str, ...] = ()) -> bool:
+def _signed(had: set[str], note: str | None, env: Any) -> str:
+    """How Claude Code will sign in, in a few words, for `hlyn claude`'s summary."""
+    from . import claude
+
+    if note:
+        return "none found: run hlyn claude --login first"
+    if had:
+        return f"from {', '.join(sorted(had))}"
+    if env.get(claude.TOKEN):
+        return "the token hlyn claude --login kept, given to Claude Code only"
+    return "its own sign-in file in its state folder"
+
+
+def _ask(no: bool) -> bool | list[str]:
+    """Ask whether to start. True, False, or more flags to add (as typed).
+    `no` makes no the answer to a bare Enter: starting somewhere risky."""
+    import shlex
+
+    choices = "y/N" if no else "Y/n"
+    while True:
+        sys.stderr.write(f"\nStart Claude Code? [{choices}, or add access like --read ~/docs] ")
+        sys.stderr.flush()
+        line = sys.stdin.readline()
+        if not line:
+            return False  # end of input: never start on a guess
+        typed = line.strip()
+        if not typed:
+            return not no
+        if typed.lower() in ("y", "yes"):
+            return True
+        if typed.lower() in ("n", "no", "q", "quit"):
+            return False
+        try:
+            words = shlex.split(typed)
+        except ValueError as exc:
+            print(f"hlyn: {exc}", file=sys.stderr)
+            continue
+        if words and words[0].startswith("-"):
+            return words
+        print("hlyn: type y to start, n to stop, or flags such as --read ~/docs --net pypi.org.",
+              file=sys.stderr)
+
+
+def _more(args: argparse.Namespace, words: list[str]) -> argparse.Namespace:
+    """`args` with the flags typed at `_ask` added, parsed as `hlyn claude` parses them."""
+    part = argparse.ArgumentParser(prog="hlyn claude", add_help=False, exit_on_error=False)
+    for name in ("--read", "--write", "--exec", "--net", "--env"):
+        part.add_argument(name, action="append", default=[])
+    for name in ("--exec-any", "--net-any", "--env-any"):
+        part.add_argument(name, action="store_true")
+    try:
+        extra, unknown = part.parse_known_args(words)
+    except argparse.ArgumentError as exc:
+        raise Error(f"{exc}. Use --read, --write, --exec, --net or --env, each with a value.") from None
+    if unknown:
+        raise Error(f"can't add {' '.join(unknown)} here: use --read, --write, --exec, --net or --env.")
+    merged = argparse.Namespace(**vars(args))
+    for field in ("read", "write", "exec", "net", "env"):
+        setattr(merged, field, [*getattr(args, field), *getattr(extra, field)])
+    for field in ("exec_any", "net_any", "env_any"):
+        setattr(merged, field, getattr(args, field) or getattr(extra, field))
+    return merged
+
+
+def _later(plan: Policy, known: tuple[str, ...] = (), quiet: bool = False) -> bool:
     """Warn, on stderr, when the policy lets the agent write a file something
     else runs later (`later.py`). Same filters and exit rule as `_exposed`:
     `-W error::hlyn.Runs` refuses the run, which is how a CI job keeps a
@@ -734,12 +800,12 @@ def _later(plan: Policy, known: tuple[str, ...] = ()) -> bool:
               file=sys.stderr)
         print("  Refused because warnings are errors here (PYTHONWARNINGS / -W error).", file=sys.stderr)
         return False
-    if heard:
+    if heard and not quiet:
         print(text, file=sys.stderr)
     return True
 
 
-def _exposed(plan: Policy) -> bool:
+def _exposed(plan: Policy, quiet: bool = False) -> bool:
     """Warn, on stderr, when the policy lets secrets out. By default the run
     goes ahead: the user may mean it, and the message says how to say so.
 
@@ -769,12 +835,12 @@ def _exposed(plan: Policy) -> bool:
         print(refused, file=sys.stderr)
         print("  Refused because warnings are errors here (PYTHONWARNINGS / -W error).", file=sys.stderr)
         return False
-    if heard:
+    if heard and not quiet:
         print(text, file=sys.stderr)
     return True
 
 
-def _reach(plan: Policy) -> bool:
+def _reach(plan: Policy, quiet: bool = False) -> bool:
     """Warn, on stderr, for each host entry that names a local service giving
     onward reach (design 6.7). Same filters and exit rule as `_exposed`."""
     import warnings
@@ -791,7 +857,7 @@ def _reach(plan: Policy) -> bool:
             print(text.replace("hlyn:", "hlyn: refused:", 1), file=sys.stderr)
             print("  Refused because warnings are errors here (PYTHONWARNINGS / -W error).", file=sys.stderr)
             return False
-        if heard:
+        if heard and not quiet:
             print(text, file=sys.stderr)
     return True
 
@@ -980,17 +1046,53 @@ def _run(argv: Sequence[str] | None = None) -> int:
             print("hlyn: removed the sign-in hlyn claude kept." if gone
                   else "hlyn: there was no sign-in to remove.", file=sys.stderr)
             return 0
+        had = {name for name in claude.SIGNINS if os.environ.get(name)}
         note = claude.signin(os.environ)
-        if note:
-            print(note, file=sys.stderr)
+        signed = _signed(had, note, os.environ)
         box = claude.prepare(os.environ)
-        plan = _policy(args, claude.policy(full[0], os.environ, box))
+        base = claude.policy(full[0], os.environ, box)
         # Claude Code's own state folder holds settings and hooks that run at
         # its next start, which is why the README says to start it with
         # `hlyn claude` every time. Granted here on purpose, so `_later` says
         # nothing about it; everything else it finds is still a surprise.
-        if not _exposed(plan) or not _reach(plan) or not _later(plan, (claude.state(os.environ),)):
-            return 2
+        known = (claude.state(os.environ),)
+        # A person at a terminal sees what Claude Code gets and says yes
+        # first; a script (or -y) gets the warnings as before.
+        asking = not args.yes and sys.stdin.isatty() and sys.stderr.isatty()
+        while True:
+            plan = _policy(args, base)
+            if not args.log and not args.no_log:
+                # Not the terminal: the record would draw over Claude Code's screen.
+                plan = plan.with_(log=claude.record())
+            if not (_exposed(plan, quiet=asking) and _reach(plan, quiet=asking)
+                    and _later(plan, known, quiet=asking)):
+                return 2
+            if not asking:
+                if note:
+                    print(note, file=sys.stderr)
+                break
+            from .later import found
+            from .secret import exposed
+
+            log_to = plan.log if isinstance(plan.log, str) else None
+            # Secrets in Claude Code's own state folder (its sign-in file, a
+            # plugin's .npmrc) are left out for the reason `known` is.
+            from .policy import under
+
+            mine = [path for path in exposed(plan)
+                    if not any(under(os.path.realpath(path), os.path.realpath(k)) for k in known)]
+            print(claude.describe(plan, base, signed, mine, found(plan, known), log_to), file=sys.stderr)
+            answer = _ask(no=bool(claude.risky(os.getcwd())))
+            if answer is True:
+                break
+            if answer is False:
+                print("hlyn: not started.", file=sys.stderr)
+                return 0
+            try:
+                args = _more(args, answer)
+            except Error as exc:
+                print(f"hlyn: {exc}", file=sys.stderr)
+            print(file=sys.stderr)
         jail.unbuilt(plan)
         jail._ready(plan)
         return _launch(full, plan, args.no_report, args.json, own=True)

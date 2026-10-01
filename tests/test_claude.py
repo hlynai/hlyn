@@ -220,7 +220,7 @@ def interactive(steps, home, work, confined=True):
             **({"IS_SANDBOX": "1"} if os.geteuid() == 0 else {}),
         }
         args = ["--permission-mode", "bypassPermissions", "--model", "sonnet"]
-        argv = ([sys.executable, "-m", "hlyn.cli", "claude", "--no-log", "--", *args]
+        argv = ([sys.executable, "-m", "hlyn.cli", "claude", "--no-log", "-y", "--", *args]
                 if confined else [CLAUDE, *args])
         pid, fd = pty.fork()
         if pid == 0:
