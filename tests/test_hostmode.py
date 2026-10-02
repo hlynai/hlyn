@@ -800,7 +800,9 @@ def test_a_program_left_running_keeps_its_network_after_the_command_exits(servic
         # it can't read the program's memory and answers in reduced mode (design 5.3):
         # the address entry is unavailable and the connection fails closed. Measured
         # on GitHub's runner (Ubuntu, ptrace_scope 1): "REFUSED timed out".
-        assert got.startswith("REFUSED"), got
+        # Either the connect fails ("REFUSED ..."; seen: a timeout) or the proxy takes it
+        # and closes it without an answer (an empty reply; seen on CI). Never "hi late".
+        assert got == "" or got.startswith("REFUSED"), got
     else:
         assert got == "hi late"
     time.sleep(1)
