@@ -38,6 +38,7 @@ repaint the user's screen.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shlex
 import shutil
@@ -375,6 +376,91 @@ class Entry:
         }
 
 
+# What the agent can read about its refusals while it runs: see `Blocked`.
+BLOCKED = "hlyn-blocked.txt"  # in the agent's scratch folder
+BLOCKED_ENV = "HLYN_BLOCKED"  # the variable that holds its path
+BLOCKED_LINES = 50  # refusals listed before it says the rest are in the person's report
+
+
+class Blocked:
+    """The refusals heard so far, one short line each, in a file in the
+    agent's scratch folder -- so the agent can learn during the run why a
+    call failed and which flag its user would add, instead of retrying a bare
+    "Permission denied". The kernel can carry no message; this is the message.
+
+    Written only by hlyn's own, unconfined process, through the one
+    descriptor it opens before the agent exists (`start`): the path is never
+    opened again, so an agent that deletes the file or plants a link in its
+    place changes nothing hlyn does, and hlyn never reads the file back. The
+    agent may edit it; that only misleads the agent. It tells the agent no
+    more than the person's report holds: the same targets and flags, and a
+    credential is "kept closed" with no flag, as there.
+    """
+
+    HEADER = (
+        "# hlyn refused these, newest last. You can't change that from inside the environment.\n"
+        "# If you need one, tell the user the flag on its line: they decide.\n"
+    )
+
+    def __init__(self, fd: int, path: str, hide: Callable[[Any], bool] | None = None) -> None:
+        self.fd = fd
+        self.path = path
+        self.hide = hide
+        self.seen: set[tuple[str, str]] = set()  # at most BLOCKED_LINES
+
+    @classmethod
+    def start(cls, folder: str, hide: Callable[[Any], bool] | None = None) -> Blocked | None:
+        """Make the file in `folder`, or None if that can't be done (the
+        agent then simply has no file). Any old file of that name is
+        unlinked first, not opened: an earlier run's agent may have left a
+        link there, and truncating it would reach what it points at."""
+        path = os.path.join(folder, BLOCKED)
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
+            fd = os.open(path, flags, 0o600)
+        except OSError:
+            return None
+        made = cls(fd, path, hide)
+        made._write(cls.HEADER)
+        return made
+
+    def add(self, entry: Entry) -> None:
+        """List a refusal the first time it is heard. Left out: what the
+        report leaves out (OS plumbing, quiet ones, `hide`)."""
+        if self.fd < 0 or entry.kind == "system" or entry.quiet or (self.hide and self.hide(entry)):
+            return
+        key = (entry.kind, entry.target)
+        if key in self.seen:
+            return
+        if len(self.seen) >= BLOCKED_LINES:
+            self._write(f"# {BLOCKED_LINES} listed; more were refused. The person's report lists them all.\n")
+            self.close()
+            return
+        self.seen.add(key)
+        if entry.credential:
+            right = "kept closed: a credential"
+        elif entry.allow:
+            right = f"allow with {entry.allow}"
+        else:
+            right = entry.note or "no flag allows this"
+        line = safe(f"{entry.kind:<6}{entry.target}  ->  {right}")[:400]
+        self._write(line.replace("\n", " ") + "\n")
+
+    def _write(self, text: str) -> None:
+        try:
+            os.write(self.fd, text.encode("utf-8", "replace"))
+        except OSError:
+            self.close()  # a full disk: no more lines, and the run goes on
+
+    def close(self) -> None:
+        fd, self.fd = self.fd, -1
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
 ORDER = {"read": 0, "write": 1, "exec": 2, "net": 3, "bind": 4, "other": 5}
 
 # How many distinct refusals one run keeps. An agent walking a tree it cannot
@@ -424,6 +510,7 @@ class Report:
         # kernel's listener is off, but hlyn's proxy and gate still report
         # refusals, so the list is held back here; `json` keeps all of it.
         self.silent = False
+        self.blocked: Blocked | None = None  # the agent's own list, written as refusals arrive
         self._reads = plan.reads()
         self._writes = plan.writes()
         self._runs = plan.runs()

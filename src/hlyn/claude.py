@@ -117,6 +117,21 @@ def command(args: list[str]) -> list[str]:
     return [found, *args]
 
 
+def hinted(full: list[str], path: str) -> list[str]:
+    """`full` (from `command`) with one short line added to Claude Code's
+    system prompt: where hlyn lists what it refused and the flag that would
+    allow it (`report.Blocked`). Nothing is written into the person's project.
+    A system prompt the person appended themselves is left as it is."""
+    if any(arg.startswith("--append-system-prompt") for arg in full[1:]):
+        return full
+    text = (
+        f"This session runs in an hlyn environment that refuses what it wasn't given. When a file, "
+        f"command or network access is refused, read {path} (also $HLYN_BLOCKED): it says why and "
+        f"which hlyn flag would allow it. You can't change it from inside; tell the user the flag."
+    )
+    return [full[0], "--append-system-prompt", text, *full[1:]]
+
+
 def state(env: MutableMapping[str, str]) -> str:
     """Where Claude Code keeps its own settings, sessions and hooks."""
     return env.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")

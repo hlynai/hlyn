@@ -19,6 +19,7 @@ import contextlib
 import json
 import os
 import sys
+import tempfile
 from collections.abc import Sequence
 from typing import Any, NoReturn
 
@@ -506,6 +507,16 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
     from . import report
 
     ear = _listener(quiet)
+    # The agent's own list of refusals (`report.Blocked`), in its scratch
+    # folder, which is made here so this process knows where it is. Not with
+    # --no-report: the person asked for no list, and the agent gets none.
+    blocked = None
+    if not quiet:
+        if plan.tmp is True:
+            plan = plan.with_(tmp=tempfile.mkdtemp(prefix="hlyn-"))
+        if isinstance(plan.tmp, str):
+            os.makedirs(plan.tmp, exist_ok=True)
+            blocked = report.Blocked.start(plan.tmp, (brief or {}).get("hide"))
     # Everything from here on is undone on the way out, however it goes: a
     # Ctrl-C while the macOS listener is starting would otherwise leave its
     # `log stream` running for good, since nothing it filters for will come.
@@ -513,9 +524,12 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
         ear.start()
         book = report.Report(plan)
         book.silent = quiet
+        book.blocked = blocked
         failed, status = _wait(cmd, ear.grant(plan), ear, book, plan, own)
     finally:
         ear.close()
+        if blocked is not None:
+            blocked.close()
 
     if failed:
         return 1
@@ -606,6 +620,14 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy,
     # start a fresh interpreter (gate.become's `fresh`, as `hlyn.run(fn)`
     # does): no other thread can have held a lock across the fork.
     alone = False
+    # What the child's environment gets besides what the policy keeps: the
+    # listener's variables, and where its list of refusals is (`Blocked`).
+    where = ear.env
+    if getattr(book, "blocked", None) is not None:
+        from .report import BLOCKED_ENV
+
+        path = book.blocked.path
+        where = jail._both(ear.env, lambda _keep: {BLOCKED_ENV: path})
     if (way is not None or minded) and sys.platform == "linux":
         from .core.landlock import crowd
 
@@ -625,10 +647,10 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy,
                 try:
                     mine = _own(grants) if own else grants
                     if way is None:
-                        jail._spawn(cmd, mine, ear.env, ear.tag)
+                        jail._spawn(cmd, mine, where, ear.tag)
                     else:
                         port = jail._port(way)
-                        jail._spawn(cmd, mine, jail._both(ear.env, jail._proxied(port)), ear.tag,
+                        jail._spawn(cmd, mine, jail._both(where, jail._proxied(port)), ear.tag,
                                     proxy=(port, way.pid))
                 except Error as exc:
                     print(f"hlyn: {exc}", file=sys.stderr)
@@ -948,7 +970,9 @@ def _proxied(fd: int, rest: bytes, book: Any) -> bytes:
                             allow=str(event.get("allow") or ""))
         except (ValueError, KeyError, TypeError):
             continue
-        book.add(denial)
+        entry = book.add(denial)
+        if entry is not None and getattr(book, "blocked", None) is not None:
+            book.blocked.add(entry)
     return rest[-4096:]
 
 
@@ -967,6 +991,8 @@ def _file(book: Any, denial: Any) -> None:
 
     entry = book.add(denial)
     if entry is not None:
+        if getattr(book, "blocked", None) is not None:
+            book.blocked.add(entry)
         log.emit(
             "deny", what=entry.kind, target=entry.target, allow=entry.allow,
             credential=entry.credential, by=denial.by, pid=denial.pid,
@@ -1128,6 +1154,10 @@ def _run(argv: Sequence[str] | None = None) -> int:
             print(file=sys.stderr)
         jail.unbuilt(plan)
         jail._ready(plan)
+        if not args.no_report and isinstance(plan.tmp, str):
+            from .report import BLOCKED
+
+            full = claude.hinted(full, os.path.join(plan.tmp, BLOCKED))
         hosts = claude.mcp_hosts()
         brief = {"log": plan.log if isinstance(plan.log, str) else None, "hide": claude.expected,
                  "who": lambda entry: claude.whose(entry, hosts)}
