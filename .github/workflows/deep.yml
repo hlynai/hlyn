@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [yama-0, yama-1, yama-2, resolved, pointer, numbers]
+        check: [yama-0, yama-1, yama-2, resolved, pointer, numbers, terminal]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,6 +79,20 @@ jobs:
         if: matrix.check == 'pointer'
         run: |
           python -m pytest -vv -rA -p no:cacheprovider tests/test_guard.py tests/test_hostmode.py -k "answers_any_arguments or tagged_sockaddr or bad_pointer"
+      - name: terminal
+        # REMAINING #16p: Ctrl-C after fg failed twice in four ordinary CI runs
+        # (never locally). Twenty rounds here, each on a fresh pty; the failure
+        # prints the process table.
+        if: matrix.check == 'terminal'
+        run: |
+          fails=0
+          for i in $(seq 1 20); do
+            if ! python -m pytest -rA -p no:cacheprovider --timeout=120 tests/test_terminal.py -k "ctrl_z_fg" > round.log 2>&1; then
+              fails=$((fails + 1)); echo "=== round $i failed"; cat round.log
+            fi
+          done
+          echo "$fails of 20 rounds failed"
+          [ "$fails" = 0 ]
       - name: numbers
         if: matrix.check == 'numbers'
         run: |

@@ -155,7 +155,16 @@ def test_ctrl_z_fg_and_ctrl_c_at_an_interactive_shell(tmp_path, net):
         term.expect(r"agent read: hello")
 
         term.send("\x03")  # Ctrl-C
-        term.expect(r"agent got INT")
+        try:
+            term.expect(r"agent got INT")
+        except AssertionError:
+            # Failed on CI twice (REMAINING #16p), never here: say who held the
+            # terminal and in what state, so the next failure names its cause.
+            table = subprocess.run(["ps", "-eo", "pid,ppid,pgid,sid,tpgid,stat,wchan:14,args"],
+                                   capture_output=True, text=True, check=False).stdout
+            print("processes at the failure:\n" + "\n".join(
+                line[:200] for line in table.splitlines() if "agent.py" in line or "hlyn" in line or "PID" in line))
+            raise
         term.expect(PROMPT)
         term.send("echo status=$?\n")
         status = term.expect(r"status=(\d+)")[1]
