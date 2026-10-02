@@ -47,7 +47,7 @@ __all__ = ["build", "dumps", "load", "loads", "raw", "shape"]
 # an explicit tuple rather than read off the dataclass so that adding a field to
 # `Policy` is a deliberate decision to expose it in a file, not an automatic
 # one.
-FIELDS: tuple[str, ...] = ("read", "write", "exec", "net", "env", "tmp", "log")
+FIELDS: tuple[str, ...] = ("read", "write", "exec", "net", "env", "tmp", "log", "shm")
 
 # Paths in these fields resolve against the file's own directory. `net` and
 # `env` hold ports and variable names, and `tmp` and `log` are locations the

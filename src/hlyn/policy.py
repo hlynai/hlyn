@@ -50,6 +50,9 @@ SAFE: tuple[str, ...] = (
 )
 
 
+# Where Linux keeps POSIX semaphores and shared memory (`shm`).
+SHM = "/dev/shm"  # noqa: S108 - a grant, not scratch space
+
 # ---------------------------------------------------------------------------
 # normalisation
 # ---------------------------------------------------------------------------
@@ -588,6 +591,7 @@ class Policy:
     env: tuple[str, ...] | bool = False
     tmp: bool | str = True
     log: bool | str = True
+    shm: bool = False
 
     def __post_init__(self) -> None:
         put = object.__setattr__  # frozen dataclass, so assign through the base
@@ -600,6 +604,8 @@ class Policy:
             raise Invalid(f"tmp: expected a bool or a directory, got {self.tmp!r}.")
         if not isinstance(self.log, (bool, str)):
             raise Invalid(f"log: expected a bool or a file path, got {self.log!r}.")
+        if not isinstance(self.shm, bool):
+            raise Invalid(f"shm: expected true or false, got {self.shm!r}.")
 
     # -- derived views ------------------------------------------------------
     #
@@ -625,6 +631,8 @@ class Policy:
             out.extend(network())
         if isinstance(self.tmp, str):
             out.append(os.path.abspath(self.tmp))
+        if self.shm and os.path.isdir(SHM):
+            out.append(SHM)
         return prune(out)
 
     def writes(self) -> tuple[str, ...] | Literal[True]:
@@ -641,6 +649,12 @@ class Policy:
         out.extend(item for item in _sink() if os.path.exists(item))
         if isinstance(self.tmp, str):
             out.append(os.path.abspath(self.tmp))
+        if self.shm and os.path.isdir(SHM):
+            # POSIX semaphores and shared memory are files here on Linux
+            # (macOS has no such folder: mac.py allows the operations instead).
+            # Granting the folder also exposes every other program's segment
+            # in it, which is why `shm` is off unless asked for.
+            out.append(SHM)
         return prune(out)
 
     def runs(self) -> tuple[str, ...] | bool:

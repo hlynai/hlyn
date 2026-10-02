@@ -615,6 +615,8 @@ def describe(plan: Policy, base: Policy, signed: tuple[bool, str], secrets: list
             extra = [tilde(p) for p in mine if p not in (theirs or ())]
             if extra:
                 add("✓", "green", "also", extra, word)
+    if plan.shm:
+        add("!", "yellow", "also", "shared memory", "use")
     if plan.env is True:
         add("✓", "green", "also", "your whole environment, secrets included")
     add("✗", "red", "everything else", "other folders, hosts, your keys", "blocked")

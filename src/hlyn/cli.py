@@ -59,6 +59,11 @@ def build() -> argparse.ArgumentParser:
         p.add_argument("--env", action="append", metavar="NAME", default=[],
                        help="environment variable to keep (repeatable)")
         p.add_argument("--env-any", action="store_true", help="keep the whole environment, secrets included")
+        p.add_argument("--shm", action="store_true",
+                       help="allow POSIX shared memory and semaphores, which Python multiprocessing "
+                            "(Lock, Queue, Pool, shared_memory) needs; on Linux this opens /dev/shm, "
+                            "where the agent can also reach your other programs' segments; on a Mac "
+                            "only the names Python makes (/mp-*, /psm_*)")
         p.add_argument("--no-tmp", action="store_true", help="do not provide a private scratch directory")
         p.add_argument("--log", metavar="PATH", help="write the record here instead of stderr")
         p.add_argument("--no-log", action="store_true", help="record nothing")
@@ -165,6 +170,8 @@ def _policy(args: argparse.Namespace, start: Policy | None = None) -> Policy:
         edits["env"] = _add(base.env, args.env)
     if args.no_tmp:
         edits["tmp"] = False
+    if getattr(args, "shm", False):
+        edits["shm"] = True
     if args.no_log:
         edits["log"] = False
     elif args.log:
@@ -859,6 +866,16 @@ def _later(plan: Policy, known: tuple[str, ...] = (), quiet: bool = False) -> bo
     return True
 
 
+def _shm(plan: Policy, quiet: bool = False) -> bool:
+    """One line on stderr when `--shm` is on: what it opens, and that it is on."""
+    if plan.shm and not quiet:
+        where = ("POSIX shared memory and semaphores named /mp-* and /psm_* (what Python makes)"
+                 if sys.platform == "darwin"
+                 else "/dev/shm, so also your other programs' segments there")  # noqa: S108
+        print(f"hlyn: --shm is on: the agent can use {where}.", file=sys.stderr)
+    return True
+
+
 def _exposed(plan: Policy, quiet: bool = False) -> bool:
     """Warn, on stderr, when the policy lets secrets out. By default the run
     goes ahead: the user may mean it, and the message says how to say so.
@@ -1124,7 +1141,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
                 # Not the terminal: the record would draw over Claude Code's screen.
                 plan = plan.with_(log=claude.record())
             if not (_exposed(plan, quiet=asking) and _reach(plan, quiet=asking)
-                    and _later(plan, known, quiet=asking)):
+                    and _later(plan, known, quiet=asking) and _shm(plan, quiet=asking)):
                 return 2
             if not asking:
                 if note:
@@ -1183,7 +1200,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
     # Built here, before the fork, so a malformed policy is reported once, as
     # a sentence, with exit code 2 -- like every other command.
     plan = _policy(args)
-    if not _exposed(plan) or not _reach(plan) or not _later(plan):
+    if not _exposed(plan) or not _reach(plan) or not _later(plan) or not _shm(plan):
         return 2
     jail.unbuilt(plan)
     jail._ready(plan)

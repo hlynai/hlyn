@@ -270,6 +270,18 @@ def where(paths: Iterable[str], refused: list[str] | None = None) -> list[str]:
     return out
 
 
+def posix() -> list[str]:
+    """POSIX semaphores and shared memory under the names Python's
+    `multiprocessing` makes (`/mp-XXXX`, `/psm_XXXX`), and no others (`shm`;
+    FINDINGS.md, "multiprocessing"). Measured: the prefix filter works. A
+    program naming its own object, `SharedMemory(name="x")`, is still refused.
+    """
+    return [
+        '(allow ipc-posix-sem (ipc-posix-name-prefix "/mp-"))',
+        '(allow ipc-posix-shm (ipc-posix-name-prefix "/psm_"))',
+    ]
+
+
 def profile(policy: Policy, tag: str | None = None, port: int | None = None) -> str:
     """The SBPL text enforcing `policy`.
 
@@ -311,6 +323,9 @@ def profile(policy: Policy, tag: str | None = None, port: int | None = None) -> 
     elif runs:
         for item in where(runs, refused):
             lines.append(f"(allow process-exec {item})")
+
+    if policy.shm:
+        lines.extend(posix())
 
     if refused:
         # Same refusal as the Linux backend, for the same reason: a path the
