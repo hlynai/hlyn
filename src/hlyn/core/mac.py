@@ -22,7 +22,6 @@ allowances below are the minimum that leaves a working interpreter.
 from __future__ import annotations
 
 import ctypes
-import ctypes.util
 import os
 import re
 import sys
@@ -161,10 +160,18 @@ def lib() -> ctypes.CDLL:
     global _lib
     if _lib is not None:
         return _lib
-    found = ctypes.util.find_library("System")
-    if not found:
-        raise Unsupported("libSystem could not be found, so Seatbelt is unavailable.")
-    _lib = ctypes.CDLL(found, use_errno=True)
+    try:
+        # By its fixed path (macOS keeps it in the dyld cache, so the file may not
+        # exist on disk, but dlopen finds it): `ctypes.util` costs about 4 ms to
+        # import (it pulls in subprocess), and it is only the fallback.
+        _lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    except OSError:
+        from ctypes.util import find_library
+
+        found = find_library("System")
+        if not found:
+            raise Unsupported("libSystem could not be found, so Seatbelt is unavailable.") from None
+        _lib = ctypes.CDLL(found, use_errno=True)
     _lib.sandbox_init.argtypes = [
         ctypes.c_char_p,
         ctypes.c_uint64,

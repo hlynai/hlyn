@@ -68,7 +68,6 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import re
-import socket
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -241,6 +240,8 @@ def _loose_ipv4(text: str) -> str | None:
     """
     if not _LOOSE_IPV4.fullmatch(text):
         return None
+    import socket  # here, not at the top: only this one call needs it, and it costs ~2 ms to import
+
     try:
         return socket.inet_ntoa(socket.inet_aton(text))
     except OSError:

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import pickle
 import shutil
 import sys
 import tempfile
@@ -562,6 +561,7 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     _ready(plan)
     # Before the fork, never after: see the note above.
     back().ready()
+    _pickle()  # imported now, before the fork: only `run` needs it, and not in the sealed child
     named = plan.hosts()
     watch = not named and watched(plan)
     share = None
@@ -646,10 +646,19 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     # The bytes come from a child this process forked moments ago, over a pipe
     # nothing else holds. It is not untrusted input; it is this program's own
     # return value coming back across a process boundary.
-    kind, value = pickle.loads(body)  # noqa: S301
+    kind, value = _pickle().loads(body)
     if kind == "ok":
         return value
     raise value
+
+
+def _pickle() -> ModuleType:
+    """`pickle`, imported on first use: `on()` and `hlyn run` never need it,
+    and it costs about 5 ms to import. `run` calls this before it forks, so the
+    child, which is sealed, finds it already loaded."""
+    import pickle
+
+    return pickle
 
 
 def _flush() -> None:
@@ -673,11 +682,11 @@ def _child(fn: Callable[[], Any], seal: Callable[[], object], write: int) -> NoR
     except BaseException as exc:  # noqa: BLE001 - report it rather than die silently
         out, code = ("no", exc), 1
     try:
-        body = pickle.dumps(out)
+        body = _pickle().dumps(out)
     except Exception:  # noqa: BLE001 - any pickling failure, not a known set
         # A result or exception that will not pickle must not look like a
         # crash, which is what an empty pipe would mean.
-        body = pickle.dumps(("no", Failed(f"the result could not be returned: {out[0]}")))
+        body = _pickle().dumps(("no", Failed(f"the result could not be returned: {out[0]}")))
     try:
         with os.fdopen(write, "wb") as fh:
             fh.write(body)
