@@ -64,6 +64,7 @@ def test_the_grants(home):
     assert [str(rule) for rule in plan.net] == ["api.anthropic.com:443", "platform.claude.com:443"]
     assert set(plan.env) == {"ANTHROPIC_API_KEY", "CLAUDE_CODE_X", "SHELL", "CLAUDE_CODE_TMPDIR",
                              "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "TMPPREFIX",
+                             "CLAUDE_CODE_NO_FLICKER",  # claude._asks_renderer
                              *(["xcrun_db"] if os.uname().sysname == "Darwin" else [])}
     assert plan.tmp == box == env["CLAUDE_CODE_TMPDIR"]
     assert oct((home / ".claude").stat().st_mode & 0o777) == "0o700"

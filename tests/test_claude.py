@@ -284,6 +284,135 @@ def test_interactive_claude_code_works_and_cannot_reach_a_key(place):
     assert CANARY not in json.dumps(model.requests())
 
 
+def start_screen(home, work, *, confined=True, wait=7, extra=None):
+    """What Claude Code's interactive screen shows after `wait` seconds on a
+    pseudo-terminal, then Ctrl-C twice. Nothing is typed, so a question it asks
+    stays on the screen. Returns the screen as plain text."""
+    import pty
+    import re
+    import select
+    import time
+
+    key = "sk-ant-api03-not-a-real-key-0123456789abcdefghij"
+    screen = bytearray()
+
+    def pump(fd, seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            if select.select([fd], [], [], 0.2)[0]:
+                try:
+                    screen.extend(os.read(fd, 65536))
+                except OSError:
+                    return
+
+    with Model([]) as model:
+        env = {
+            "HOME": str(home), "TERM": "xterm-256color", "SHELL": "/bin/sh",
+            "PATH": os.pathsep.join([os.path.dirname(CLAUDE), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
+            "ANTHROPIC_BASE_URL": model.url, "ANTHROPIC_API_KEY": key, "PYTHONPATH": SRC,
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            **({"HLYN_SHIM": os.environ["HLYN_SHIM"]} if os.environ.get("HLYN_SHIM") else {}),
+            **({"IS_SANDBOX": "1"} if os.geteuid() == 0 else {}),
+            **(extra or {}),
+        }
+        args = ["--permission-mode", "bypassPermissions", "--model", "sonnet"]
+        argv = ([sys.executable, "-m", "hlyn.cli", "claude", "--no-log", "--no-report", "-y", "--", *args]
+                if confined else [CLAUDE, *args])
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(work)
+            os.execve(argv[0], argv, env)  # noqa: S606
+        try:
+            pump(fd, wait)
+            for _ in range(2):
+                with contextlib.suppress(OSError):
+                    os.write(fd, b"\x03")
+                pump(fd, 0.5)
+            pump(fd, 2)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
+            os.waitpid(pid, 0)
+            os.close(fd)
+    plain = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07", " ", screen.decode("utf-8", "replace"))
+    return re.sub(r"\s+", " ", plain)
+
+
+def seeded(home, work, **more):
+    """The answers a first start asks for, as `interactive` seeds them, and
+    nothing else: no `firstStartVersion`, which Claude Code writes itself."""
+    key = "sk-ant-api03-not-a-real-key-0123456789abcdefghij"
+    (home / ".claude.json").write_text(json.dumps({
+        "hasCompletedOnboarding": True, "bypassPermissionsModeAccepted": True,
+        "customApiKeyResponses": {"approved": [key[-20:]], "rejected": []},
+        "projects": {os.path.realpath(work): {"hasTrustDialogAccepted": True,
+                                              "hasCompletedProjectOnboarding": True}},
+        **more,
+    }))
+
+
+def test_the_fullscreen_renderer_question_is_not_asked_at_every_start(place):
+    # Under hlyn claude, ~/.claude.json is read-only, so Claude Code can't save
+    # that it has started before (firstStartVersion) and asked "Try the new
+    # fullscreen renderer?" at every start; unconfined the first start saves it
+    # and nobody is asked. Measured on 2.1.269 (macOS).
+    if not enforces():
+        pytest.skip("this machine can't enforce")
+    home, work = place
+    seeded(home, work)
+    before = (home / ".claude.json").read_text()
+    free = start_screen(home, work, confined=False)
+    print("--- without hlyn:", free[:300])
+    assert "bypass permissions" in free, "the control session didn't reach its prompt"
+    assert "fullscreen renderer" not in free
+    seeded(home, work)  # the control run saved its own keys; start from the same file
+    assert (home / ".claude.json").read_text() == before
+    for start in ("first", "second"):
+        screen = start_screen(home, work)
+        print(f"--- hlyn claude, {start} start:", screen[:300])
+        assert "fullscreen renderer" not in screen, f"the {start} start asked about the fullscreen renderer"
+        assert "bypass permissions" in screen, f"the {start} start didn't reach Claude Code's prompt"
+        assert (home / ".claude.json").read_text() == before, "~/.claude.json was written"
+
+
+def test_the_renderer_choice_is_left_alone_when_the_person_made_it(place, monkeypatch):
+    # hlyn only stops the question: it never overrides CLAUDE_CODE_NO_FLICKER,
+    # a `tui` setting, or a ~/.claude.json that already records a first start.
+    # (No Claude Code needed: this is the environment hlyn hands it.)
+    from hlyn import claude
+
+    home, work = place
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_NO_FLICKER", raising=False)
+
+    def handed(**keep):
+        env = {k: v for k, v in keep.items() if v is not None}
+        box = claude.prepare(env)
+        shutil.rmtree(box, ignore_errors=True)
+        return env.get("CLAUDE_CODE_NO_FLICKER")
+
+    seeded(home, work)
+    cases = {
+        "nothing recorded": handed(),
+        "the person set it": handed(CLAUDE_CODE_NO_FLICKER="1"),
+    }
+    (home / ".claude").mkdir(exist_ok=True)
+    (home / ".claude" / "settings.json").write_text('{"tui": "fullscreen"}')
+    cases["tui in settings.json"] = handed()
+    (home / ".claude" / "settings.json").unlink()
+    seeded(home, work, firstStartVersion="2.1.269")
+    cases["first start recorded"] = handed()
+    (home / ".claude.json").unlink()
+    cases["no ~/.claude.json at all"] = handed()
+    for label, value in cases.items():
+        print(f"  {label}: CLAUDE_CODE_NO_FLICKER = {value!r}")
+    assert cases == {
+        "nothing recorded": "0", "the person set it": "1", "tui in settings.json": None,
+        "first start recorded": None, "no ~/.claude.json at all": "0",
+    }
+
+
 # --- what a real Claude Code session does beyond its first prompt -------------
 # Measured 2026-10-01 against Claude Code 2.1.269 (macOS) and 2.1.286 (Linux);
 # FINDINGS.md, "`hlyn claude` beyond the first prompt".

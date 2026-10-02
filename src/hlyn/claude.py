@@ -407,6 +407,38 @@ def signin(env: MutableMapping[str, str]) -> str | None:
     )
 
 
+def _loads(path: str) -> object:
+    """The JSON in `path`, or None when it is missing or not JSON."""
+    import json
+
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def _asks_renderer(env: MutableMapping[str, str]) -> bool:
+    """Whether Claude Code would ask "Try the new fullscreen renderer?" at
+    every start because it can't save that it already has.
+
+    It asks when `~/.claude.json` has no `firstStartVersion` (measured on
+    2.1.269: a file with only that key added never asks; without it, a start
+    asks even with no hlyn, when the file can't be written). Unconfined, the
+    first start writes the key before it decides, so it asks nobody twice; here
+    the file is read-only (see the module docstring), the write is refused and
+    the question comes back each time. Answering "Yes" is saved (`"tui"` in
+    `settings.json`, inside the state folder), and a choice made through
+    `CLAUDE_CODE_NO_FLICKER` or `tui` is never asked about."""
+    if env.get("CLAUDE_CONFIG_DIR") or "CLAUDE_CODE_NO_FLICKER" in env:
+        return False  # the file saves in the state folder; or the person chose
+    top = _loads(os.path.expanduser("~/.claude.json"))
+    if isinstance(top, dict) and "firstStartVersion" in top:
+        return False
+    settings = _loads(os.path.join(state(env), "settings.json"))
+    return not (isinstance(settings, dict) and "tui" in settings)
+
+
 def prepare(env: MutableMapping[str, str]) -> str:
     """Set up what Claude Code expects before it starts: its state folder
     exists (a grant needs a path that does), its temporary folder is private,
@@ -418,6 +450,10 @@ def prepare(env: MutableMapping[str, str]) -> str:
     box = tempfile.mkdtemp(prefix="hlyn-claude-")
     env["CLAUDE_CODE_TMPDIR"] = box
     env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    if _asks_renderer(env):
+        # "0" is the renderer it starts with when nobody has chosen: it only
+        # stops the question. Set CLAUDE_CODE_NO_FLICKER yourself to override.
+        env["CLAUDE_CODE_NO_FLICKER"] = "0"
     # zsh, the macOS default shell, makes its here-document files at
     # $TMPPREFIX* (/tmp/zsh by default), not under TMPDIR.
     env.setdefault("TMPPREFIX", os.path.join(box, "zsh"))
