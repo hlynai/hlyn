@@ -194,5 +194,19 @@ def test_the_gate_helper_loads_nothing_slow():
     loaded = set(done.stdout.split())
     slow = {"asyncio", "typing", "ctypes.util", "hlyn.policy", "hlyn.proxy", "subprocess", "platform",
             "argparse"}
+    # Python 3.13's dataclasses imports inspect, which imports typing (measured in
+    # python:3.13: `typing` loads with no hlyn import of it). So on 3.13+ typing
+    # is allowed to arrive that way, and what we check instead is that none of
+    # the gate's own modules imports it.
+    if sys.version_info >= (3, 13) and "dataclasses" in loaded:
+        slow.discard("typing")
+        import ast
+
+        for name in ("gate.py", "core/guard.py", "core/notify.py"):
+            tree = ast.parse(open(f"{SRC}/hlyn/{name}").read())
+            for node in tree.body:  # top level only: `if TYPE_CHECKING:` blocks are inside an `If`
+                names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                         else [node.module] if isinstance(node, ast.ImportFrom) else [])
+                assert "typing" not in names, f"{name} imports typing when loaded"
     print(f"{len(loaded)} modules loaded; slow ones among them: {sorted(loaded & slow)}")
     assert not loaded & slow

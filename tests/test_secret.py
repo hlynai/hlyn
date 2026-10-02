@@ -330,6 +330,8 @@ NEW_HOME_SECRETS = [
     (".local/share/kwalletd", "folder"), (".mozilla/firefox", "folder"), (".config/google-chrome", "folder"),
     (".config/chromium", "folder"), ("Library/Application Support/Google/Chrome", "folder"),
     ("Library/Application Support/Firefox/Profiles", "folder"),
+    (".claude.json", "file"), (".claude/.credentials.json", "file"), (".codex/auth.json", "file"),
+    (".gemini/oauth_creds.json", "file"),
 ]
 
 
@@ -459,3 +461,15 @@ def test_a_hugging_face_token_in_the_cache_is_a_credential_but_the_walk_skips_ca
     assert credential(str(token))
     assert exposed(Policy(read=[tmp_path], net=True)) == []
     assert exposed(Policy(read=[tmp_path / ".cache" / "huggingface"], net=True)) == [str(token)]
+
+
+def test_a_login_file_granted_on_its_own_is_a_decision_not_a_warning(tmp_path, monkeypatch):
+    """hlyn claude grants ~/.claude.json by name; listing it as a secret must not make
+    that grant warn on every start."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".claude.json").write_text("{}")
+    folder = tmp_path / "project"
+    folder.mkdir()
+    found = exposed(Policy(read=[tmp_path / ".claude.json", folder], net=True))
+    print(f"warned about {found}")
+    assert found == []

@@ -179,7 +179,14 @@ nr = seccomp._nr('ioctl')
     done = jail(code, before=before)
     print("unconfined:\n" + control.stdout + control.stderr)
     print("confined:\n" + done.stdout + done.stderr)
-    assert "0x5412 0 accepted" in control.stdout and "input now b'ZZ'" in control.stdout
+    # Newer kernels (Ubuntu's 6.17 on GitHub's runner, measured) refuse TIOCSTI to an
+    # unprivileged process by themselves, with EIO (`dev.tty.legacy_tiocsti` = 0).
+    # Then the control can't show a landing, but hlyn's own answer is still told
+    # apart from the kernel's: EPERM comes from the filter, EIO from the kernel.
+    if "0x5412 -1 EIO" in control.stdout:
+        assert "0xdead00005412 -1 EIO" in control.stdout and "input now empty" in control.stdout
+    else:
+        assert "0x5412 0 accepted" in control.stdout and "input now b'ZZ'" in control.stdout
     assert "0x5412 -1 EPERM" in done.stdout
     assert "0xdead00005412 -1 EPERM" in done.stdout
     assert "input now empty" in done.stdout and not killed(done)

@@ -47,6 +47,8 @@ HOMES: tuple[str, ...] = (
     # AI and ML services: API keys and login tokens.
     ".huggingface/token", ".cache/huggingface/token", ".kaggle/kaggle.json", ".config/kaggle/kaggle.json",
     ".config/github-copilot",
+    # The coding agents' own logins.
+    ".claude.json", ".claude/.credentials.json", ".codex/auth.json", ".gemini/oauth_creds.json",
     # Databases, mail and version control.
     ".my.cnf", ".mylogin.cnf", ".msmtprc", ".subversion/auth",
     # Key stores, and the browsers' saved passwords and cookies.
