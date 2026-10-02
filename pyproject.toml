@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hlyn"
-version = "0.1.0"
+version = "0.4.0"
 description = "Kernel-enforced environment for AI agents: declare what an agent may read, write, run and reach; everything else is denied."
 dynamic = ["readme"]
 requires-python = ">=3.10"
