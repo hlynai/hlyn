@@ -14,11 +14,12 @@
 # Every action is pinned to a commit, not a tag: a moved tag can't change
 # what runs here.
 #
-# Hosted Linux runners have kernels older than hlyn's floor (Landlock ABI 6,
-# Linux 6.12), so the Linux jobs check what a runner can check -- the wheel
-# carries both libraries, installs, imports, and `hlyn probe` answers -- and
-# a real seal is tried only where `hlyn probe` says the machine can enforce.
-# The escape suite itself runs on a kernel that can (tools/linuxtest.sh).
+# A runner's kernel can be older or newer than hlyn's floor (Landlock ABI 6,
+# Linux 6.12), and manylinux containers add their own limits, so the Linux
+# jobs check what is certain -- the wheel carries both libraries, installs,
+# imports, and `hlyn probe` answers -- and a real seal is tried only where
+# `hlyn probe` says the machine can enforce. The full suite runs in test.yml,
+# on GitHub's ubuntu-24.04 runner (x86_64, Linux 6.17, which enforces).
 
 name: release
 
@@ -43,6 +44,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
+      - name: the tag is the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python -c "import re;print(re.search(r'^version = \"([^\"]+)\"', open('pyproject.toml').read(), re.M).group(1))")
+          [ "v$version" = "$TAG" ] || { echo "tag $TAG does not match pyproject version $version"; exit 1; }
+          grep -q "^__version__ = \"$version\"" src/hlyn/__init__.py || { echo "src/hlyn/__init__.py version differs"; exit 1; }
       - name: ruff and mypy
         run: |
           python -m pip install ruff mypy

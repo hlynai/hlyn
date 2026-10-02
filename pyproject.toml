@@ -1,12 +1,12 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-fancy-pypi-readme==25.1.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "hlyn"
-version = "0.0.1"
+version = "0.1.0"
 description = "Kernel-enforced environment for AI agents: declare what an agent may read, write, run and reach; everything else is denied."
-readme = "README.md"
+dynamic = ["readme"]
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -36,6 +36,22 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
+
+# README.md links and images are relative so they work in the repository. On PyPI
+# they are made absolute here (hatch-fancy-pypi-readme: maintained, widely used).
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(\]\()((?!https?://|#|mailto:)[^)]+)'
+replacement = '\1https://github.com/hlynai/hlyn/blob/main/\2'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '((?:src|srcset)=")((?!https?://)[^"]+)'
+replacement = '\1https://raw.githubusercontent.com/hlynai/hlyn/main/\2'
 
 [project.urls]
 Homepage = "https://github.com/hlynai/hlyn"

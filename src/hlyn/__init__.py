@@ -17,7 +17,7 @@ from .policy import SAFE, Policy, preset, presets, register, runtime
 from .secret import Exposed, exposed
 from .spec import load
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = [
     "SAFE",

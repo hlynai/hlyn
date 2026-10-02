@@ -11,6 +11,7 @@
 <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-52525b?style=flat-square&labelColor=000000">
 <img alt="Linux and macOS" src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-52525b?style=flat-square&labelColor=000000">
 <img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-52525b?style=flat-square&labelColor=000000">
+<img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/hlynai/hlyn/test.yml?branch=main&label=tests&style=flat-square&labelColor=000000&color=52525b">
 <img alt="Zero runtime dependencies" src="https://img.shields.io/badge/dependencies-0-52525b?style=flat-square&labelColor=000000">
 </p>
 
