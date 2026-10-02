@@ -10,6 +10,7 @@ reads the canary, so an EBADF can't be a descriptor that never arrived.
 
 from __future__ import annotations
 
+import errno
 import os
 import socket
 import subprocess
@@ -378,3 +379,41 @@ def test_keep_fds_must_name_open_descriptors_above_2():
         keeps([1])
     with pytest.raises(hlyn.Invalid, match="whole numbers"):
         keeps(["9"])  # type: ignore[list-item]
+
+
+def test_a_socket_python_cannot_wrap_is_skipped_not_fatal(monkeypatch):
+    """GitHub's macOS runner handed hlyn.on() an inherited socket that
+    `socket.socket(fileno=...)` refused (errno 102), and on() crashed. The check
+    now treats it as a socket it can't name, and closes the copy it made."""
+    import socket
+
+    from hlyn import fds
+
+    left, right = socket.socketpair()
+    opened: list[int] = []
+    real_dup = os.dup
+
+    def counting_dup(fd):
+        new = real_dup(fd)
+        opened.append(new)
+        return new
+
+    def refuse(*args, **kwargs):
+        raise OSError(errno.ENOTSUP, "Operation not supported on socket")
+
+    monkeypatch.setattr(os, "dup", counting_dup)
+    monkeypatch.setattr(socket, "socket", refuse)
+    try:
+        said = fds._socket(left.fileno())
+    finally:
+        left.close()
+        right.close()
+    leaked = []
+    for fd in opened:
+        try:
+            os.fstat(fd)
+            leaked.append(fd)
+        except OSError:
+            pass
+    print(f"answer {said!r}; copies made {len(opened)}, still open {leaked}")
+    assert said is None and opened and not leaked

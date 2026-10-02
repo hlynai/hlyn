@@ -199,7 +199,12 @@ def _socket(fd: int) -> str | None:
     sockets are `route.sockets`'s, and `on()` refuses them."""
     import socket  # on first use: `import hlyn` loads no socket module (tests/test_imports.py)
 
-    sock = socket.socket(fileno=os.dup(fd))
+    copy = os.dup(fd)
+    try:
+        sock = socket.socket(fileno=copy)
+    except OSError:
+        os.close(copy)  # Python couldn't wrap it (macOS: ENOTSUP for some inherited kinds)
+        return None
     try:
         if sock.family != socket.AF_UNIX:
             return None

@@ -1116,3 +1116,30 @@ def test_hlyn_show_warns_when_a_write_grant_holds_a_refused_socket_nothing_check
     assert any(f"--write {folder} covers {os.path.realpath(folder)}/run/docker.sock" in line
                and "Grant a narrower folder unless you mean it." in line for line in said)
     assert jail.reaches(Policy(net=["pypi.org"], write=[folder])) == []
+
+
+def test_grab_works_on_a_python_without_os_pidfd_open(monkeypatch):
+    """A Python built against glibc older than 2.36 has no `os.pidfd_open` (the
+    manylinux_2_28 3.10 the release smoke test uses; `hlyn probe` crashed there).
+    grab() then makes the system call itself."""
+    from hlyn.core import notify
+
+    if not notify.grabbable():
+        pytest.skip("pidfd_getfd is refused here (a stock docker run)")
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    assert not hasattr(os, "pidfd_open")
+    read, write = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(write)
+        os.read(read, 1)
+        os._exit(0)
+    os.close(read)
+    try:
+        copy = notify.grab(pid, read)
+        print(f"grabbed descriptor {copy} from child {pid} with no os.pidfd_open")
+        os.close(copy)
+    finally:
+        os.close(write)
+        os.waitpid(pid, 0)
+    assert notify.grabbable() is True

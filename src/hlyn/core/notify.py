@@ -328,7 +328,22 @@ def proto(pid: int, fd: int) -> str | None:
 # pidfd_open(2)'s flag for a pidfd naming one thread (Linux 6.9;
 # asm-generic's O_EXCL, the same on x86_64 and aarch64).
 PIDFD_GETFD = 438
+PIDFD_OPEN = 434  # pidfd_open(2), the same number on every architecture (Linux 5.3)
 PIDFD_THREAD = 0o200
+
+
+def _pidfd_open(pid: int, flags: int) -> int:
+    """`os.pidfd_open`, or the system call itself where Python lacks it: a Python
+    built against glibc older than 2.36 (the manylinux_2_28 builds, RHEL 8's)
+    has no `os.pidfd_open` even on a kernel that has the call."""
+    opener = getattr(os, "pidfd_open", None)
+    if opener is not None:
+        return int(opener(pid, flags))
+    got = _libc().syscall(ctypes.c_long(PIDFD_OPEN), ctypes.c_long(pid), ctypes.c_long(flags))
+    if got < 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+    return int(got)
 
 
 def grab(pid: int, fd: int) -> int:
@@ -341,7 +356,7 @@ def grab(pid: int, fd: int) -> int:
     for a thread that has gone. The caller closes the copy."""
     if sys.platform != "linux":
         raise OSError(errno.ENOSYS, os.strerror(errno.ENOSYS))
-    pidfd = os.pidfd_open(pid, PIDFD_THREAD)
+    pidfd = _pidfd_open(pid, PIDFD_THREAD)
     try:
         got = _libc().syscall(ctypes.c_long(PIDFD_GETFD), ctypes.c_long(pidfd), ctypes.c_long(fd),
                               ctypes.c_long(0))
