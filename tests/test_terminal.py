@@ -41,10 +41,13 @@ pytestmark = [
 
 PROMPT = "hlyn-test> "  # a pattern too: no regex specials
 
+# The agent's handler writes with os.write, not print: Ctrl-C can land while the main thread
+# is inside its own print, and print from a handler then raises "reentrant call" (exit 1,
+# not 130). That was the CI flake of REMAINING #16p: 2 rounds in 20 on a 2-vCPU runner.
 AGENT = textwrap.dedent("""
     import os, signal, sys
     def interrupted(number, frame):
-        print("agent got INT", flush=True)
+        os.write(1, b"agent got INT\\n")
         raise SystemExit(130)
     signal.signal(signal.SIGINT, interrupted)
     print("agent ready", os.getpid(), flush=True)

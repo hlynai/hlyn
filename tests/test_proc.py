@@ -338,7 +338,7 @@ def test_ctrl_c_at_the_terminal_reaches_the_command(tmp_path):
 
 JOB_AGENT = """
 import os, signal, sys
-signal.signal(signal.SIGINT, lambda *a: (print("agent got INT", flush=True), sys.exit(130)))
+signal.signal(signal.SIGINT, lambda *a: (os.write(1, b"agent got INT\\n"), sys.exit(130)))
 print("agent ready", flush=True)
 print("agent read:", sys.stdin.readline().strip(), flush=True)
 sys.stdin.readline()
