@@ -311,6 +311,7 @@ def _forked(gate_end: socket.socket, log: int | None) -> int | None:
             for number in _all():
                 with contextlib.suppress(OSError, ValueError):
                     signal.signal(number, signal.SIG_DFL)
+            _quiet()  # this is the gate itself: SIGIO and SIGURG ignored, as in `helpers.main`
             _only({gate_end.fileno(), *([log] if log is not None else [])})
             guard = _take(gate_end.detach(), tell)
             if guard is not None:
