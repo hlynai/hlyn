@@ -334,3 +334,71 @@ def test_ctrl_c_at_the_terminal_reaches_the_command(tmp_path):
     os.waitpid(pid, 0)
     print(f"Ctrl-C heard {len(heard)} time(s)")
     assert heard == "x", f"the command heard Ctrl-C {len(heard)} times, not once"
+
+
+JOB_AGENT = """
+import os, signal, sys
+signal.signal(signal.SIGINT, lambda *a: (print("agent got INT", flush=True), sys.exit(130)))
+print("agent ready", flush=True)
+print("agent read:", sys.stdin.readline().strip(), flush=True)
+sys.stdin.readline()
+"""
+
+
+@pytest.mark.parametrize("own", [False, True], ids=["plain", "own proc"])
+def test_ctrl_z_fg_and_ctrl_c_work_through_the_namespace_layers(tmp_path, own):
+    # hlyn claude is interactive: suspending it (Ctrl-Z), resuming it (fg) and
+    # interrupting it (Ctrl-C) must reach it through the three processes the
+    # pid namespace adds, as they do without them. An interactive bash on a pty.
+    import pty
+    import re
+    import select
+    import time
+
+    if not enforces():
+        pytest.skip("this machine can't enforce")
+    agent = tmp_path / "agent.py"
+    agent.write_text(JOB_AGENT)
+    launch = (f"import sys; sys.path.insert(0, {SRC!r}); from hlyn import cli; "
+              f"from hlyn.policy import Policy; "
+              f"sys.exit(cli._launch([sys.executable, {str(agent)!r}], "
+              f"Policy(read=({str(agent)!r},), log=False), quiet=True, own={own}))")
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(tmp_path)
+        os.execve("/bin/bash", ["bash", "--norc", "--noprofile", "-i"],
+                  {"PS1": "P> ", "TERM": "dumb", "PATH": "/usr/bin:/bin"})
+    seen = ""
+
+    def expect(pattern):
+        nonlocal seen
+        end = time.time() + 30
+        while not re.search(pattern, seen):
+            assert time.time() < end, f"never saw {pattern!r}:\n{seen}"
+            if select.select([fd], [], [], 0.2)[0]:
+                try:
+                    seen += os.read(fd, 4096).decode(errors="replace")
+                except OSError:
+                    break
+
+    try:
+        expect("P> ")
+        os.write(fd, f"{sys.executable} -c \"{launch}\"\n".encode())
+        expect("agent ready")
+        os.write(fd, b"\x1a")  # Ctrl-Z
+        expect("Stopped")
+        os.write(fd, b"fg\n")
+        time.sleep(1)
+        os.write(fd, b"hello\n")
+        expect("agent read: hello")
+        os.write(fd, b"\x03")  # Ctrl-C
+        expect("agent got INT")
+        os.write(fd, b"echo rc=$?\n")
+        expect(r"rc=\d+")
+    finally:
+        print(seen)
+        os.write(fd, b"exit\n")
+        time.sleep(0.3)
+        os.close(fd)
+        os.waitpid(pid, 0)
+    assert seen.count("agent got INT") == 1 and "rc=130" in seen
