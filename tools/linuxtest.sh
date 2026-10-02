@@ -36,7 +36,7 @@ exec docker run --rm $box \
     -v "$root":/work:ro -v hlyn-cargo:/usr/local/cargo/registry \
     -e PYTHONPATH=/w/src -e PYTHONDONTWRITEBYTECODE=1 hlyn-linuxtest sh -c "
 set -e
-cp -a /work /w && cd /w && rm -rf native/target native/report/target src/hlyn/core/*.so
+mkdir /w && (cd /work && tar --exclude=./.git --exclude=./OpenAPPA-main -cf - .) | tar -xf - -C /w && cd /w && rm -rf native/target native/report/target src/hlyn/core/*.so
 (cd native && cargo build -q --release) && (cd native/report && cargo build -q --release)
 echo \"== kernel \$(uname -r), \$(python3 -V), seccomp \$(grep Seccomp: /proc/self/status | cut -f2), ::1 \$(ip -6 addr show lo | grep -c ::1)\"
 $run"

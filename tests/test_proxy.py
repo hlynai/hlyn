@@ -340,7 +340,7 @@ def test_ech_is_noticed_and_only_the_outer_name_is_read():
     (b"\x16\x03\x01\x00\x04\x02\x00\x00\x00", "not a ClientHello"),
     (b"\x16\x03\x01\x00\x04\x01\xff\xff\xff", "over the"),
     (b"\x16\x03\x01\x00\x06\x01\x00\x00\x02\x03\x03", "truncated"),
-])
+], ids=lambda value: value if isinstance(value, str) else f"{len(value)}B")  # not 16 KB of bytes
 def test_a_clienthello_is_refused_when_malformed(raw, why):
     with pytest.raises(proxy.Bad) as caught:
         proxy.hello(raw)
