@@ -6,7 +6,7 @@ findings accordingly.
 
 ## Reporting a vulnerability
 
-Email **security@hlyn.dev** with:
+Email **founders@hlynai.com** with:
 
 - what the boundary was configured to be,
 - what you were able to do anyway,
@@ -67,9 +67,8 @@ an email too.
 
 ## Threat model for host names in `net`
 
-From [DESIGN-host-allowlisting.md](DESIGN-host-allowlisting.md), section 6, in
-the same words; section numbers refer to that document. The README carries the
-same text.
+The same words as in the README. Section numbers in brackets refer to the
+maintainers' design notes, which are private.
 
 **It stops**, for code running inside the environment, including code that deliberately races threads:
 

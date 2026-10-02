@@ -12,8 +12,7 @@ Neither kernel can grant a folder minus one file, so it cannot be refused
 without refusing the folder: the answer is a sentence, and `-W error` for a CI
 job that must not allow it at all.
 
-The list is what OpenAPPA's Claude Code battery watches
-(`OpenAPPA-main/marketplace/batteries/claude-code/appa.toml`, MIT), read on
+The list follows what OpenAPPA's Claude Code battery watches (MIT), read on
 2026-10-01 and checked against each program's own documentation.
 """
 

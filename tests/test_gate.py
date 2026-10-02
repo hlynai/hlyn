@@ -203,7 +203,8 @@ def test_the_gate_helper_loads_nothing_slow():
         import ast
 
         for name in ("gate.py", "core/guard.py", "core/notify.py"):
-            tree = ast.parse(open(f"{SRC}/hlyn/{name}").read())
+            with open(f"{SRC}/hlyn/{name}") as source:
+                tree = ast.parse(source.read())
             for node in tree.body:  # top level only: `if TYPE_CHECKING:` blocks are inside an `If`
                 names = ([a.name for a in node.names] if isinstance(node, ast.Import)
                          else [node.module] if isinstance(node, ast.ImportFrom) else [])

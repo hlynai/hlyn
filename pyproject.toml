@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+authors = [{ name = "chromejaw" }]
 dependencies = []
 # "sandbox" is what people type into PyPI's search; it's the one place hlyn
 # uses the word for itself (CLAUDE.md, "Product rules").
@@ -35,6 +36,12 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://github.com/hlynai/hlyn"
+Repository = "https://github.com/hlynai/hlyn"
+Issues = "https://github.com/hlynai/hlyn/issues"
+Security = "https://github.com/hlynai/hlyn/blob/main/SECURITY.md"
 
 [project.scripts]
 hlyn = "hlyn.cli:main"

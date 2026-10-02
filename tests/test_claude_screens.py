@@ -31,7 +31,7 @@ class Tty(io.StringIO):
 @pytest.mark.parametrize(("text", "room", "want"), [
     ("short", 10, "short"),
     ("exactly10!", 10, "exactly10!"),
-    ("~/projects/deep/file.txt", 20, "/Users/ka…p/file.txt"),
+    ("/Users/dev/projects/deep/file.txt", 20, "/Users/de…p/file.txt"),
     ("abcdefghij", 5, "ab…ij"),
     ("abcdefghij", 3, "abc"),
 ])
@@ -171,11 +171,11 @@ def test_a_crash_with_a_signal_is_said_plainly():
 @pytest.mark.parametrize(("kind", "target", "hidden"), [
     ("system", "mach-lookup com.apple.SecurityServer", True),
     ("read", "/var/db/mds/messages/501/se_SecurityMessages", True),
-    ("read", "~/.CFUserTextEncoding", True),
-    ("read", "~/.ssh/id_rsa", False),
+    ("read", "/Users/dev/.CFUserTextEncoding", True),
+    ("read", "/Users/dev/.ssh/id_rsa", False),
     ("read", "/var/db/mds/other", False),
     ("net", "example.com:443", False),
-    ("write", "~/.CFUserTextEncoding", False),
+    ("write", "/Users/dev/.CFUserTextEncoding", False),
 ])
 def test_expected_hides_only_the_known_probes(kind, target, hidden):
     got = claude.expected(refused(kind, target))

@@ -166,7 +166,8 @@ def test_ctrl_z_fg_and_ctrl_c_at_an_interactive_shell(tmp_path, net):
             table = subprocess.run(["ps", "-eo", "pid,ppid,pgid,sid,tpgid,stat,wchan:14,args"],
                                    capture_output=True, text=True, check=False).stdout
             print("processes at the failure:\n" + "\n".join(
-                line[:200] for line in table.splitlines() if "agent.py" in line or "hlyn" in line or "PID" in line))
+                line[:200] for line in table.splitlines()
+                if "agent.py" in line or "hlyn" in line or "PID" in line))
             raise
         term.expect(PROMPT)
         term.send("echo status=$?\n")

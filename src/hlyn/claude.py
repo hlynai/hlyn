@@ -185,7 +185,7 @@ def policy(binary: str, env: MutableMapping[str, str], tmp: str) -> Policy:
         write=(cwd, mine, *(["/dev/tty"] if os.path.exists("/dev/tty") else []),
                *(path for path in map(os.path.expanduser, KEEPING) if os.path.isdir(path))),
         exec=True,
-        net=(_model(env), *HOSTS[1:]),
+        net=(_model(env), *HOSTS[1:]),  # type: ignore[arg-type]  # host strings; Policy parses them
         env=tuple(keep),
         tmp=tmp,
     )
@@ -598,11 +598,13 @@ def describe(plan: Policy, base: Policy, signed: tuple[bool, str], secrets: list
         rows.append((mark, colour, [what, where, access]))
 
     add("✓", "green", "this folder", tilde(cwd), "read + write")
-    state = next((p for p in base.write or () if p not in (cwd, "/dev/tty")), None)
+    written = base.write if isinstance(base.write, tuple) else ()
+    state = next((p for p in written if p not in (cwd, "/dev/tty")), None)
     if state:
         add("✓", "green", "Claude's state", tilde(state), "read + write")
+    named = plan.net if isinstance(plan.net, tuple) else ()
     hosts = (["any host"] if plan.net is True
-             else [str(h).removesuffix(":443") for h in plan.net or ()] or ["none"])
+             else [str(h).removesuffix(":443") for h in named] or ["none"])
     add("✓", "green", "network", hosts, "connect")
     add("✓", "green", "programs", "any, confined the same way", "run")
     ok, how = signed

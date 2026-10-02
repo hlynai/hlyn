@@ -19,8 +19,15 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _section6() -> tuple[str, str]:
-    text = (ROOT / "DESIGN-host-allowlisting.md").read_text()
-    part = text[text.index("## 6. Threat model\n"):text.index("## 7. Alternatives considered")]
+    design = ROOT / "DESIGN-host-allowlisting.md"
+    if design.exists():
+        text = design.read_text()
+        part = text[text.index("## 6. Threat model\n"):text.index("## 7. Alternatives considered")]
+    else:
+        # The design notes are private (not in the public repository): SECURITY.md is the source, and the
+        # README must match it.
+        text = (ROOT / "SECURITY.md").read_text()
+        part = text[text.index("**It stops**"):text.index("\n## Scope")]
     stops = part[part.index("**It stops**"):part.index("**It does not stop.**")]
     nots = part[part.index("**It does not stop.**"):]
     stops = stops.split("\n", 1)[1].strip()  # the items, without the heading line

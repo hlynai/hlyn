@@ -377,7 +377,7 @@ def profile(policy: Policy, tag: str | None = None, port: int | None = None) -> 
         # These rules must come after the `(allow mach-lookup)` above so they
         # win: SBPL applies the rules for one operation in order and the last
         # match decides it, the same pattern the RESOLVER deny in the design
-        # doc's example profile relies on. This is TODO.md item 1 step 1 and
+        # doc's example profile relies on. This is
         # DESIGN-host-allowlisting.md gap 8.3's first phase: the blanket grant
         # otherwise stays for now (every other service), and the full
         # allowlist for every mode is later work.

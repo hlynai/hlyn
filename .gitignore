@@ -4,10 +4,6 @@ __pycache__/
 *.egg-info/
 .DS_Store
 
-# Modules cut from OSS v1 scope (audit/accept/attest/ocsf/hooks) and their
-# tests, kept locally for the paid tier rather than committed here.
-archive/
-
 # Rust build output. The .so this ships is built by the packaging step, not
 # committed source.
 native/target/
@@ -37,3 +33,5 @@ native/fuzz/coverage/
 
 .venv/
 venv/
+
+dist/

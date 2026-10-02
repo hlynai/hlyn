@@ -11,7 +11,7 @@
 #     seal runs: the policy, the proxy, the report, the CLI, the Claude Code
 #     screens up to the seal.
 #   - The full escape suite runs where the kernel can enforce it:
-#     tools/linuxtest.sh (Docker Desktop's 6.12) and the Kali VM.
+#     tools/linuxtest.sh (Docker Desktop's 6.12) and a manual run of deep.yml.
 #
 # Same pins as tools/Dockerfile.linuxtest (Claude Code 2.1.286). Every action
 # is pinned to a commit, not a tag, as in release.yml.
