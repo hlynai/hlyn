@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import time
 from collections.abc import Iterator
 
@@ -34,12 +35,36 @@ HOMES: tuple[str, ...] = (
     ".ssh", ".aws", ".gnupg", ".azure", ".kube", ".docker", ".password-store",
     ".config/gcloud", ".config/gh", ".config/op", "Library/Keychains",
     ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".pgpass",
+    # Package registries and build tools: publish tokens and repository passwords.
+    ".cargo/credentials", ".cargo/credentials.toml", ".gem/credentials", ".config/pnpm/auth.ini",
+    ".composer/auth.json", ".config/composer/auth.json", ".m2/settings.xml",
+    ".gradle/gradle.properties", ".terraform.d/credentials.tfrc.json", ".config/pulumi/credentials.json",
+    # Cloud, hosting and platform CLIs: login tokens.
+    ".oci", ".ibmcloud", ".databrickscfg", ".boto", ".s3cfg", ".dockercfg", ".vault-token",
+    ".config/doctl", ".config/hub", ".config/glab-cli", ".config/rclone", ".config/stripe",
+    ".config/ngrok", ".ngrok2", ".config/configstore/firebase-tools.json", ".config/.wrangler",
+    ".supabase/access-token", ".sentryclirc", ".config/containers/auth.json", ".config/git/credentials",
+    # AI and ML services: API keys and login tokens.
+    ".huggingface/token", ".cache/huggingface/token", ".kaggle/kaggle.json", ".config/kaggle/kaggle.json",
+    ".config/github-copilot",
+    # Databases, mail and version control.
+    ".my.cnf", ".mylogin.cnf", ".msmtprc", ".subversion/auth",
+    # Key stores, and the browsers' saved passwords and cookies.
+    ".config/sops/age", ".local/share/keyrings", ".local/share/kwalletd", ".mozilla/firefox",
+    ".config/google-chrome", ".config/chromium", "Library/Application Support/Google/Chrome",
+    "Library/Application Support/Firefox/Profiles",
 )
 
 # And outside it.
 SYSTEM: tuple[str, ...] = (
     "/etc/shadow", "/etc/gshadow", "/etc/sudoers", "/etc/ssl/private",
-    "/etc/pki/tls/private", "/etc/ssh",
+    "/etc/pki/tls/private", "/etc/ssh", "/etc/shadow-", "/etc/security/opasswd", "/etc/sudoers.d",
+    "/etc/NetworkManager/system-connections", "/etc/wireguard", "/etc/ppp/chap-secrets",
+    "/etc/ppp/pap-secrets", "/etc/krb5.keytab", "/etc/kubernetes/admin.conf", "/etc/kubernetes/pki",
+    "/etc/rancher/k3s/k3s.yaml", "/etc/docker/key.json", "/var/lib/samba/private",
+    # macOS keeps /etc under /private, and a granted folder is resolved before it is compared.
+    "/etc/master.passwd", "/private/etc/master.passwd", "/private/etc/sudoers", "/private/etc/sudoers.d",
+    "/private/etc/ssh",
 )
 
 # File names that hold secrets wherever they are. `.env.example` and friends
@@ -53,8 +78,11 @@ KEYS = re.compile(
     rf"|\.env(\.(?!{TEMPLATE}$)(?!([^/]+\.)?{TEMPLATE}$)[^/]+)?"
     r"|\.envrc|\.netrc|\.npmrc|\.pypirc|\.pgpass|\.git-credentials|\.htpasswd"
     r"|credentials(\.json)?|service[-_]?account.*\.json|secrets?\.(ya?ml|json|toml)"
-    r"|kubeconfig|terraform\.tfstate(\.backup)?"
-    r"|.*\.(pem|key|p12|pfx|ppk|kdbx|keystore|jks|tfvars))$",
+    r"|kubeconfig|terraform\.tfstate(\.backup)?|.*\.tfstate"
+    r"|\.vault-token|\.boto|\.s3cfg|\.dockercfg|\.my\.cnf|\.mylogin\.cnf|\.msmtprc|_netrc"
+    r"|auth\.json|token\.json|client_secrets?.*\.json|wp-config\.php|\.dev\.vars|\.secrets"
+    r"|\.sentryclirc|\.databrickscfg|credentials\.tfrc\.json|kaggle\.json"
+    r"|.*\.(pem|key|p12|pfx|p8|ppk|kdbx|keystore|jks|jceks|keytab|tfvars))$",
     re.IGNORECASE,
 )
 
@@ -82,6 +110,7 @@ TIME = 0.5  # seconds, for a slow or network filesystem
 
 
 _homes: dict[str, tuple[str, ...]] = {}
+_prefixes: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {}
 
 
 def _places(home: str) -> tuple[str, ...]:
@@ -92,12 +121,21 @@ def _places(home: str) -> tuple[str, ...]:
     return found
 
 
+def _tables(home: str) -> tuple[frozenset[str], tuple[str, ...]]:
+    """The credential places under `home` and in SYSTEM as an exact-match set
+    and a tuple of folder prefixes, so `credential` is one set lookup and one
+    C-speed `startswith` per file however long the lists grow."""
+    found = _prefixes.get(home)
+    if found is None:
+        places = (*_places(home), *SYSTEM)
+        found = _prefixes[home] = (frozenset(places), (*(p.rstrip(os.sep) + os.sep for p in places),))
+    return found
+
+
 def credential(path: str) -> bool:
     """True if `path` is somewhere keys, tokens or passwords live."""
-    for place in _places(os.path.expanduser("~")):
-        if under(path, place):
-            return True
-    if any(under(path, item) for item in SYSTEM):
+    exact, prefixes = _tables(os.path.expanduser("~"))
+    if path in exact or path.startswith(prefixes):
         return True
     return bool(KEYS.match(os.path.basename(path)))
 
@@ -107,7 +145,7 @@ def secret(name: str) -> bool:
     return bool(NAMES.search(name))
 
 
-def _walk(root: str, budget: list[float]) -> Iterator[str]:
+def _walk(root: str, budget: list[float]) -> Iterator[os.DirEntry[str]]:
     """Every file and folder under `root`, shallow first, within the budget.
 
     `budget` is [entries left, deadline]. Symlinked folders are not followed:
@@ -129,7 +167,7 @@ def _walk(root: str, budget: list[float]) -> Iterator[str]:
                 budget[0] -= 1
                 if budget[0] < 0 or time.monotonic() > budget[1]:
                     return
-                yield entry.path
+                yield entry
                 try:
                     if (
                         entry.is_dir(follow_symlinks=False)
@@ -176,11 +214,58 @@ def secret_file(path: str) -> bool:
     return True
 
 
+def _is_link_to(entry: os.DirEntry[str], linked: set[tuple[int, int]]) -> bool:
+    """Whether `entry` is another name for one of the `linked` secrets."""
+    if not linked:
+        return False
+    try:
+        info = entry.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) in linked
+
+
 def _within(path: str, roots: list[str]) -> bool:
     """Whether `path`, links resolved, is inside one of `roots`: whether the
     kernel would actually let the agent read it."""
     real = os.path.realpath(path)
     return any(under(real, root) for root in roots)
+
+
+# A hardlink is a second name for the same file, so a copy of `~/.ssh/id_rsa`
+# called `notes.txt` inside a granted folder is the key, and no name test can
+# tell. What can: the secrets worth linking are the ones in HOMES and SYSTEM,
+# so their (device, inode) pairs are collected once -- only those with more
+# than one link, since a secret with one link has no other name -- and a file
+# in the walk is compared to them. Nothing is statted per file unless such a
+# secret exists. Hardlinks to a secret anywhere else are not found.
+LINKED_LOOKS = 2_000  # entries inspected when listing the known secret places
+LINKED_DEPTH = 3
+
+
+def _linked_secrets(home: str) -> set[tuple[int, int]]:
+    """(device, inode) of every known secret file that has another name."""
+    found: set[tuple[int, int]] = set()
+    left = [LINKED_LOOKS]
+
+    def look(path: str, depth: int) -> None:
+        if left[0] <= 0:
+            return
+        left[0] -= 1
+        try:
+            info = os.lstat(path)
+            if stat.S_ISREG(info.st_mode):
+                if info.st_nlink > 1:
+                    found.add((info.st_dev, info.st_ino))
+            elif stat.S_ISDIR(info.st_mode) and depth < LINKED_DEPTH:
+                for name in os.listdir(path):
+                    look(os.path.join(path, name), depth + 1)
+        except OSError:
+            pass
+
+    for place in (*_places(home), *SYSTEM):
+        look(place, 0)
+    return found
 
 
 def exposed(plan: Policy) -> list[str]:
@@ -208,14 +293,18 @@ def exposed(plan: Policy) -> list[str]:
 
     found: list[str] = []
     budget: list[float] = [LOOKS, time.monotonic() + TIME]
+    linked = _linked_secrets(home)
     for root in roots:
         if not os.path.isdir(root):
             continue  # a file granted on its own: a decision, see above
         if credential(root):
             found.append(root)  # the grant is itself a credential folder
             continue
-        for path in _walk(root, budget):
-            if secret_file(path) and _within(path, roots) and os.path.exists(path):
+        for entry in _walk(root, budget):
+            path = entry.path
+            if not (secret_file(path) or _is_link_to(entry, linked)):
+                continue
+            if _within(path, roots) and os.path.exists(path):
                 found.append(path)
                 if len(found) >= 20:
                     return found
