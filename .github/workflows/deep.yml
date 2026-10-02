@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Deep checks, started by hand (Actions > deep > Run workflow). They need
+# things the everyday test run doesn't change: the Yama setting, and a longer
+# look at one kernel. GitHub's ubuntu-24.04 runner is x86_64, Linux 6.17,
+# systemd-resolved, Yama 1 by default (measured 2026-10-02).
+#
+#   yama      REMAINING #7: host mode and the gate at ptrace_scope 0, 1 and 2
+#             (scope 3 can't be undone, so it is left to the unit tests).
+#   resolved  REMAINING #6: DNS through systemd-resolved's sockets.
+#   pointer   REMAINING #22: the gate against a pointer past 2^63, on x86_64.
+#   numbers   REMAINING #19: start-up and base-engine figures on x86_64,
+#             against Docker. Read them from the log; they are not a gate.
+#
+# Same pins as test.yml.
+
+name: deep
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [yama-0, yama-1, yama-2, resolved, pointer, numbers]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: system packages and test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libseccomp2 libseccomp-dev gcc libc6-dev iproute2 procps
+          python -m pip install pytest hypothesis aiohttp urllib3
+      - name: native libraries
+        run: |
+          (cd native && cargo build --release)
+          (cd native/report && cargo build --release)
+      - name: the machine
+        run: |
+          uname -mr
+          cat /proc/sys/kernel/yama/ptrace_scope
+          resolvectl status 2>&1 | head -8 || true
+          PYTHONPATH=src python -m hlyn.cli probe || true
+      - name: yama
+        if: startsWith(matrix.check, 'yama-')
+        run: |
+          scope="${MATRIX_CHECK#yama-}"
+          sudo sysctl -w kernel.yama.ptrace_scope="$scope"
+          cat /proc/sys/kernel/yama/ptrace_scope
+          python -m pytest -vv -rA -p no:cacheprovider tests/test_hostmode.py tests/test_guard.py tests/test_gate.py tests/test_unixgate.py
+        env:
+          MATRIX_CHECK: ${{ matrix.check }}
+      - name: resolved
+        if: matrix.check == 'resolved'
+        run: python -m pytest -vv -rA -p no:cacheprovider tests/test_guard.py -k "row_22 or answers_any_arguments"
+          python -m pytest -vv -rA -p no:cacheprovider tests/test_network.py -k "resolves_under_confinement or resolver_configuration"
+      - name: pointer
+        if: matrix.check == 'pointer'
+        run: python -m pytest -vv -rA -p no:cacheprovider tests/test_guard.py tests/test_hostmode.py -k "answers_any_arguments or tagged_sockaddr or bad_pointer"
+      - name: numbers
+        if: matrix.check == 'numbers'
+        run: |
+          python tools/startbench.py --rounds 15
+          python tools/bench.py || true
