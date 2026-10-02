@@ -163,6 +163,7 @@ def on(policy: object = None, **edits: Any) -> dict[str, object]:
             f"destination. Close them first (for example session.close()), call hlyn.on() before "
             f"creating network clients, or use hlyn.run(fn), which closes them in its child."
         )
+    _handed(plan)
     found = _warn(plan)
     if not plan.hosts():
         if not watched(plan):
@@ -282,6 +283,20 @@ def _neutral(plan: Policy) -> int:
     from . import route
 
     return route.neutralise(_loose(plan))
+
+
+def _handed(plan: Policy) -> None:
+    """In `on()`: warn about open descriptors that point outside the grants
+    (fds.py). `on()` can't close them: the caller still needs them. A Python
+    warning, so it can be filtered or made an error like the others."""
+    import warnings
+
+    from . import fds
+
+    options()
+    found = fds.outside(plan)
+    if found:
+        warnings.warn(fds.warning(found), fds.Inherited, stacklevel=3)
 
 
 def _ready(plan: Policy) -> None:
@@ -412,6 +427,7 @@ def options() -> None:
     _OPTIONS = True
     import warnings
 
+    from .fds import Inherited
     from .hosts import Reach
     from .later import Runs
     from .secret import Exposed
@@ -420,6 +436,7 @@ def options() -> None:
         "hlyn.Exposed": Exposed, "hlyn.secret.Exposed": Exposed,
         "hlyn.Reach": Reach, "hlyn.hosts.Reach": Reach,
         "hlyn.Runs": Runs, "hlyn.later.Runs": Runs,
+        "hlyn.Inherited": Inherited, "hlyn.fds.Inherited": Inherited,
     }
     have = {item[2] for item in warnings.filters}
     for option in sys.warnoptions:
@@ -537,7 +554,7 @@ def _seal(
     return {"policy": plan, "tmp": box, "level": level, "backend": back().__name__, **more}
 
 
-def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
+def run(fn: Callable[[], Any], policy: object = None, *, keep_fds: Sequence[int] = (), **edits: Any) -> Any:
     """Run `fn` in a confined child and return its result.
 
     For work that needs a tighter boundary than the caller wants to live with
@@ -555,9 +572,17 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     5.2): the grandchild is sealed and runs `fn`, and the child becomes its
     gate. The proxy is shared by every call with the same hosts, for the life
     of this process, and each call gets its own port on it (5.8).
+
+    Every descriptor above 2 this process holds is put out of use in the
+    child (a file outside the grants, a connected unix socket), because
+    Landlock and Seatbelt don't check a descriptor that is already open.
+    `keep_fds=[9]` leaves those numbers open on purpose.
     """
+    from . import fds
+
     plan = _plan(policy, edits)
     unbuilt(plan)  # in the parent, so the refusal is an exception, not a dead child
+    kept = fds.keeps(keep_fds)
     _ready(plan)
     # Before the fork, never after: see the note above.
     back().ready()
@@ -602,7 +627,9 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
             os.close(read)
             if share is None:
                 def plain() -> None:
-                    _seal(plan, found=_warn(plan), closed=_neutral(plan))
+                    closed = _neutral(plan)
+                    fds.shut((write, *kept, *_gate_fds(), *_usable()), everything=True)
+                    _seal(plan, found=_warn(plan), closed=closed)
 
                 if not watch:
                     _child(fn, plain, write)
@@ -612,6 +639,7 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
 
             def sealed() -> None:
                 closed = _neutral(plan)
+                fds.shut((write, *kept, *_gate_fds(), *_usable()), everything=True)
                 _seal(plan, _proxied(port), found=found, proxy=(port, pid), closed=closed)
 
             # On Linux the sealed child gets its own process group, away from
@@ -650,6 +678,23 @@ def run(fn: Callable[[], Any], policy: object = None, **edits: Any) -> Any:
     if kind == "ok":
         return value
     raise value
+
+
+def _usable() -> list[int]:
+    """The network sockets still open once `_neutral` has run: the ones the
+    policy would let this process open anyway (a connection to a listed port,
+    or any with `net=True`). They stay, whatever else is dropped."""
+    from . import route
+
+    return [item.fd for item in route.sockets()]
+
+
+def _gate_fds() -> list[int]:  # read at the seal: `gate.become` sets it in the child
+    """The descriptor a sealed child hands its seal to the gate over, if
+    there is a gate (`gate.hand`): hlyn's own, kept when the rest go."""
+    minder = sys.modules.get(__name__.rpartition(".")[0] + ".gate")
+    chan = getattr(minder, "_handoff", None)
+    return [chan.fileno()] if chan is not None else []
 
 
 def _pickle() -> ModuleType:
@@ -695,7 +740,7 @@ def _child(fn: Callable[[], Any], seal: Callable[[], object], write: int) -> NoR
         os._exit(code)
 
 
-def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
+def spawn(cmd: Sequence[str], policy: object = None, *, keep_fds: Sequence[int] = (), **edits: Any) -> None:
     """Confine this process, then become `cmd`. Does not return.
 
     Used by the command line wrapper. The program being launched is granted
@@ -708,14 +753,22 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
     `cmd`'s status, as the container inits `tini` and `dumb-init` do. From
     outside it still "becomes `cmd`": same PID, same signals, same exit
     status. A proxy runs beside it for as long as `cmd` and what it starts.
+
+    Descriptors above 2 that were left open for this process (a file outside
+    the grants, a connected unix socket) are closed before `cmd` starts,
+    because Landlock and Seatbelt don't check one that is already open.
+    `keep_fds=[9]` passes those numbers on on purpose.
     """
+    from . import fds
+
     plan = _plan(policy, edits)
     unbuilt(plan)
     _ready(plan)
+    kept = fds.keeps(keep_fds)
     found = _warn(plan)
     if not plan.hosts():
         if not watched(plan):
-            _spawn(cmd, plan, found=found)
+            _spawn(cmd, plan, found=found, keep=kept)
             return
         # Unix sockets before Linux 7.1: this process becomes the command's
         # gate, as in host mode, with no proxy (`watched`).
@@ -725,7 +778,8 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
         with _denials(plan) as fd:
             told = os.dup(fd) if fd is not None else None  # the gate's copy
         _flush()
-        gate.become(lambda: _spawn(cmd, plan, found=found), forward=True, isolate=True, log=told)
+        gate.become(lambda: _spawn(cmd, plan, found=found, keep=kept), forward=True, isolate=True,
+                    log=told)
 
     from . import gate, route
 
@@ -737,6 +791,7 @@ def spawn(cmd: Sequence[str], policy: object = None, **edits: Any) -> None:
 
     def body() -> None:
         closed = _neutral(plan)
+        fds.shut((*kept, way.life, *_usable()))  # the lifetime pipe is hlyn's own (macOS)
         _seal(plan, _proxied(port), found=found, proxy=(port, way.pid), closed=closed)
         _flush()
         os.execv(run, argv)  # noqa: S606 - see _spawn
@@ -843,11 +898,16 @@ def _spawn(
     tag: str | None = None,
     found: list[str] | None = None,
     proxy: tuple[int, int] | None = None,
+    keep: Sequence[int] = (),
 ) -> None:
     """`spawn`, with the same additions as `_seal`. In host mode (`proxy`
-    given) the caller has already arranged the gate; this is the child."""
+    given) the caller has already arranged the gate; this is the child.
+    `keep` lists descriptors to pass on (fds.py); the caller adds its own."""
+    from . import fds
+
     run, argv, plan = _prepare(cmd, plan)
     closed = _neutral(plan)
+    fds.shut((*keep, *_usable()))
     _seal(plan, extra, tag, found, proxy=proxy, closed=closed)
     _flush()
     # No shell, deliberately: the command is executed as given, so nothing in

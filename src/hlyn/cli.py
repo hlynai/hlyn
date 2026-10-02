@@ -65,6 +65,9 @@ def build() -> argparse.ArgumentParser:
 
     go = sub.add_parser("run", help="confine this shell's child, then run a command")
     grants(go)
+    go.add_argument("--keep-fd", action="append", type=int, metavar="N", default=[],
+                    help="pass on open descriptor N (3 or more; repeatable). Every other one "
+                         "above 2 is closed")
     go.add_argument("--no-report", action="store_true",
                     help="do not list what was blocked when the command ends")
     go.add_argument("--json", action="store_true",
@@ -489,8 +492,9 @@ def _gist(plan: Policy) -> str:
 
 
 def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = False,
-            own: bool = False, brief: dict[str, Any] | None = None) -> int:
-    """Run `cmd` confined in a child, and say what it was refused. `own`
+            own: bool = False, brief: dict[str, Any] | None = None, keep: tuple[int, ...] = ()) -> int:
+    """Run `cmd` confined in a child, and say what it was refused. `keep` lists
+    the descriptors to pass on (`--keep-fd`); every other one above 2 is closed. `own`
     grants the command its own /proc/PID on Linux (see `_own`). `brief`, from
     `hlyn claude`, asks for the compact report (`Report.brief`) with these
     arguments.
@@ -525,7 +529,7 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
         book = report.Report(plan)
         book.silent = quiet
         book.blocked = blocked
-        failed, status = _wait(cmd, ear.grant(plan), ear, book, plan, own)
+        failed, status = _wait(cmd, ear.grant(plan), ear, book, plan, own, keep)
     finally:
         ear.close()
         if blocked is not None:
@@ -561,7 +565,7 @@ def _own(grants: Policy) -> Policy:
 
 
 def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy,
-          own: bool = False) -> tuple[bool, int]:
+          own: bool = False, keep: tuple[int, ...] = ()) -> tuple[bool, int]:
     """Fork, seal and start the command, then listen until it exits.
 
     Returns whether it failed to start, and its wait status.
@@ -647,11 +651,11 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy,
                 try:
                     mine = _own(grants) if own else grants
                     if way is None:
-                        jail._spawn(cmd, mine, where, ear.tag)
+                        jail._spawn(cmd, mine, where, ear.tag, keep=keep)
                     else:
                         port = jail._port(way)
                         jail._spawn(cmd, mine, jail._both(where, jail._proxied(port)), ear.tag,
-                                    proxy=(port, way.pid))
+                                    proxy=(port, way.pid), keep=(*keep, way.life))  # the lifetime pipe
                 except Error as exc:
                     print(f"hlyn: {exc}", file=sys.stderr)
                 except OSError as exc:
@@ -1183,7 +1187,9 @@ def _run(argv: Sequence[str] | None = None) -> int:
         return 2
     jail.unbuilt(plan)
     jail._ready(plan)
-    return _launch(cmd, plan, args.no_report, args.json)
+    from . import fds
+
+    return _launch(cmd, plan, args.no_report, args.json, keep=fds.keeps(args.keep_fd))
 
 
 if __name__ == "__main__":

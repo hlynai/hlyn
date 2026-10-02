@@ -8,6 +8,7 @@ cannot be lifted once set. There is deliberately no way to turn it off.
 from __future__ import annotations
 
 from .error import Error, Failed, Invalid, Sealed, Unsupported
+from .fds import Inherited
 from .helpers import helper
 from .hosts import Reach
 from .jail import on, probe, run, sealed, spawn
@@ -23,6 +24,7 @@ __all__ = [
     "Error",
     "Exposed",
     "Failed",
+    "Inherited",
     "Invalid",
     "Policy",
     "Reach",

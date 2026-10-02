@@ -536,13 +536,16 @@ def test_spawn_closes_an_inherited_connection_under_ports(tmp_path):
     os.set_inheritable(conn.fileno(), True)
     kid = os.fork()
     if kid == 0:
-        script = "import os; os.write({fd}, b'SECRET'); print('command: sent')".format(fd=conn.fileno())
+        script = (
+            "import os\\ntry:\\n    os.write({fd}, b'SECRET'); print('command: sent')\\n"
+            "except OSError as exc:\\n    print('command: refused', exc.strerror)"
+        ).format(fd=conn.fileno())
         hlyn.spawn([sys.executable, "-c", script], net=[9])
     os.waitpid(kid, 0)
     print("server heard:", heard())
     """)
     print(done.stdout, done.stderr[-800:])
-    # The descriptor now holds /dev/null, so the write "succeeds" and goes
-    # nowhere; what matters is that the server heard nothing.
-    assert "command: sent" in done.stdout
+    # spawn closes the descriptor (an exec follows, so there is no object left
+    # to hold the number: fds.py): the write fails and the server hears nothing.
+    assert "command: refused Bad file descriptor" in done.stdout
     assert "server heard: b''" in done.stdout

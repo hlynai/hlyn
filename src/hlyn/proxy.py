@@ -1239,10 +1239,16 @@ def seal() -> str:
     no exec, and an empty environment. A parser bug here then buys an
     attacker network access and nothing else. Returns the level `on` applied.
     """
+    import warnings
+
     from . import jail
+    from .fds import Inherited
     from .policy import Policy
 
-    done = jail.on(Policy(read=(), write=False, exec=False, net=True, env=False, tmp=False, log=False))
+    with warnings.catch_warnings():
+        # The event loop's own sockets are open here: hlyn's, not a launcher's.
+        warnings.simplefilter("ignore", Inherited)
+        done = jail.on(Policy(read=(), write=False, exec=False, net=True, env=False, tmp=False, log=False))
     return str(done["level"])
 
 

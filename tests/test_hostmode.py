@@ -42,6 +42,7 @@ ENV = {**os.environ, "PYTHONPATH": SRC}
 # gate (and Landlock) EACCES. Compared as whole values, never as prefixes:
 # "errno 1" is a prefix of "errno 13".
 DENIED = errno.EPERM if sys.platform == "darwin" else errno.EACCES
+BADFD = f"[Errno {errno.EBADF}] {os.strerror(errno.EBADF)}"
 NOTSOCK = f"[Errno {errno.ENOTSOCK}] {os.strerror(errno.ENOTSOCK)}"
 
 
@@ -293,7 +294,8 @@ sys.exit(5)
     out = done.stdout
     caller = out.split("caller ")[1].split()[0]
     assert f"parent {caller}" in out and done.returncode == 5
-    assert f"inherited socket unusable: {NOTSOCK}" in out
+    # Closed, not /dev/null: spawn execs, and drops what the caller left open (fds.py).
+    assert f"inherited socket unusable: {BADFD}" in out
     port = int(out.split("proxy http://127.0.0.1:")[1].split()[0])
     time.sleep(0.5)
     with pytest.raises(OSError) as caught:
