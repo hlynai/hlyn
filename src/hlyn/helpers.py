@@ -63,6 +63,15 @@ def command(name: str, *args: str) -> list[str]:
 
 def main(argv: Sequence[str] | None = None) -> None:
     """Run the helper named first in `argv` (default: `sys.argv[1:]`), then exit."""
+    import signal
+
+    # First thing, before anything is imported: a helper never uses async I/O,
+    # so SIGIO and SIGURG can only be an attack, and by default SIGIO kills.
+    # Linux before 7.2 lets a sealed agent send them past Landlock's signal
+    # scope (F_SETOWN + O_ASYNC, CVE-2026-72183). Ignored here, in the helper
+    # alone: the agent is never exec'd from a helper, so it keeps the defaults.
+    for number in (signal.SIGIO, signal.SIGURG):
+        signal.signal(number, signal.SIG_IGN)
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] not in NAMES:
         print(f"hlyn: helper: expected one of {', '.join(NAMES)}, got {args[:1]}", file=sys.stderr)

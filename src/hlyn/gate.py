@@ -412,6 +412,18 @@ def drop() -> None:
     _handoff, pid = None, None
 
 
+def _quiet() -> None:
+    """Ignore SIGIO and SIGURG in this gate, which never uses async I/O.
+
+    Their default for SIGIO is to kill, and before Linux 7.2 a sealed agent
+    could send them past Landlock's signal scope (F_SETOWN + O_ASYNC,
+    CVE-2026-72183). Only ever called in a gate process, never in a process
+    that goes on to run the agent: ignored dispositions survive exec.
+    """
+    for number in (signal.SIGIO, signal.SIGURG):
+        signal.signal(number, signal.SIG_IGN)
+
+
 def relay(child: int, *, forward: bool, terminal: int | None, guard: Guard | None = None) -> int:
     """Wait for `child`, forwarding signals, and die or exit as it does.
     With `guard`, answer the child's connection checks meanwhile (Linux).
@@ -429,6 +441,7 @@ def relay(child: int, *, forward: bool, terminal: int | None, guard: Guard | Non
             # (`become` sets it on both sides). Asking crashed the gate and
             # turned `echo`'s exit 0 into 1, with a traceback, on a terminal.
             group = child
+    _quiet()  # a gate kept in the caller's own process too; `forward` overrides below
 
     def pass_on(number: int, _frame: object) -> None:
         with contextlib.suppress(ProcessLookupError):
@@ -536,6 +549,7 @@ def _serve(child: int, forward: bool, guard: Guard) -> int | None:
         for number in _all() - KEEP:
             with contextlib.suppress(OSError, ValueError):
                 signal.signal(number, signal.SIG_DFL)
+        _quiet()
         with contextlib.suppress(OSError):
             os.setsid()
         # Its refusals still go to the log and the report's pipe.
