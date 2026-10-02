@@ -502,7 +502,7 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
             own: bool = False, brief: dict[str, Any] | None = None, keep: tuple[int, ...] = ()) -> int:
     """Run `cmd` confined in a child, and say what it was refused. `keep` lists
     the descriptors to pass on (`--keep-fd`); every other one above 2 is closed. `own`
-    grants the command its own /proc/PID on Linux (see `_own`). `brief`, from
+    gives the command its own /proc on Linux (`procns`, `_own`). `brief`, from
     `hlyn claude`, asks for the compact report (`Report.brief`) with these
     arguments.
 
@@ -556,19 +556,24 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
 
 
 def _own(grants: Policy) -> Policy:
-    """`grants`, plus this process's own /proc/PID, to read (Linux).
+    """`grants`, plus the /proc the command needs (Linux), for `hlyn claude`.
 
-    Called in the process that seals and then execs the command, which keeps
-    its PID, so the command reads its own /proc/self and nothing else under
-    /proc. Its environment there is the one hlyn left (the exec replaced the
-    block), and another process's environment or command line stays refused.
-    Claude Code's runtime (Bun) aborts without /proc/self/cgroup. Granting all
-    of /proc would let it read every process's command line (FINDINGS.md,
-    "hlyn claude").
+    Called in the process that seals and then execs the command, after
+    `procns.contain` has tried to start it in a pid namespace with a procfs of
+    its own. If that worked, all of /proc is granted, and it holds only the
+    command's own processes. If not (Docker's default profile, a policy
+    against user namespaces), the command's own /proc/PID is granted: it
+    keeps its PID through the exec, but a program it starts has no /proc.
+    Either way another process's environment or command line is not readable
+    (FINDINGS.md, "hlyn claude"). Claude Code's runtime (Bun) aborts without
+    /proc/self/cgroup, and Node's `process.memoryUsage()` reads
+    /proc/self/statm.
     """
     if sys.platform != "linux" or grants.read is True:
         return grants
-    return grants.with_(read=(*(grants.read or ()), f"/proc/{os.getpid()}"))
+    from . import procns
+
+    return grants.with_(read=procns.grant(grants.read or ()))
 
 
 def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy,
@@ -579,6 +584,8 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy,
     """
     import select
     import signal
+
+    from . import procns  # imported now: nothing may be after the fork
 
     # SIGCHLD wakes the wait below the moment the command exits, instead of
     # on the next poll. Set up before the fork so an instant exit is not missed.
@@ -656,6 +663,8 @@ def _wait(cmd: list[str], grants: Policy, ear: Any, book: Any, plan: Policy,
 
             def start() -> NoReturn:
                 try:
+                    if own and sys.platform == "linux":
+                        procns.contain()  # the command's own /proc, or its own pid's (`_own`)
                     mine = _own(grants) if own else grants
                     if way is None:
                         jail._spawn(cmd, mine, where, ear.tag, keep=keep)

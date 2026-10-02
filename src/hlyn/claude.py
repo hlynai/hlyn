@@ -77,7 +77,7 @@ TOOLS: tuple[str, ...] = (
 
 # Linux: kernel settings Claude Code's runtime (Bun) reads to size its memory,
 # refused on every run otherwise. Single files of numbers, nothing per process.
-# (It also needs its own /proc/self: `cli._own`.)
+# (It also needs its own /proc/self, in every program it starts: `procns`, `cli._own`.)
 KERNEL: tuple[str, ...] = (
     "/sys/kernel/mm/transparent_hugepage/enabled", "/proc/sys/vm/mmap_min_addr",
     "/proc/sys/vm/overcommit_memory", "/sys/devices/system/cpu/online",
