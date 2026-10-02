@@ -42,7 +42,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends libseccomp2 libseccomp-dev gcc libc6-dev iproute2 procps
-          python -m pip install pytest hypothesis aiohttp urllib3
+          python -m pip install pytest pytest-timeout hypothesis aiohttp urllib3
       - name: native libraries
         run: |
           (cd native && cargo build --release)
@@ -59,16 +59,18 @@ jobs:
           scope="${MATRIX_CHECK#yama-}"
           sudo sysctl -w kernel.yama.ptrace_scope="$scope"
           cat /proc/sys/kernel/yama/ptrace_scope
-          python -m pytest -vv -rA -p no:cacheprovider tests/test_hostmode.py tests/test_guard.py tests/test_gate.py tests/test_unixgate.py
+          python -m pytest -vv -rA -p no:cacheprovider --timeout=120 tests/test_hostmode.py tests/test_guard.py tests/test_gate.py tests/test_unixgate.py
         env:
           MATRIX_CHECK: ${{ matrix.check }}
       - name: resolved
         if: matrix.check == 'resolved'
-        run: python -m pytest -vv -rA -p no:cacheprovider tests/test_guard.py -k "row_22 or answers_any_arguments"
+        run: |
+          python -m pytest -vv -rA -p no:cacheprovider tests/test_guard.py -k "row_22 or answers_any_arguments"
           python -m pytest -vv -rA -p no:cacheprovider tests/test_network.py -k "resolves_under_confinement or resolver_configuration"
       - name: pointer
         if: matrix.check == 'pointer'
-        run: python -m pytest -vv -rA -p no:cacheprovider tests/test_guard.py tests/test_hostmode.py -k "answers_any_arguments or tagged_sockaddr or bad_pointer"
+        run: |
+          python -m pytest -vv -rA -p no:cacheprovider tests/test_guard.py tests/test_hostmode.py -k "answers_any_arguments or tagged_sockaddr or bad_pointer"
       - name: numbers
         if: matrix.check == 'numbers'
         run: |
