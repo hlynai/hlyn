@@ -55,11 +55,19 @@ jobs:
           PYTHONPATH=src python -m hlyn.cli probe || true
       - name: yama
         if: startsWith(matrix.check, 'yama-')
+        # At scope 0 and 1 the gate reads the agent's memory: the whole gate and
+        # host-mode suites must pass. At 2 it can't (design 5.3, reduced mode), so
+        # 55 of those 113 tests fail by design (measured 2026-10-02); there the job
+        # checks the reduced-mode tests and the probe's wording instead.
         run: |
           scope="${MATRIX_CHECK#yama-}"
           sudo sysctl -w kernel.yama.ptrace_scope="$scope"
           cat /proc/sys/kernel/yama/ptrace_scope
-          python -m pytest -vv -rA -p no:cacheprovider --timeout=120 tests/test_hostmode.py tests/test_guard.py tests/test_gate.py tests/test_unixgate.py
+          if [ "$scope" = 2 ]; then
+            python -m pytest -vv -rA -p no:cacheprovider --timeout=120 tests/test_hostmode.py tests/test_guard.py -k "reduced or probe_says or left_running"
+          else
+            python -m pytest -vv -rA -p no:cacheprovider --timeout=120 tests/test_hostmode.py tests/test_guard.py tests/test_gate.py tests/test_unixgate.py
+          fi
         env:
           MATRIX_CHECK: ${{ matrix.check }}
       - name: resolved
