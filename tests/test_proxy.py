@@ -1439,3 +1439,49 @@ def test_record_and_net_do_not_mix():
                           capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=SRC), check=False)
     print(done.returncode, done.stderr)
     assert done.returncode == 2 and "--record lets every host through: leave out --net" in done.stderr
+
+
+# ---------------------------------------------------------------------------
+# a metadata hostname (metadata.google.internal): FINDINGS "A cloud metadata
+# address was offered as a flag to allow"
+# ---------------------------------------------------------------------------
+
+GOOGLE = "metadata.google.internal"
+
+
+def test_a_listed_metadata_hostname_resolving_to_the_metadata_address_is_refused_with_no_flag():
+    async def scenario():
+        events: list = []
+        net = Net({GOOGLE: ["169.254.169.254"]}, {})
+        served = await start((f"{GOOGLE}:80",), net, events)  # the port a metadata service answers on
+        answer = await talk(served.ports[0], connect(f"{GOOGLE}:80"), wait=1)
+        await served.close()
+        return answer, events, net
+
+    answer, events, net = run(scenario())
+    print(status(answer), events, f"dialled: {net.dialled}", sep="\n")
+    assert status(answer) == (
+        f"HTTP/1.1 403 hlyn: {GOOGLE} resolves to a link-local address (169.254.169.254): it hands out "
+        "this machine's cloud credentials, so hlyn doesn't offer to allow it"
+    )
+    assert net.looked == [GOOGLE] and net.dialled == []
+    assert len(events) == 1
+    assert events[0]["why"] == "private-address" and events[0]["allow"] is None
+
+
+def test_an_unlisted_metadata_hostname_is_offered_as_a_name_flag():
+    # Today's behaviour, pinned so a change is deliberate: it is a name, not an address, and a person
+    # who types `--net metadata.google.internal` still meets the refusal above, which says why.
+    async def scenario():
+        events: list = []
+        net = Net({GOOGLE: ["169.254.169.254"]}, {})
+        served = await start(("api.example.com",), net, events)
+        answer = await talk(served.ports[0], connect(f"{GOOGLE}:80"), wait=1)
+        await served.close()
+        return answer, events, net
+
+    answer, events, net = run(scenario())
+    print(status(answer), events, f"looked up: {net.looked}", sep="\n")
+    assert status(answer) == f"HTTP/1.1 403 hlyn: {GOOGLE}:80 is not in --net (allow with --net {GOOGLE}:80)"
+    assert net.looked == [] and net.dialled == []
+    assert events[0]["allow"] == f"--net {GOOGLE}:80"

@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The test suite, including tests/test_claude.py: the real Claude Code run
+# under `hlyn claude` against a scripted model (tests/claudemodel.py). No
+# secrets and no network to Anthropic: the "model" is a local server.
+#
+# What a hosted runner can and can't check:
+#   - Its kernel is older than hlyn's floor (Landlock ABI 6, Linux 6.12), so
+#     tests that need a sealed process skip through `skip_if_too_old`
+#     (tests/conftest.py) and say so with -rA. Everything that doesn't need the
+#     seal runs: the policy, the proxy, the report, the CLI, the Claude Code
+#     screens up to the seal.
+#   - The full escape suite runs where the kernel can enforce it:
+#     tools/linuxtest.sh (Docker Desktop's 6.12) and the Kali VM.
+#
+# Same pins as tools/Dockerfile.linuxtest (Claude Code 2.1.286). Every action
+# is pinned to a commit, not a tag, as in release.yml.
+
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: system packages
+        # libseccomp for the gate and the shim; iproute2 and procps for the
+        # tests that look at sockets and processes.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libseccomp2 libseccomp-dev gcc libc6-dev iproute2 procps
+      - name: test dependencies
+        run: python -m pip install pytest hypothesis aiohttp urllib3
+      - name: the real Claude Code (pinned)
+        run: |
+          sudo npm install -g --no-fund --no-audit @anthropic-ai/claude-code@2.1.286
+          claude --version
+      - name: native libraries
+        # The tests find them in native/target/release (hlyn/core/landlock.py).
+        run: |
+          (cd native && cargo build --release)
+          (cd native/report && cargo build --release)
+      - name: kernel and what this runner can enforce
+        run: |
+          uname -r
+          PYTHONPATH=src python -m hlyn.cli probe || true  # non-zero where the kernel is below the floor
+      - name: tests
+        run: python -m pytest -vv -rA -p no:cacheprovider
