@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Deep checks, started by hand (Actions > deep > Run workflow). They need
+# Deep checks, every Monday and by hand (Actions > deep > Run workflow). They need
 # things the everyday test run doesn't change: the Yama setting, and a longer
 # look at one kernel. GitHub's ubuntu-24.04 runner is x86_64, Linux 6.17,
 # systemd-resolved, Yama 1 by default (measured 2026-10-02).
@@ -18,6 +18,8 @@ name: deep
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"  # Mondays 04:17 UTC: the slow checks, off the push path
 
 permissions:
   contents: read

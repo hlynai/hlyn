@@ -125,3 +125,70 @@ def test_the_macos_sign_in_note(home, monkeypatch, platform, env, creds, noted, 
     assert (note is not None) == noted
     if noted:
         assert "hlyn claude --login" in note
+
+
+@pytest.mark.parametrize("where", ["home", "root", "keys"])
+def test_a_claude_config_dir_that_names_home_root_or_keys_is_refused(home, where):
+    # CLAUDE_CONFIG_DIR comes from the environment and is granted read and
+    # write; pointed at ~ it would hand Claude Code the whole home folder.
+    target = {"home": home, "root": "/", "keys": home / ".ssh"}[where]
+    if where == "keys":
+        target.mkdir()
+    env = {"CLAUDE_CONFIG_DIR": str(target)}
+    with pytest.raises(Error, match="CLAUDE_CONFIG_DIR") as error:
+        claude.policy("/opt/claude/claude", env, claude.prepare(env))
+    print(error.value)
+
+
+def test_a_claude_config_dir_of_its_own_is_still_used(home, tmp_path):
+    own = tmp_path / "claude-state"
+    own.mkdir()
+    env = {"CLAUDE_CONFIG_DIR": str(own)}
+    plan = claude.policy("/opt/claude/claude", env, claude.prepare(env))
+    print(plan.write)
+    assert str(own) in plan.write
+
+
+def test_gits_credential_store_stays_closed_while_its_config_is_read(home):
+    # git keeps passwords in ~/.config/git/credentials as well as
+    # ~/.git-credentials, so the files git reads there are granted by name, not the
+    # folder.
+    from hlyn.policy import under
+
+    config = home / ".config" / "git"
+    config.mkdir(parents=True)
+    (config / "config").write_text("[user]\n")
+    (config / "credentials").write_text("https://u:token@example.com\n")
+    env: dict[str, str] = {}
+    plan = claude.policy("/opt/claude/claude", env, claude.prepare(env))
+    reads = plan.reads()
+    covers = lambda path: [root for root in reads if under(str(path), root)]  # noqa: E731
+    print("config:", covers(config / "config"), "credentials:", covers(config / "credentials"))
+    assert covers(config / "config")  # the control: git still reads its config
+    assert not covers(config / "credentials")
+
+
+def test_a_claude_binary_kept_in_the_home_folder_grants_the_file_not_the_home(home):
+    # The installation's folder is granted so Claude Code can list it; when
+    # that folder is the home folder, only the binary is.
+    binary = home / "claude"
+    binary.write_text("#!/bin/sh\n")
+    env: dict[str, str] = {}
+    plan = claude.policy(str(binary), env, claude.prepare(env))
+    print(plan.read)
+    assert str(home) not in plan.read and str(binary) in plan.read
+    usual = claude.policy("/opt/claude/bin/claude", env, claude.prepare(env))
+    assert "/opt/claude/bin" in usual.read  # the control: an ordinary install keeps its folder
+
+
+def test_the_record_moves_out_of_reach_when_claude_code_may_write_its_usual_folder(home):
+    # Started in the home folder, Claude Code may write ~/Library/Logs (or
+    # ~/.local/state), where it could replace the record; it goes elsewhere.
+    from hlyn.policy import under
+
+    usual = claude.record(())
+    moved = claude.record((str(home),))
+    print("usual:", usual, "| home writable:", moved)
+    assert under(os.path.realpath(usual), os.path.realpath(home))
+    assert not under(os.path.realpath(moved), os.path.realpath(home))
+    claude.Policy(log=moved, write=[str(home)])  # accepted: out of reach

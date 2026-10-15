@@ -115,6 +115,16 @@ _homes: dict[str, tuple[str, ...]] = {}
 _prefixes: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {}
 
 
+def _account_home() -> str:
+    """This user's home from the account database, whatever `$HOME` says."""
+    try:
+        import pwd
+
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError, OSError):
+        return ""
+
+
 def _places(home: str) -> tuple[str, ...]:
     """HOMES under `home`, worked out once per home rather than per file."""
     found = _homes.get(home)
@@ -296,6 +306,7 @@ def exposed(plan: Policy) -> list[str]:
     found: list[str] = []
     budget: list[float] = [LOOKS, time.monotonic() + TIME]
     linked = _linked_secrets(home)
+    cut.clear()
     for root in roots:
         if not os.path.isdir(root):
             continue  # a file granted on its own: a decision, see above
@@ -310,7 +321,47 @@ def exposed(plan: Policy) -> list[str]:
                 found.append(path)
                 if len(found) >= 20:
                     return found
+        if budget[0] < 0 or time.monotonic() > budget[1]:
+            cut.append(root)
+    # The known places, checked by name against everything the policy lets the
+    # agent read, not only what was typed: the walk skips caches and stops at
+    # its budget, and grants the user never typed (the runtime, `tmp`, the
+    # network's files) are not walked at all.
+    granted = plan.reads()
+    if isinstance(granted, tuple):
+        reach = [os.path.realpath(item) for item in granted]
+        # `$HOME` is the launcher's to set; the account's own home is where the
+        # keys really are, so both are looked in.
+        homes = {home, _account_home()} - {""}
+        places = [place for each in sorted(homes) for place in _places(each)]
+        for place in (*places, *SYSTEM):
+            real = os.path.realpath(place)
+            if real in named or not os.path.exists(real):
+                continue  # granted by name: a decision
+            if any(real == item or under(real, item) for item in found):
+                continue  # already listed, or inside a folder that is
+            if any(under(real, root) for root in reach):
+                found.append(real)
+                if len(found) >= 20:
+                    break
     return found
+
+
+# The granted folders whose last `exposed` scan stopped at its budget before
+# looking at everything, so a clean answer for them is not the whole answer.
+cut: list[str] = []
+
+
+def partial(found: list[str]) -> str | None:
+    """A line saying the last scan stopped early, or None if it looked at all."""
+    if not cut:
+        return None
+    where = ", ".join(cut[:3]) + (" and more" if len(cut) > 3 else "")
+    what = "found the above" if found else "found nothing"
+    return (
+        f"hlyn: the secret check stopped early in {where} (more than {LOOKS:,} entries or "
+        f"{TIME} s); it {what} but may have missed some. Grant narrower folders to check them fully."
+    )
 
 
 def warning(found: list[str], cli: bool) -> str:

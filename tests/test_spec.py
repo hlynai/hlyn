@@ -62,8 +62,10 @@ def test_relative_paths_resolve_against_the_file_not_the_caller(tmp_path, monkey
 
 
 def test_absolute_paths_are_left_alone(tmp_path):
+    # Left alone apart from resolving links: grants are stored by real path
+    # (on macOS /etc is a link to /private/etc).
     path = write(tmp_path, "p.toml", 'read = ["/etc/hostname"]\n')
-    assert spec.load(path).read == ("/etc/hostname",)
+    assert spec.load(path).read == (os.path.realpath("/etc/hostname"),)
 
 
 def test_ports_and_names_are_not_treated_as_paths(tmp_path):

@@ -633,3 +633,4 @@ def test_a_refused_syscall_through_a_foreign_abi_never_runs(call):
     done = boot(FOREIGN.replace("CALL", call.replace("\n", "\n        ")))
     print(done.stdout, done.stderr[-500:])
     assert "KILLED by SIGSYS" in done.stdout, done.stdout + done.stderr
+

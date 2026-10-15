@@ -220,16 +220,19 @@ def test_profile_resolves_symlinked_paths():
     assert "/private/tmp" in text, "paths were not resolved, so the rule cannot match"
 
 
-def test_profile_uses_literal_for_files_and_subpath_for_directories():
+def test_profile_uses_literal_for_files_and_subpath_for_directories(tmp_path):
     from hlyn.core import mac
     from hlyn.policy import Policy
 
     # The paths are asserted post-resolution, because that is the only form
-    # Seatbelt ever sees. /etc and /usr/share/zoneinfo are both symlinks on
-    # current macOS, which is exactly why the rule is written this way.
-    text = mac.profile(Policy(read=["/etc/hosts", "/usr/share/zoneinfo"]))
+    # Seatbelt ever sees. /etc is a symlink on current macOS, which is exactly
+    # why the rule is written this way. The folder is one the runtime grants
+    # don't already cover (/usr/share/zoneinfo now resolves inside one).
+    folder = tmp_path / "data"
+    folder.mkdir()
+    text = mac.profile(Policy(read=["/etc/hosts", folder]))
     assert f'(literal "{os.path.realpath("/etc/hosts")}")' in text
-    assert f'(subpath "{os.path.realpath("/usr/share/zoneinfo")}")' in text
+    assert f'(subpath "{os.path.realpath(folder)}")' in text
 
 
 def test_profile_refuses_a_path_that_does_not_exist():

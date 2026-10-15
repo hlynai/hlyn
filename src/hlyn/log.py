@@ -174,8 +174,24 @@ def seal(policy: Any, backend: str, level: Any, tmp: str | None = None, **more: 
         net=_shape(policy.net),
         env=_shape(policy.env),
         tmp=tmp,
+        effective=_effective(policy),
         **more,
     )
+
+
+def _effective(policy: Any) -> dict[str, Any]:
+    """Every path the kernel was told to allow, in full: what was typed plus
+    what hlyn adds on its own (the runtime, the network's files, `tmp`). The
+    typed fields above say what was asked for; this says what was granted, so
+    a reader of the record never has to trust that the two are the same."""
+    out: dict[str, Any] = {}
+    for name in ("reads", "writes"):
+        try:
+            found = getattr(policy, name)()
+        except Exception as error:  # noqa: BLE001 - the record must still be written
+            found = f"unknown: {error}"
+        out[name.removesuffix("s")] = found if found is True or isinstance(found, str) else list(found)
+    return out
 
 
 def deny(what: str, why: str, **fields: Any) -> None:

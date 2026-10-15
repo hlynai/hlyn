@@ -13,6 +13,7 @@ enforce it.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import os
 import site
 import sys
@@ -87,6 +88,48 @@ def paths(value: object, field: str) -> tuple[str, ...] | bool:
         out = tuple(_one(item, field) for item in value)
         return prune(out)
     raise Invalid(f"{field}: expected a path, a list of paths, or a bool, got {value!r}.")
+
+
+# Grant fields a `with_` copy carries over as already resolved.
+_KEPT: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar("hlyn_kept", default=frozenset())
+
+
+def real(value: tuple[str, ...] | bool) -> tuple[str, ...] | bool:
+    """The same grants by real path: each link resolved to what it names."""
+    if isinstance(value, bool):
+        return value
+    return prune(os.path.realpath(item) for item in value)
+
+
+def linked(value: object) -> list[tuple[str, str]]:
+    """(typed, real) for each typed path that resolves somewhere else through
+    a link the user made. The system's own aliases (macOS `/tmp`, `/var`,
+    `/etc`; Linux `/bin`, `/lib` and the like) are not counted: they are where
+    the OS keeps those folders, not a redirection."""
+    out: list[tuple[str, str]] = []
+    if isinstance(value, bool) or value is None:
+        return out
+    for item in [value] if isinstance(value, (str, os.PathLike)) else list(value):  # type: ignore[call-overload]
+        typed = os.path.abspath(os.path.expanduser(os.fspath(item)))
+        target = os.path.realpath(typed)
+        if target != typed and target != _system_alias(typed):
+            out.append((os.fspath(item), target))
+    return out
+
+
+# Top-level folders the OS itself makes links: macOS's /tmp, /var and /etc
+# (into /private), merged-/usr Linux's /bin, /sbin and /lib*.
+ALIASES = frozenset({"/tmp", "/var", "/etc", "/bin", "/sbin", "/lib", "/lib32", "/lib64"})  # noqa: S108
+
+
+def _system_alias(path: str) -> str:
+    """`path` with only the system's own top-level aliases resolved."""
+    parts = path.split(os.sep)
+    if len(parts) > 1 and parts[1]:
+        top = os.sep + parts[1]
+        if os.path.islink(top) and top in ALIASES:
+            return os.path.join(os.path.realpath(top), *parts[2:])
+    return path
 
 
 def ports(value: object, field: str = "net") -> tuple[int, ...] | tuple[Rule, ...] | bool:
@@ -545,16 +588,167 @@ def network() -> tuple[str, ...]:
     import ssl
 
     out: set[str] = {*LOOKUP, *TRUST}
+    # The interpreter's own compiled-in locations, checked to hold only
+    # certificates. Never `SSL_CERT_FILE`/`SSL_CERT_DIR` (nor the `cafile` and
+    # `capath` answers, which are those two variables): the environment can
+    # point them anywhere (`SSL_CERT_DIR=~/.ssh`), and a folder that was clean
+    # when checked can change before the agent reads it. `trust_copy` hands the
+    # agent a private copy of what they name instead.
+    named: set[str] = set()
     with contextlib.suppress(Exception):
         found = ssl.get_default_verify_paths()
-        out.update(
-            item
-            for item in (found.cafile, found.capath, found.openssl_cafile, found.openssl_capath)
-            if item
-        )
-    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
-        out.update(item for item in os.environ.get(name, "").split(os.pathsep) if item)
+        named.update(item for item in (found.openssl_cafile, found.openssl_capath) if item)
+    out.update(item for item in named if _certs(item))
     return prune(os.path.abspath(item) for item in out if os.path.exists(item))
+
+
+def trusted(path: str) -> bool:
+    """True if `path` is inside one of the system's own trust stores."""
+    real = os.path.realpath(path)
+    return any(under(real, os.path.realpath(root)) for root in TRUST)
+
+
+def trust_copy(env: dict[str, str], box: str | None) -> dict[str, str]:
+    """`env` with `SSL_CERT_FILE`/`SSL_CERT_DIR` pointed at a private copy.
+
+    A custom trust store (a corporate proxy's CA) has to keep working, but the
+    folder it names is the user's: granting it would hand the agent whatever is
+    in it, and whatever is put in it later, through a symlink swap, a new file
+    or a race with the check. So it is never granted. Each named file is read
+    once, checked to hold only certificates or revocation lists, and those
+    same bytes are written into the agent's private scratch folder; the
+    variable then names the copy. What the agent reads is exactly what was
+    checked. Paths inside the system's own stores are left alone (already
+    granted). Raises `Invalid` with what to change when a location holds
+    anything else. With no scratch folder (`tmp=False`) the variable is
+    dropped instead, so the system's authorities are used.
+    """
+    out = dict(env)
+    for name, kind in (("SSL_CERT_FILE", "file"), ("SSL_CERT_DIR", "dir")):
+        value = env.get(name)
+        if not value:
+            continue
+        items = [item for item in value.split(os.pathsep) if item]
+        if all(trusted(item) for item in items):
+            continue
+        if box is None:
+            # No scratch folder to copy into (`tmp=False`, or hlyn's own proxy
+            # sealing itself): drop the variable. Nothing is granted, and the
+            # program falls back to the system's certificate authorities.
+            del out[name]
+            continue
+        copies: list[tuple[str, bytes]] = []
+        for item in items:
+            copies.extend(_cert_copies(name, item))
+        if kind == "file":
+            target = os.path.join(box, "hlyn-certs.pem")
+            _write(target, b"".join(data for _, data in copies))
+            out[name] = target
+        else:
+            target = os.path.join(box, "hlyn-certs")
+            os.makedirs(target, mode=0o700, exist_ok=True)
+            for base, data in copies:
+                _write(os.path.join(target, base), data)
+            out[name] = target
+    return out
+
+
+def _cert_copies(name: str, item: str) -> list[tuple[str, bytes]]:
+    """The checked contents of one `SSL_CERT_*` entry, as (file name, bytes)."""
+    real = os.path.realpath(item)
+    if os.path.isfile(real):
+        files = [(os.path.basename(item), real)]
+    elif os.path.isdir(real):
+        try:
+            entries = sorted(os.scandir(real), key=lambda entry: entry.name)
+        except OSError as error:
+            raise Invalid(f"{name}: {item} can't be read ({error.strerror}).") from None
+        if len(entries) > CERT_FILES:
+            raise Invalid(
+                f"{name}: {item} holds more than {CERT_FILES} entries; point it at certificates only."
+            )
+        files = []
+        for entry in entries:
+            if not entry.is_file():  # a folder, a dangling link, a socket
+                raise Invalid(
+                    f"{name}: {item} holds {entry.name}, which is not a certificate file. "
+                    f"Point {name} at a folder of certificates only, or unset it."
+                )
+            files.append((entry.name, entry.path))
+    else:
+        raise Invalid(f"{name}: {item} does not exist. Fix the path, or unset {name}.")
+    out: list[tuple[str, bytes]] = []
+    for base, path in files:
+        data = _cert_bytes(path)
+        if data is None:
+            raise Invalid(
+                f"{name}: {path} is not a certificate (or holds a private key). hlyn won't hand it to "
+                f"the agent. Point {name} at certificates only, or unset it."
+            )
+        out.append((base, data))
+    return out
+
+
+def _cert_bytes(path: str) -> bytes | None:
+    """The file's bytes if it holds certificates or revocation lists and no
+    private key, read once; None otherwise."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(CERT_BYTES + 1)
+    except OSError:
+        return None
+    if len(data) > CERT_BYTES or b"PRIVATE KEY" in data:
+        return None
+    return data if any(mark in data for mark in CERT_MARKS) else None
+
+
+def _write(path: str, data: bytes) -> None:
+    """Write a fresh file only this user can read; never follow a link."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+
+
+# A certificate file is small; a folder of them a few hundred files.
+CERT_BYTES = 4 << 20
+CERT_FILES = 2000
+CERT_MARKS = (
+    b"-----BEGIN CERTIFICATE-----",
+    b"-----BEGIN TRUSTED CERTIFICATE-----",
+    b"-----BEGIN X509 CRL-----",
+)
+
+
+def _cert_file(path: str) -> bool:
+    """True if `path` is a PEM file of certificates or revocation lists and
+    holds no private key."""
+    return _cert_bytes(path) is not None
+
+
+def _certs(path: str) -> bool:
+    """True if `path` may be granted as a trust store: inside a known one, a
+    certificate file, or a folder holding only certificate files (OpenSSL's
+    hashed links included, and the revocation lists beside them)."""
+    real = os.path.realpath(path)
+    if any(under(real, os.path.realpath(root)) for root in TRUST):
+        return True
+    if os.path.isfile(real):
+        return _cert_file(real)
+    if not os.path.isdir(real):
+        return False
+    try:
+        entries = list(os.scandir(real))
+    except OSError:
+        return False
+    if not entries or len(entries) > CERT_FILES:
+        return False
+    for entry in entries:
+        if not entry.is_file():  # a subfolder would be granted with it
+            return False
+        if not _cert_file(entry.path):
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -595,8 +789,14 @@ class Policy:
 
     def __post_init__(self) -> None:
         put = object.__setattr__  # frozen dataclass, so assign through the base
-        put(self, "read", paths(self.read, "read"))
-        put(self, "write", paths(self.write, "write"))
+        # Read and write grants are stored by real path: the kernel grants what
+        # a link points at, so the policy, `hlyn show` and the seal record name
+        # that, not the link. `linked` lists the ones that were links, for the CLI
+        # to say so.
+        kept = _KEPT.get()
+        for field in ("read", "write"):
+            value = paths(getattr(self, field), field)
+            put(self, field, value if field in kept else real(value))
         put(self, "exec", paths(self.exec, "exec"))
         put(self, "net", ports(self.net))
         put(self, "env", names(self.env))
@@ -606,6 +806,29 @@ class Policy:
             raise Invalid(f"log: expected a bool or a file path, got {self.log!r}.")
         if not isinstance(self.shm, bool):
             raise Invalid(f"shm: expected true or false, got {self.shm!r}.")
+        if isinstance(self.log, str):
+            self._record_out_of_reach(self.log)
+
+    def _record_out_of_reach(self, where: str) -> None:
+        """Refuse a log inside a folder the agent can write.
+
+        The descriptor hlyn writes through survives the seal, but the name does
+        not: an agent that can write the folder can unlink the file (hlyn keeps
+        writing to the unlinked one), rename it, or put its own file or a link
+        at that path, and whoever opens the path later reads the forgery. So the
+        folder must be outside every grant.
+        """
+        folder = os.path.realpath(os.path.dirname(os.path.abspath(os.path.expanduser(where))))
+        granted = self.writes()
+        if granted is True:
+            root = "every folder (write=True)"
+        else:
+            root = next((item for item in granted if under(folder, os.path.realpath(item))), "")
+        if root:
+            raise Invalid(
+                f"log: {where} is inside {root}, which the agent can write: it could delete the "
+                f"record and leave a forged one in its place. Put the log outside every --write folder."
+            )
 
     # -- derived views ------------------------------------------------------
     #
@@ -687,8 +910,18 @@ class Policy:
         return ()
 
     def with_(self, **edits: object) -> Policy:
-        """A copy with fields replaced. The original is untouched."""
-        return replace(self, **edits)  # type: ignore[arg-type]
+        """A copy with fields replaced. The original is untouched.
+
+        Grants not being replaced keep the real paths they were resolved to
+        when this policy was built: resolving them again here would follow a
+        link swapped in since, and `jail._unchanged` could then no longer see
+        that the folder shown is not the folder about to be sealed.
+        """
+        token = _KEPT.set(frozenset({"read", "write"}) - set(edits))
+        try:
+            return replace(self, **edits)  # type: ignore[arg-type]
+        finally:
+            _KEPT.reset(token)
 
 
 # ---------------------------------------------------------------------------

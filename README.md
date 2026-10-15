@@ -31,7 +31,7 @@ Any web page or document an agent reads can hide an instruction, and catching ev
 |---|---|---|
 | **Files** | Which folders the agent can read and write. Your keys and other projects stay closed. | `--read` `--write` |
 | **Programs** | Which programs it may start. No surprise `curl` or `bash`. | `--exec` |
-| **Network** | Off by default. Allow named websites, or a port. DNS tricks, raw IP addresses and UDP are blocked. | `--net` |
+| **Network** | Off by default. Allow named websites, or a port. With named websites, DNS tricks, raw IP addresses and UDP are blocked; a port (`--net 443`) reaches every host on it and leaves UDP open. | `--net` |
 | **Secrets** | API keys and tokens are removed from its environment unless you pass one on purpose. | `--env` |
 | **Other agents** | One agent can't signal, connect to or share memory with another on the same machine. | built in |
 | **Dangerous kernel calls** | `io_uring`, `ptrace`, `mount` and similar are always refused (Linux). | built in |
@@ -106,6 +106,12 @@ An environment that oversells itself is worse than none. The three that matter m
 - **Data can still go to a website you allowed.** hlyn stops the agent reaching *other* sites, not sending something to a listed one. The rule that matters most: don't let the agent read what it shouldn't send.
 - **A granted folder is a granted folder.** If the agent can write somewhere that something else later runs (a git hook, a scheduled job), that is running code outside hlyn. hlyn names these before the run.
 - **A kernel bug or a hostile tenant** is outside what any process-level boundary covers. For tenants who may attack each other, add a microVM.
+
+Sharp edges worth knowing:
+
+- **Name websites, not ports.** `--net 443` lets the agent reach every host on port 443, and UDP stays open. `--net api.openai.com` reaches that one host.
+- **For an untrusted agent, prefer `hlyn run -- cmd` over `hlyn.on()`.** `hlyn run` seals before the agent starts and closes descriptors outside the grants; `hlyn.on()` can't revoke files or connections the program already had open, and warns about them (`hlyn.Inherited`).
+- **With `hlyn.on()` or `hlyn.run(fn)`, granting `/proc` (some GPU work needs it) undoes the secret scrub on Linux.** `/proc/self/environ` still holds the environment the process started with. `hlyn run` starts the command with the scrubbed one; in-process, remove secrets before launch.
 
 <details>
 <summary><b>The full threat model: what it stops, and what it does not</b></summary>

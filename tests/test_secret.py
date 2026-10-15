@@ -451,16 +451,51 @@ def test_a_secret_with_one_name_leaves_nothing_to_compare(tmp_path, monkeypatch)
     assert _linked_secrets(str(home)) == {(key.st_dev, key.st_ino)}
 
 
-def test_a_hugging_face_token_in_the_cache_is_a_credential_but_the_walk_skips_caches(tmp_path, monkeypatch):
-    # `.cache` is in SKIP (walking it costs more than the rest of a home), so a
-    # grant of the whole home does not find the token; a grant of the folder does.
+def test_a_hugging_face_token_in_the_cache_is_found_though_the_walk_skips_caches(tmp_path, monkeypatch):
+    # `.cache` is in SKIP (walking it costs more than the rest of a home), so the
+    # walk never sees the token, so the known places are checked by name against
+    # the grants.
     monkeypatch.setenv("HOME", str(tmp_path))
     token = tmp_path / ".cache" / "huggingface" / "token"
     token.parent.mkdir(parents=True)
     token.write_text("hf_abc")
     assert credential(str(token))
-    assert exposed(Policy(read=[tmp_path], net=True)) == []
+    found = exposed(Policy(read=[tmp_path], net=True))
+    print("whole home granted ->", found)
+    assert os.path.realpath(token) in found
     assert exposed(Policy(read=[tmp_path / ".cache" / "huggingface"], net=True)) == [str(token)]
+
+
+def test_a_known_secret_reached_through_a_grant_nobody_typed_is_reported(tmp_path, monkeypatch):
+    # `tmp` is granted read and write but is not in `read`/`write`, so the walk
+    # never looked at it. The check is against what the kernel will allow.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    keys = tmp_path / ".aws"
+    keys.mkdir()
+    (keys / "credentials").write_text("[default]\naws_secret_access_key = x\n")
+    plan = Policy(read=[], tmp=str(tmp_path), net=True)
+    found = exposed(plan)
+    print("tmp granted ->", found)
+    assert any(item.startswith(os.path.realpath(keys)) for item in found)
+    assert exposed(Policy(read=[], net=True)) == []  # the control: not granted, not reported
+
+
+def test_a_scan_that_stops_early_says_so(tmp_path, monkeypatch):
+    from hlyn import secret
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    big = tmp_path / "big"
+    big.mkdir()
+    for i in range(50):
+        (big / f"f{i}.txt").write_text("x")
+    monkeypatch.setattr(secret, "LOOKS", 10)
+    found = exposed(Policy(read=[big], net=True))
+    said = secret.partial(found)
+    print(said)
+    assert found == [] and said and "stopped early" in said and str(big) in said
+    monkeypatch.setattr(secret, "LOOKS", 20_000)
+    found = exposed(Policy(read=[big], net=True))
+    assert secret.partial(found) is None  # a scan that looked at everything says nothing
 
 
 def test_a_login_file_granted_on_its_own_is_a_decision_not_a_warning(tmp_path, monkeypatch):
@@ -473,3 +508,22 @@ def test_a_login_file_granted_on_its_own_is_a_decision_not_a_warning(tmp_path, m
     found = exposed(Policy(read=[tmp_path / ".claude.json", folder], net=True))
     print(f"warned about {found}")
     assert found == []
+
+
+def test_a_launcher_home_pointed_elsewhere_does_not_hide_the_accounts_keys(tmp_path, monkeypatch):
+    # `$HOME` is the launcher's to set. The known places are also looked for
+    # in the account's own home, so pointing HOME at an empty folder doesn't
+    # blind the check to keys a grant really reaches.
+    from hlyn import secret
+
+    real = tmp_path / "real-home"
+    (real / ".aws").mkdir(parents=True)
+    (real / ".aws" / "credentials").write_text("[default]\naws_secret_access_key = x\n")
+    monkeypatch.setattr(secret, "_account_home", lambda: str(real))
+    monkeypatch.setenv("HOME", str(tmp_path / "decoy"))
+    plan = Policy(read=[], tmp=str(real), net=True)  # reaches the real home, not as `read`
+    found = exposed(plan)
+    print("HOME=decoy, account home granted through tmp ->", found)
+    assert any(item.startswith(os.path.realpath(real / ".aws")) for item in found)
+    monkeypatch.setattr(secret, "_account_home", lambda: "")
+    assert exposed(plan) == []  # the control: with only $HOME to go on, it was missed

@@ -41,7 +41,7 @@ from typing import TextIO
 from urllib.parse import urlsplit
 
 from .error import Error
-from .policy import Policy
+from .policy import Policy, under
 
 __all__ = ["HOSTS", "command", "forget", "login", "policy", "prepare", "save", "saved", "signin", "state"]
 
@@ -61,10 +61,11 @@ SHELLS: tuple[str, ...] = (
 # git's configuration. git stops ("fatal: unable to access") when a config
 # file exists and can't be read, so without these every git command fails for
 # anyone with a ~/.gitconfig, or with Homebrew's git. `~/.git-credentials`
-# stays closed.
+# stays closed, and so does `~/.config/git/credentials`, git's other
+# credential store: the files git reads there are named, not the folder.
 GIT: tuple[str, ...] = (
     "/etc/gitconfig", "/opt/homebrew/etc/gitconfig", "/usr/local/etc/gitconfig",
-    "~/.gitconfig", "~/.config/git",
+    "~/.gitconfig", "~/.config/git/config", "~/.config/git/ignore", "~/.config/git/attributes",
 )
 
 # macOS: /usr/bin/git and the other developer tools are stubs that run the
@@ -157,10 +158,28 @@ def policy(binary: str, env: MutableMapping[str, str], tmp: str) -> Policy:
     `prepare` made: hlyn's private temporary folder and Claude Code's."""
     cwd = os.getcwd()
     mine = state(env)
+    # `CLAUDE_CONFIG_DIR` comes from the environment and is granted read and
+    # write, so it must name a folder of Claude Code's own, not a home, the
+    # filesystem root or a place keys live.
+    if env.get("CLAUDE_CONFIG_DIR"):
+        from .secret import credential
+
+        wide = risky(mine)
+        if wide or credential(os.path.realpath(mine)):
+            raise Error(
+                f"CLAUDE_CONFIG_DIR is {mine}: "
+                + (wide or "a place keys or tokens live")
+                + ". Point it at a folder of Claude Code's own, or unset it to use ~/.claude."
+            )
     # The installation, by both names: `claude` is usually a link in a bin
     # folder (`~/.local/bin`) pointing at the version it runs, and Claude Code
     # lists both while starting.
-    read = [cwd, os.path.dirname(os.path.realpath(binary)), os.path.dirname(binary)]
+    # A folder that holds much more than the installation (a `claude` kept
+    # directly in ~ or /) is granted as the one file instead.
+    read = [cwd]
+    for name in (os.path.realpath(binary), binary):
+        folder = os.path.dirname(name)
+        read.append(name if risky(folder) else folder)
     if not env.get("CLAUDE_CONFIG_DIR"):
         dotfile = os.path.join(os.path.expanduser("~"), ".claude.json")
         if os.path.exists(dotfile):
@@ -467,12 +486,16 @@ def prepare(env: MutableMapping[str, str]) -> str:
 # -- what it will get, before it starts ---------------------------------------
 
 
-def record() -> str:
+def record(writable: tuple[str, ...] | bool = ()) -> str:
     """Where `hlyn claude` keeps its record of what was allowed and refused.
 
     Not the terminal: the record's lines would draw over Claude Code's
     screen. A file in the person's own log folder instead, outside the
     project; `--log PATH` puts it elsewhere and `--no-log` turns it off.
+    If that folder is one Claude Code may write (started in the home
+    folder), the record goes to a private folder under the system's
+    temporary folder instead, where it can't be replaced (`Policy` refuses a
+    log the agent could delete).
     """
     home = os.path.expanduser("~")
     if sys.platform == "darwin":
@@ -480,6 +503,9 @@ def record() -> str:
     else:
         state_home = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
         folder = os.path.join(state_home, "hlyn")
+    real = os.path.realpath(folder)
+    if writable is True or any(under(real, os.path.realpath(item)) for item in writable or ()):
+        folder = os.path.join(tempfile.gettempdir(), f"hlyn-{os.getuid()}")
     os.makedirs(folder, mode=0o700, exist_ok=True)
     return os.path.join(folder, "claude.jsonl")
 

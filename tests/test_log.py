@@ -156,3 +156,19 @@ def test_a_host_policy_is_recorded_as_text():
     print(shaped)
     assert shaped == ["api.openai.com:443", "localhost:5432"]
     json.dumps(shaped)  # a log line must serialise
+
+
+def test_the_seal_record_lists_what_was_granted_not_only_what_was_typed(sink):
+    # The typed fields say what was asked for; `effective` is every path the
+    # kernel was told to allow, so the record can't understate the boundary.
+    from hlyn.policy import network, under
+
+    plan = Policy(read=["/srv"], net=[443])
+    log.seal(plan, "hlyn.core.linux", 6, "/tmp/x")
+    row = rows(sink)[0]
+    print(row["effective"])
+    assert row["read"] == ["/srv"]
+    assert row["effective"]["read"] == list(plan.reads())
+    assert row["effective"]["write"] == list(plan.writes())
+    granted = row["effective"]["read"]
+    assert all(any(under(item, root) for root in granted) for item in network())

@@ -61,6 +61,16 @@ docstrings, and in the error messages:
 - **A policy that grants something dangerous is doing as it was told.**
   Granting write and exec on the same directory lets the agent write a program
   and run it; that is the policy's meaning, not an escape.
+- **Linux, `hlyn.on()` and `hlyn.run(fn)`: granting `/proc` brings the
+  scrubbed environment back.** `/proc/self/environ` holds the environment the
+  process was started with, which removing variables later does not change.
+  hlyn never grants `/proc` by default; `hlyn run` starts the command with the
+  scrubbed environment. In-process, if a policy grants `/proc`, remove secrets
+  before launch.
+- **`hlyn.on()` can't revoke what is already open.** Files and connections the
+  program opened before the call keep working (it warns: `hlyn.Inherited`).
+  `hlyn run` and `hlyn.run()` start a fresh process and close them; use those
+  for untrusted code.
 
 If you think one of these limits is worse than we have described, that is worth
 an email too.

@@ -152,6 +152,13 @@ def _policy(args: argparse.Namespace, start: Policy | None = None) -> Policy:
         elif preset_:
             net_from = f"--preset {preset_}"
     edits: dict[str, object] = {}
+    # A link is granted as what it names (`policy.real`); say so, since that
+    # is not the path that was typed.
+    from .policy import linked
+
+    for flag, typed in (("--read", args.read), ("--write", args.write)):
+        for name, target in linked(typed or ()):
+            print(f"hlyn: {flag} {name} is a link; granting what it names: {target}", file=sys.stderr)
     if args.read:
         edits["read"] = _add(base.read, args.read)
     if args.write:
@@ -900,12 +907,15 @@ def _exposed(plan: Policy, quiet: bool = False) -> bool:
     """
     import warnings
 
-    from .secret import Exposed, exposed, warning
+    from .secret import Exposed, exposed, partial, warning
 
     found = exposed(plan)
+    short = partial(found)
     if not found:
+        if short and not quiet:
+            print(short, file=sys.stderr)
         return True
-    text = warning(found, cli=True)
+    text = warning(found, cli=True) + (f"\n{short}" if short else "")
     jail.options()
     try:
         with warnings.catch_warnings(record=True) as heard:
@@ -1148,7 +1158,7 @@ def _run(argv: Sequence[str] | None = None) -> int:
             plan = _policy(args, base)
             if not args.log and not args.no_log:
                 # Not the terminal: the record would draw over Claude Code's screen.
-                plan = plan.with_(log=claude.record())
+                plan = plan.with_(log=claude.record(plan.writes()))
             if not (_exposed(plan, quiet=asking) and _reach(plan, quiet=asking)
                     and _later(plan, known, quiet=asking) and _shm(plan, quiet=asking)):
                 return 2

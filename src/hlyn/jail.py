@@ -24,7 +24,7 @@ from typing import Any, NoReturn
 
 from . import log
 from .error import Failed, Invalid, Sealed, Unsupported
-from .policy import Policy, preset, presets, under
+from .policy import Policy, preset, presets, trust_copy, under
 
 __all__ = ["back", "on", "probe", "run", "sealed", "spawn"]
 
@@ -462,7 +462,7 @@ def _warn(plan: Policy) -> list[str]:
 
     from . import later
     from .hosts import Reach
-    from .secret import Exposed, exposed, warning
+    from .secret import Exposed, exposed, partial, warning
 
     options()
     for said in reaches(plan):
@@ -472,7 +472,8 @@ def _warn(plan: Policy) -> list[str]:
         warnings.warn(later.warning(runs, cli=False), later.Runs, stacklevel=3)
     found = exposed(plan)
     if found:
-        warnings.warn(warning(found, cli=False), Exposed, stacklevel=3)
+        short = partial(found)
+        warnings.warn(warning(found, cli=False) + (f"\n{short}" if short else ""), Exposed, stacklevel=3)
     return found
 
 
@@ -516,6 +517,10 @@ def _seal(
     keep = plan.keep()
     if box:
         keep["TMPDIR"] = box
+    # A custom trust store becomes a checked copy in the scratch folder, never
+    # a grant on the user's folder (`policy.trust_copy`). Before the scrub, so
+    # a refusal leaves the environment as it was.
+    keep = trust_copy(keep, box)
     if extra is not None:
         keep.update(extra(keep))
     os.environ.clear()
@@ -530,6 +535,7 @@ def _seal(
         log.emit("exposed", paths=found[:20])
 
     more: dict[str, object] = {}
+    _unchanged(plan)
     # A gate without a proxy (`watched`), about to be handed this seal.
     minder = sys.modules.get(__name__.rpartition(".")[0] + ".gate")
     watcher = getattr(minder, "pid", None) if getattr(minder, "_handoff", None) is not None else None
@@ -552,6 +558,24 @@ def _seal(
     log.seal(plan, back().__name__, level, box, **more)
 
     return {"policy": plan, "tmp": box, "level": level, "backend": back().__name__, **more}
+
+
+def _unchanged(plan: Policy) -> None:
+    """Refuse if a grant stopped being the folder that was checked.
+
+    Grants are stored by real path when the policy is built (`policy.real`),
+    which is what `hlyn show` and `hlyn claude`'s table display. Between that
+    and the seal a component could be swapped for a link, and the kernel would
+    grant wherever the link points. Checked again here, the last step before
+    the kernel is told, so what was shown is what is sealed.
+    """
+    for field in (plan.read, plan.write):
+        for item in field if isinstance(field, tuple) else ():
+            if os.path.lexists(item) and os.path.realpath(item) != item:
+                raise Invalid(
+                    f"{item} now leads somewhere else ({os.path.realpath(item)}) than when the policy was "
+                    f"checked, so hlyn won't seal it. Check what changed it, then run again."
+                )
 
 
 def run(fn: Callable[[], Any], policy: object = None, *, keep_fds: Sequence[int] = (), **edits: Any) -> Any:

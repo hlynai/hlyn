@@ -205,7 +205,7 @@ def test_a_wide_folder_read_whole_is_left_out(clean, data):
     observed({("read", "/etc"), ("read", "/etc/hosts")})
     plan = watch.suggest()
     print(plan.read)
-    assert "/etc" not in plan.read and "/etc/hosts" in plan.read
+    assert os.path.realpath("/etc") not in plan.read and os.path.realpath("/etc/hosts") in plan.read
 
 
 def test_never_collapsed_into_a_top_folder_proc_or_a_folder_holding_credentials(clean, data):
@@ -220,7 +220,8 @@ def test_never_collapsed_into_a_top_folder_proc_or_a_folder_holding_credentials(
                 if sys.platform == "linux")})
     plan = watch.suggest()
     print(plan.read)
-    assert "/etc" not in plan.read and "/etc/hosts" in plan.read and "/etc/passwd" in plan.read
+    etc, hosts, passwd = (os.path.realpath(item) for item in ("/etc", "/etc/hosts", "/etc/passwd"))
+    assert etc not in plan.read and hosts in plan.read and passwd in plan.read
     assert str(keyed) not in plan.read and a in plan.read and b in plan.read
     assert not any(item in ("/proc", f"/proc/{os.getpid()}") for item in plan.read)
 
