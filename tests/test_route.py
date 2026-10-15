@@ -93,10 +93,11 @@ def test_start_returns_a_sealed_listening_proxy_and_stops_it_when_the_last_holde
         answer = ask(way.port, "evil.example.net:443")
         print(f"{way} started in {took * 1000:.0f} ms; CONNECT to an unlisted host -> {answer[:70]!r}")
         assert answer.startswith(b"HTTP/1.1 403 hlyn: evil.example.net:443 is not in --net")
+        # Asked while it runs: once the pipe closes the proxy may be gone before `ps` starts.
+        parent = subprocess.run(["ps", "-o", "ppid=", "-p", str(way.pid)], capture_output=True, text=True,
+                                check=False).stdout.strip()
     finally:
         way.close()
-    parent = subprocess.run(["ps", "-o", "ppid=", "-p", str(way.pid)], capture_output=True, text=True,
-                            check=False).stdout.strip()
     ended = gone(way)
     print(f"proxy {way.pid}'s parent while running: {parent} (this test is {os.getpid()}); "
           f"gone after the lifetime pipe closed: {ended}")
