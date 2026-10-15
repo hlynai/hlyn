@@ -54,7 +54,10 @@ def test_the_seal_record_and_hlyn_show_name_the_target(tree, tmp_path):
                     sys.executable, "-c", "pass"], cwd=project, env=env, capture_output=True, check=False)
     seal = next(json.loads(line) for line in log.read_text().splitlines() if '"seal"' in line)
     print("record read:", seal["read"])
-    assert seal["read"] == [os.path.realpath(secrets)]
+    # `hlyn run` may add its own files to the typed list (the report library, on
+    # Linux), so the grant is looked for, and the link's own name must be absent.
+    assert os.path.realpath(secrets) in seal["read"]
+    assert str(project / "src") not in seal["read"]
 
 
 def test_the_systems_own_aliases_are_not_reported_as_links(tmp_path):
