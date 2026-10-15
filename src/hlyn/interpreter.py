@@ -260,7 +260,25 @@ def ask(cmd0: str, where: str) -> Answer:
             os.kill(pid, 9)
         with contextlib.suppress(ChildProcessError):
             os.waitpid(pid, 0)
-    return read(body, where)
+    return venv(read(body, where), found)
+
+
+def venv(answer: Answer, found: str) -> Answer:
+    """`answer` plus the virtualenv `found` lives in, when it lives in one.
+
+    Asked with -I -S, a python.org build reports the venv as its prefix, but
+    Homebrew and uv builds apply the venv in `site`, which -S skips: they
+    report their base and never name the venv. Their run then fails reading
+    `pyvenv.cfg` unless the venv is granted, so it is, for reading, by the
+    link's own place (the link, not its target, is the venv's door).
+    """
+    folder = os.path.dirname(os.path.dirname(found))
+    if not os.path.isfile(os.path.join(folder, "pyvenv.cfg")):
+        return answer
+    granted = sane(folder)
+    if not granted or granted in answer.reads:
+        return answer
+    return Answer((*answer.reads, granted), answer.exe)
 
 
 def read(body: bytes, where: str) -> Answer:

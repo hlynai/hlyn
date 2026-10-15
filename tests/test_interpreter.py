@@ -402,3 +402,31 @@ def test_a_program_that_cannot_start_is_explained_not_a_traceback(tmp_path):
     print(f"exit {done.returncode}\nstderr:\n{done.stderr}")
     assert done.returncode != 0 and "Traceback" not in done.stderr
     assert "hlyn: can't start ./tool" in done.stderr and "/no/such/interpreter" in done.stderr
+
+
+def test_the_venv_holding_an_asked_interpreter_is_granted_for_reading(tmp_path):
+    # Homebrew and uv builds apply a venv in `site`, which the probe's -S skips,
+    # so they never name the venv; its `pyvenv.cfg` must still be readable.
+    venv = tmp_path / "elsewhere" / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    plain = tmp_path / "plain" / "bin"
+    plain.mkdir(parents=True)
+    base = Answer(("/usr/lib/python3",))
+    with_cfg = interpreter.venv(base, str(venv / "bin" / "python"))
+    without = interpreter.venv(base, str(plain / "python"))
+    twice = interpreter.venv(with_cfg, str(venv / "bin" / "python"))
+    print(f"with pyvenv.cfg: {with_cfg.reads}\nwithout: {without.reads}\ntwice: {twice.reads}")
+    assert with_cfg.reads == ("/usr/lib/python3", os.path.realpath(venv))
+    assert without == base
+    assert twice == with_cfg
+
+
+def test_a_venv_that_is_the_home_folder_is_not_granted(tmp_path, monkeypatch):
+    # A folder with a pyvenv.cfg is only trusted as far as `sane` trusts it.
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    got = interpreter.venv(Answer(), str(tmp_path / "bin" / "python"))
+    print("reads:", got.reads)
+    assert got.reads == ()
