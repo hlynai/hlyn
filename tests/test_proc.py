@@ -345,6 +345,34 @@ sys.stdin.readline()
 """
 
 
+def _who() -> str:
+    """The processes of a job-control run, with their groups and signal state: what a
+    lost Ctrl-C needs to be told apart from a slow one (Linux only; empty elsewhere)."""
+    import subprocess
+
+    if not os.path.isdir("/proc/self"):
+        return ""
+    table = subprocess.run(["ps", "-eo", "pid,ppid,pgid,sid,tpgid,stat,wchan:14,args"],
+                           capture_output=True, text=True, check=False).stdout
+    table = "".join(line[:160] + "\n" for line in table.splitlines())
+    rows = []
+    for number in sorted(os.listdir("/proc")):
+        if not number.isdigit():
+            continue
+        try:
+            with open(f"/proc/{number}/cmdline", "rb") as handle:
+                command = handle.read().replace(b"\0", b" ").decode(errors="replace")[:100]
+            if "agent.py" not in command and "gate" not in command and "_launch" not in command:
+                continue
+            with open(f"/proc/{number}/status") as handle:
+                wanted = ("State", "NSpid", "NSpgid", "SigPnd", "ShdPnd", "SigBlk", "SigIgn", "SigCgt")
+                keep = [line for line in handle.read().splitlines() if line.split(":")[0] in wanted]
+            rows.append(f"{number} {command}\n    " + "\n    ".join(keep))
+        except OSError:
+            continue
+    return table + "\n".join(rows)
+
+
 @pytest.mark.parametrize("own", [False, True], ids=["plain", "own proc"])
 def test_ctrl_z_fg_and_ctrl_c_work_through_the_namespace_layers(tmp_path, own):
     # hlyn claude is interactive: suspending it (Ctrl-Z), resuming it (fg) and
@@ -374,7 +402,7 @@ def test_ctrl_z_fg_and_ctrl_c_work_through_the_namespace_layers(tmp_path, own):
         nonlocal seen
         end = time.time() + 30
         while not re.search(pattern, seen):
-            assert time.time() < end, f"never saw {pattern!r}:\n{seen}"
+            assert time.time() < end, f"never saw {pattern!r}:\n{seen}\n{_who()}"
             if select.select([fd], [], [], 0.2)[0]:
                 try:
                     seen += os.read(fd, 4096).decode(errors="replace")
