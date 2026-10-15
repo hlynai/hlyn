@@ -345,6 +345,18 @@ sys.stdin.readline()
 """
 
 
+def _terminal(fd: int) -> str:
+    """The terminal's foreground group and whether it turns ^C into SIGINT."""
+    import termios
+
+    try:
+        flags = termios.tcgetattr(fd)[3]
+        return (f"terminal foreground group {os.tcgetpgrp(fd)}, ISIG {bool(flags & termios.ISIG)}, "
+                f"ICANON {bool(flags & termios.ICANON)}")
+    except (OSError, termios.error) as error:
+        return f"terminal unreadable: {error}"
+
+
 def _who() -> str:
     """The processes of a job-control run, with their groups and signal state: what a
     lost Ctrl-C needs to be told apart from a slow one (Linux only; empty elsewhere)."""
@@ -361,9 +373,10 @@ def _who() -> str:
             continue
         try:
             with open(f"/proc/{number}/cmdline", "rb") as handle:
-                command = handle.read().replace(b"\0", b" ").decode(errors="replace")[:100]
-            if "agent.py" not in command and "gate" not in command and "_launch" not in command:
+                whole = handle.read().replace(b"\0", b" ").decode(errors="replace")
+            if "agent.py" not in whole and "gate" not in whole and "_launch" not in whole:
                 continue
+            command = whole[:100]
             with open(f"/proc/{number}/status") as handle:
                 wanted = ("State", "NSpid", "NSpgid", "SigPnd", "ShdPnd", "SigBlk", "SigIgn", "SigCgt")
                 keep = [line for line in handle.read().splitlines() if line.split(":")[0] in wanted]
@@ -398,11 +411,12 @@ def test_ctrl_z_fg_and_ctrl_c_work_through_the_namespace_layers(tmp_path, own):
                   {"PS1": "P> ", "TERM": "dumb", "PATH": "/usr/bin:/bin"})
     seen = ""
 
-    def expect(pattern):
+    def expect(pattern, typed=""):
         nonlocal seen
         end = time.time() + 30
         while not re.search(pattern, seen):
-            assert time.time() < end, f"never saw {pattern!r}:\n{seen}\n{_who()}"
+            assert time.time() < end, (f"never saw {pattern!r}:\n{seen}\nwhen typed: {typed}\n"
+                                       f"{_terminal(fd)}\n{_who()}")
             if select.select([fd], [], [], 0.2)[0]:
                 try:
                     seen += os.read(fd, 4096).decode(errors="replace")
@@ -419,8 +433,9 @@ def test_ctrl_z_fg_and_ctrl_c_work_through_the_namespace_layers(tmp_path, own):
         time.sleep(1)
         os.write(fd, b"hello\n")
         expect("agent read: hello")
+        typed = _terminal(fd)
         os.write(fd, b"\x03")  # Ctrl-C
-        expect("agent got INT")
+        expect("agent got INT", typed)
         os.write(fd, b"echo rc=$?\n")
         expect(r"rc=\d+")
     finally:
