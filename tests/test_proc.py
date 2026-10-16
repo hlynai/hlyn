@@ -339,8 +339,10 @@ def test_ctrl_c_at_the_terminal_reaches_the_command(tmp_path):
 JOB_AGENT = """
 import os, signal, sys
 signal.signal(signal.SIGINT, lambda *a: (os.write(1, b"agent got INT\\n"), sys.exit(130)))
+signal.signal(signal.SIGCONT, lambda *a: os.write(1, b"agent resumed\\n"))
 print("agent ready", flush=True)
 print("agent read:", sys.stdin.readline().strip(), flush=True)
+print("agent waiting", flush=True)
 sys.stdin.readline()
 """
 
@@ -411,10 +413,12 @@ def test_ctrl_z_fg_and_ctrl_c_work_through_the_namespace_layers(tmp_path, own):
                   {"PS1": "P> ", "TERM": "dumb", "PATH": "/usr/bin:/bin"})
     seen = ""
 
-    def expect(pattern, typed=""):
+    def expect(pattern, typed="", wait=30, soft=False):
         nonlocal seen
-        end = time.time() + 30
+        end = time.time() + wait
         while not re.search(pattern, seen):
+            if soft and time.time() >= end:
+                return False
             assert time.time() < end, (f"never saw {pattern!r}:\n{seen}\nwhen typed: {typed}\n"
                                        f"{_terminal(fd)}\n{_who()}")
             if select.select([fd], [], [], 0.2)[0]:
@@ -422,17 +426,29 @@ def test_ctrl_z_fg_and_ctrl_c_work_through_the_namespace_layers(tmp_path, own):
                     seen += os.read(fd, 4096).decode(errors="replace")
                 except OSError:
                     break
+        return True
 
     try:
         expect("P> ")
         os.write(fd, f"{sys.executable} -c \"{launch}\"\n".encode())
         expect("agent ready")
         os.write(fd, b"\x1a")  # Ctrl-Z
-        expect("Stopped")
-        os.write(fd, b"fg\n")
-        time.sleep(1)
+        # Typed only once bash has printed its next prompt (and settled): input typed while it is still
+        # taking the stopped job's terminal state is thrown away (seen: `fg` never ran).
+        expect("(?s)Stopped.*P> ")
+        time.sleep(0.3)  # as pexpect does before sending: bash is still setting up its terminal
+        for _ in range(3):
+            # Typed again if bash lost the line (about 1 run in 600, measured, on a loaded
+            # machine: bash never ran `fg`, and all of the job stayed stopped). A job that
+            # cannot be resumed still fails: it never says `agent resumed`.
+            os.write(fd, b"fg\n")
+            if expect("agent resumed", wait=8, soft=True):  # its terminal is back before it is woken
+                break
+        expect("agent resumed")
         os.write(fd, b"hello\n")
         expect("agent read: hello")
+        expect("agent waiting")
+        time.sleep(0.3)  # blocked in its read, not between two lines of its code
         typed = _terminal(fd)
         os.write(fd, b"\x03")  # Ctrl-C
         expect("agent got INT", typed)
