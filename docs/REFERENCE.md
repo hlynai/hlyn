@@ -244,7 +244,8 @@ A few rules worth knowing:
 - **Writing implies reading what you wrote.** A path in `write` can also be read back.
 - **Paths must exist.** A typo such as `read=["./scr"]` is an error, not a grant that silently matches nothing.
 - **`net` holds hosts or ports, never both.** A port reaches every host on it, so mixing them would make the hosts meaningless; hlyn refuses and names both fixes. See [Hosts in `net`](#hosts-in-net).
-- **Allowing any network also allows what the network needs.** DNS configuration and TLS certificate stores become readable automatically, so `net=["api.openai.com"]` really can make HTTPS requests. Private key folders such as `/etc/ssl/private` are never included.
+- **Allowing any network also allows what the network needs.** DNS configuration and TLS certificate stores become readable automatically, so `net=["api.openai.com"]` really can make HTTPS requests. Private key folders such as `/etc/ssl/private` are never included. A custom store named by `SSL_CERT_FILE` or `SSL_CERT_DIR` is never granted: the agent gets a private copy in its scratch folder, read once and checked to hold only certificates.
+- **A link is granted as what it names.** `--read ./src`, when `./src` is a symlink, grants its target, and the policy, `hlyn show` and the log name the target; the CLI says so. Grants are checked again just before the seal.
 
 ### Hosts in `net`
 
@@ -300,7 +301,7 @@ hlyn: warning: the agent can read 1 secret file and reach the network, so it cou
 | What counts as a secret | `.env`, `.env.*` (not `.example`/`.sample`/`.template`), `.envrc`, `.npmrc`, `.netrc`, private SSH keys, `secrets.toml`/`.yaml`, `credentials.json`, service-account JSON, Terraform state, `~/.aws`, `~/.ssh`, `~/.kube`, … A `.key` or `.pem` file counts only if it holds a private key, so Keynote files and public certificates don't. |
 | When it warns | Only when a secret is readable **through a folder** **and** the network is open |
 | Granting a secret file on its own | No warning. Naming it is a decision. |
-| Where it looks | Up to 4 folders deep, for at most half a second, skipping `.git`, `node_modules`, `.venv` and build output. Links are followed only as far as the kernel would. Files that live only in iCloud/Dropbox are never downloaded to be checked. |
+| Where it looks | Up to 4 folders deep, for at most half a second, skipping `.git`, `node_modules`, `.venv` and build output. Known places (`~/.ssh`, `~/.aws`, a Hugging Face token, …) are also checked by name against every grant, hlyn's own included, in both `$HOME` and the account's real home. Links are followed only as far as the kernel would. Files that live only in iCloud/Dropbox are never downloaded to be checked. If the scan stops early, the CLI says so. |
 | In Python | Raised as a `hlyn.Exposed` warning, so the standard filters apply |
 | Make it an error | `PYTHONWARNINGS=error::hlyn.Exposed` refuses the run (exit 2), which keeps leaky policies out of CI. In Python, `warnings.simplefilter("error", hlyn.Exposed)` raises before anything is sealed. With hlyn installed from PyPI, Python first prints `Invalid -W option ignored: invalid module name: 'hlyn'`, because it reads the setting before it can import hlyn; hlyn applies it anyway. |
 | Check a policy yourself | `hlyn.exposed(policy)` returns the list |
@@ -520,7 +521,7 @@ Flags for `run`, `claude` (all but `-p` and `-f`) and `show`:
 | `--env NAME` | Keep an environment variable (repeatable) |
 | `--env-any` | Keep the whole environment, secrets included |
 | `--no-tmp` | No private scratch folder |
-| `--log PATH` / `--no-log` | Write the log to a file, or nowhere |
+| `--log PATH` / `--no-log` | Write the log to a file, or nowhere. The file must be outside every `--write` folder, or hlyn refuses to start |
 
 Only on `run` and `claude`:
 
@@ -667,13 +668,13 @@ On macOS, `localhost:PORT` entries are reached directly, not through the proxy, 
 hlyn writes one JSON object per line, to stderr by default (or `--log FILE` / `log="file.jsonl"`).
 
 ```json
-{"t": 1790338793.51, "kind": "seal", "pid": 4120, "backend": "linux", "level": 6, "read": ["/srv/data"], "write": [], "exec": false, "net": [443], "env": false, "tmp": "/tmp/hlyn-k2j3"}
+{"t": 1790338793.51, "kind": "seal", "pid": 4120, "backend": "linux", "level": 6, "read": ["/srv/data"], "write": [], "exec": false, "net": [443], "env": false, "tmp": "/tmp/hlyn-k2j3", "effective": {"read": ["/etc/resolv.conf", "/srv/data", "/tmp/hlyn-k2j3", "/usr/lib", "…"], "write": ["/dev/null", "/tmp/hlyn-k2j3"]}}
 {"t": 1790338793.52, "kind": "deny", "pid": 4121, "what": "read", "target": "/etc/shadow", "allow": null, "credential": true, "by": "cat", "op": "open", "count": 1, "source": "program"}
 ```
 
 | Record | Written when |
 |---|---|
-| `seal` | The boundary was applied, with exactly what it grants |
+| `seal` | The boundary was applied. `read`, `write`… are what you asked for; `effective` is every path the kernel was told to allow, hlyn's own additions included |
 | `deny` | Under `hlyn run`: something was refused, written as it happens. With hosts, network refusals are written from every entry point, by the proxy and the gate |
 
 With hosts, the seal record also names them, the proxy's address and the helpers' process IDs:
