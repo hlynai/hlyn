@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from ..error import Failed, Invalid, Unsupported
-from ..policy import Policy
+from ..policy import Policy, changed
 
 __all__ = ["abi", "load", "ready", "seal"]
 
@@ -167,6 +167,9 @@ def _paths(value: tuple[str, ...] | bool, refused: list[tuple[str, str]],
     out = []
     for item in value:
         real = item if item in checked else os.path.realpath(item)
+        if item in checked and not os.path.islink(item) and changed(item):  # a link: the open says so
+            refused.append((item, "it is now a different folder than the one the policy checked"))
+            continue
         try:
             os.close(_open(real))
         except OSError as exc:

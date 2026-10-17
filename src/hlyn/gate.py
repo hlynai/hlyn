@@ -163,8 +163,10 @@ def become(
         # (see `hand`). Made before the fork, so neither side can miss it.
         agent_end, gate_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     # Built before the fork: after it, the parent does as little as possible.
+    whole = group and not isolate  # the child's group, which no terminal signals: the gate does
     argv = helpers.command("gate", "--child", "0", *(["--forward"] if forward else []),
                           *(["--terminal"] if tty is not None else []),
+                          *(["--group"] if whole else []),
                           *(["--notify", str(gate_end.fileno())] if gate_end is not None else []),
                           *(["--log", str(log)] if log is not None else []),
                           *(["--events", str(events)] if events is not None else []))
@@ -217,7 +219,7 @@ def become(
             # close the gate's socket instead.
             gc.disable()
             guard = _take(gate_end.detach(), _reporter(log, events))
-            os._exit(relay(child, forward=forward, terminal=tty, guard=guard))
+            os._exit(relay(child, forward=forward, terminal=tty, guard=guard, whole=whole))
         gate_end.set_inheritable(True)
         for fd in (log, events):
             if fd is not None:
@@ -229,7 +231,7 @@ def become(
         # No fresh interpreter to be had: be the gate in this process. The
         # caller's other threads, if any, live on beside it until it exits.
         guard = _take(gate_end.detach(), _reporter(log, events)) if gate_end is not None else None
-        os._exit(relay(child, forward=forward, terminal=tty, guard=guard))
+        os._exit(relay(child, forward=forward, terminal=tty, guard=guard, whole=whole))
 
 
 def detached(log: int | None = None) -> int:
@@ -425,9 +427,13 @@ def _quiet() -> None:
         signal.signal(number, signal.SIG_IGN)
 
 
-def relay(child: int, *, forward: bool, terminal: int | None, guard: Guard | None = None) -> int:
+def relay(child: int, *, forward: bool, terminal: int | None, guard: Guard | None = None,
+          whole: bool = False) -> int:
     """Wait for `child`, forwarding signals, and die or exit as it does.
     With `guard`, answer the child's connection checks meanwhile (Linux).
+    `whole`: the child leads a process group no terminal signals (`become`'s
+    `group`), so a signal is passed to all of it, as the terminal would have,
+    and what the child started ends with it.
 
     Returns only when dying by the child's signal didn't take (a signal
     whose default is to be ignored), with 128 + the signal, as shells report.
@@ -445,8 +451,11 @@ def relay(child: int, *, forward: bool, terminal: int | None, guard: Guard | Non
     _quiet()  # a gate kept in the caller's own process too; `forward` overrides below
 
     def pass_on(number: int, _frame: object) -> None:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(child, number)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            if whole:
+                os.killpg(child, number)
+            else:
+                os.kill(child, number)
 
     def resumed(number: int, _frame: object) -> None:
         # The shell continued this job: give the child back the terminal
@@ -606,6 +615,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--child", type=int, required=True)
     parser.add_argument("--forward", action="store_true")
     parser.add_argument("--terminal", action="store_true")
+    parser.add_argument("--group", action="store_true")
     parser.add_argument("--notify", type=int, default=None)
     parser.add_argument("--detach", action="store_true")
     parser.add_argument("--log", type=int, default=None)
@@ -628,4 +638,5 @@ def main(argv: Sequence[str] | None = None) -> int:
         if guard is not None:
             guard.serve()
         return 0
-    return relay(args.child, forward=args.forward, terminal=0 if args.terminal else None, guard=guard)
+    return relay(args.child, forward=args.forward, terminal=0 if args.terminal else None, guard=guard,
+                 whole=args.group)

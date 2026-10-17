@@ -25,7 +25,7 @@ from typing import Any, NoReturn
 
 from . import log
 from .error import Error, Failed, Invalid, Sealed, Unsupported
-from .policy import Policy, preset, presets, scratch, trust_copy, under
+from .policy import Policy, changed, preset, presets, scratch, trust_copy, under
 
 __all__ = ["back", "on", "probe", "run", "sealed", "spawn"]
 
@@ -632,6 +632,11 @@ def _unchanged(plan: Policy) -> None:
                     f"{item} now leads somewhere else ({os.path.realpath(item)}) than when the policy was "
                     f"checked, so hlyn won't seal it. Check what changed it, then run again."
                 )
+            if changed(item):
+                raise Invalid(
+                    f"{item} is now a different folder than the one the policy checked (it was replaced), "
+                    f"so hlyn won't seal it. Check what changed it, then run again."
+                )
 
 
 def run(fn: Callable[[], Any], policy: object = None, *, keep_fds: Sequence[int] = (), **edits: Any) -> Any:
@@ -711,6 +716,7 @@ def run(fn: Callable[[], Any], policy: object = None, *, keep_fds: Sequence[int]
                     _seal(plan, found=_warn(plan), closed=closed)
 
                 if not watch:
+                    _own_group()
                     _child(fn, plain, write)
                 gate.become(lambda: _child(fn, plain, write), forward=gate.DUTY, isolate=False,
                             group=gate.DUTY, close=[write], fresh=not alone, log=told)
@@ -732,15 +738,38 @@ def run(fn: Callable[[], Any], policy: object = None, *, keep_fds: Sequence[int]
         if told is not None:
             os.close(told)
             told = None
-        body, over = _collect(read)
-        if over:
-            _stop(kid)
-            raise Failed(
-                f"the confined child's result went over the {_LIMIT >> 20} MiB size limit, "
-                f"so hlyn stopped it. "
-                f"Write big results to a file the policy grants (--write) and return its name."
-            )
-        _, status = os.waitpid(kid, 0)
+        alone_in_group = sys.platform == "linux" and share is None and not watch  # as `_own_group`
+        if alone_in_group:
+            with contextlib.suppress(OSError):
+                os.setpgid(kid, kid)  # both sides set it, so neither order loses
+        try:
+            body, over = _collect(read)
+            if over:
+                _stop(kid, alone_in_group)
+                raise Failed(
+                    f"the confined child's result went over the {_LIMIT >> 20} MiB size limit, "
+                    f"so hlyn stopped it. "
+                    f"Write big results to a file the policy grants (--write) and return its name."
+                )
+            _, status = os.waitpid(kid, 0)
+        except BaseException as stopped:
+            # A caller that is interrupted (or fails) ends the run: the child, or its
+            # gate, which passes the signal on. Out of the caller's group, the child
+            # no longer gets the terminal's Ctrl-C with it, so Ctrl-C is passed on
+            # first, as the terminal would have, and the child may finish itself.
+            import signal
+
+            if not isinstance(stopped, KeyboardInterrupt):
+                order = (signal.SIGTERM, signal.SIGKILL)
+            elif alone_in_group:
+                order = (signal.SIGINT, signal.SIGTERM, signal.SIGKILL)
+            else:
+                # A gate stands between: the terminal's Ctrl-C reached it too, and it
+                # passes it on. Give it two seconds before ending the run ourselves.
+                order = (0, signal.SIGTERM, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError, ProcessLookupError):
+                _stop(kid, alone_in_group, order)
+            raise
     finally:
         if share is not None:
             share.release(port)
@@ -802,15 +831,36 @@ def _collect(fd: int) -> tuple[bytes, bool]:
         os.close(fd)
 
 
-def _stop(pid: int) -> None:
-    """End a child that wrote too much and reap it: ask (a gate passes it on to
-    the confined program), then insist."""
+def _own_group() -> None:
+    """In the confined child, when nothing sits between it and its caller: its
+    own process group (Linux). Before Linux 7.2 a confined program can send
+    SIGIO to a group it shares with the unconfined caller, past Landlock's
+    signal scope (`F_SETOWN`); in a group of its own there is nobody else to
+    reach. `run` ends the group if the caller is interrupted."""
+    if sys.platform == "linux":
+        with contextlib.suppress(OSError):
+            os.setpgid(0, 0)
+
+
+def _stop(pid: int, group: bool = False, order: tuple[int, ...] | None = None) -> None:
+    """End a child that wrote too much, or whose caller was interrupted, and
+    reap it: ask (a gate passes it on to the confined program), then insist.
+    `group`: the child leads a process group of its own; end all of it.
+    `order`: the signals to try, each given two seconds (0: only wait)."""
     import signal
     import time
 
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    for sig in order or (signal.SIGTERM, signal.SIGKILL):
         with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, sig)
+            try:
+                if sig == 0:
+                    pass  # only wait: someone else was sent the signal
+                elif group:
+                    os.killpg(pid, sig)
+                else:
+                    os.kill(pid, sig)
+            except PermissionError:
+                os.kill(pid, sig)  # a group already gone (a zombie leader): the child alone
         end = time.monotonic() + 2
         while time.monotonic() < end:
             if os.waitpid(pid, os.WNOHANG)[0]:

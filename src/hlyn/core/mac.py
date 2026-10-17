@@ -28,7 +28,7 @@ import sys
 from collections.abc import Iterable
 
 from ..error import Failed, Invalid, Unsupported
-from ..policy import Policy
+from ..policy import Policy, changed
 from ..report import SERVICES, Listener
 
 __all__ = ["HOSTS", "hosts", "listen", "load", "probe", "profile", "ready", "seal"]
@@ -285,6 +285,11 @@ def where(paths: Iterable[str], refused: list[str] | None = None,
                 raise Invalid(
                     f"{path} now leads somewhere else ({os.path.realpath(path)}) than when the policy "
                     f"was checked, so hlyn won't seal it. Check what changed it, then run again."
+                )
+            if changed(item):
+                raise Invalid(
+                    f"{path} is now a different folder than the one the policy checked (it was replaced), "
+                    f"so hlyn won't seal it. Check what changed it, then run again."
                 )
         else:
             item = real(path)

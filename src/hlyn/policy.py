@@ -94,11 +94,43 @@ def paths(value: object, field: str) -> tuple[str, ...] | bool:
 _KEPT: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar("hlyn_kept", default=frozenset())
 
 
+# Which folder or file each resolved grant was when it was resolved: (device,
+# inode) by real path. A grant is a path, and a path can name a different folder
+# a moment later (one renamed over the other, no link involved); `jail._unchanged`
+# compares, so what is sealed is what was checked. Refreshed every time a policy
+# resolves the path, so it names what the last resolution saw.
+_SEEN: dict[str, tuple[int, int]] = {}
+
+
+def identity(path: str) -> tuple[int, int] | None:
+    """(device, inode) of what `path` is now, without following a link, or None."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def changed(path: str) -> bool:
+    """Whether `path` is no longer the folder or file it was when a policy resolved it."""
+    was = _SEEN.get(path)
+    return was is not None and identity(path) not in (None, was)
+
+
+def remember(path: str) -> None:
+    now = identity(path)
+    if now is not None:
+        _SEEN[path] = now
+
+
 def real(value: tuple[str, ...] | bool) -> tuple[str, ...] | bool:
     """The same grants by real path: each link resolved to what it names."""
     if isinstance(value, bool):
         return value
-    return prune(os.path.realpath(item) for item in value)
+    out = prune(os.path.realpath(item) for item in value)
+    for item in out:
+        remember(item)
+    return out
 
 
 def linked(value: object) -> list[tuple[str, str]]:
@@ -961,6 +993,7 @@ class Policy:
                         f"folder of its own; name a new folder, or give an existing one with --write."
                     )
             put(self, "tmp", typed if "tmp" in kept else os.path.realpath(typed))
+            remember(str(self.tmp))
         if not isinstance(self.log, (bool, str)):
             raise Invalid(f"log: expected a bool or a file path, got {self.log!r}.")
         if not isinstance(self.shm, bool):
