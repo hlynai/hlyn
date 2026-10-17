@@ -613,7 +613,9 @@ def scratch(path: str) -> str:
     folder above it, `/`, or a place keys live. Checked on the folder opened,
     not on its name.
     """
-    from .secret import credential
+    import time
+
+    from .secret import HOMES, LOOKS, TIME, _walk, credential, secret_file
 
     typed = os.path.abspath(os.path.expanduser(path))
     with contextlib.suppress(FileExistsError):
@@ -634,8 +636,14 @@ def scratch(path: str) -> str:
         why = "other users can write it, so names in it could be planted for hlyn to write through"
     elif real == os.sep or under(home, real):
         why = "it is your home folder or holds it"
-    elif credential(real):
+    elif credential(real) or any(real.endswith(os.sep + item) for item in HOMES):
         why = "keys or tokens live there"
+    else:
+        # Whatever home it is in: a key folder outside $HOME, or keys put in it.
+        budget = [LOOKS, time.monotonic() + TIME]
+        found = next((entry.name for entry in _walk(real, budget) if secret_file(entry.path)), None)
+        if found:
+            why = f"it holds {found}, and the agent gets the whole folder"
     if why:
         raise Invalid(
             f"tmp: {path} can't be the agent's scratch folder: {why}. Name a new folder of your own "
@@ -914,8 +922,16 @@ class Policy:
         if not isinstance(self.tmp, (bool, str)):
             raise Invalid(f"tmp: expected a bool or a directory, got {self.tmp!r}.")
         if isinstance(self.tmp, str):
-            # A read and write grant like any other: by real path.
+            # A read and write grant like any other: by real path. Unlike them,
+            # never through a link: a scratch folder has no reason to be one,
+            # and a link is how an existing folder would be passed off as one.
             typed = _one(self.tmp, "tmp")
+            if "tmp" not in kept:
+                for _, target in linked([typed]):
+                    raise Invalid(
+                        f"tmp: {self.tmp} is a link (to {target}). The agent's scratch folder must be a "
+                        f"folder of its own; name a new folder, or give an existing one with --write."
+                    )
             put(self, "tmp", typed if "tmp" in kept else os.path.realpath(typed))
         if not isinstance(self.log, (bool, str)):
             raise Invalid(f"log: expected a bool or a file path, got {self.log!r}.")

@@ -138,14 +138,22 @@ def test_with_the_log_outside_the_agent_cannot_unlink_or_replace_it(tmp_path):
 # -- tmp: a read and write grant like any other ------------------------------
 
 
-def test_a_tmp_naming_a_link_is_stored_and_granted_as_its_target(tree):
-    project, secrets = tree
-    plan = Policy(tmp=str(project / "src"))
-    reads, writes = plan.reads(), plan.writes()
+def test_a_tmp_naming_a_link_is_refused(tree):
+    # A scratch folder has no reason to be a link; one is how an existing folder
+    # (here, the secrets) would be passed off as scratch space.
+    project, _ = tree
+    with pytest.raises(Invalid, match="is a link") as error:
+        Policy(tmp=str(project / "src"))
+    print(error.value)
+
+
+def test_a_tmp_is_stored_and_granted_by_real_path(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    plan = Policy(tmp=str(scratch))
     print("tmp:", plan.tmp)
-    assert plan.tmp == os.path.realpath(secrets)
-    assert os.path.realpath(secrets) in reads and os.path.realpath(secrets) in writes
-    assert str(project / "src") not in reads and str(project / "src") not in writes
+    assert plan.tmp == os.path.realpath(scratch)
+    assert plan.tmp in plan.reads() and plan.tmp in plan.writes()
 
 
 def test_a_tmp_swapped_for_a_link_after_the_check_is_not_sealed(tree, tmp_path):
@@ -160,19 +168,26 @@ def test_a_tmp_swapped_for_a_link_after_the_check_is_not_sealed(tree, tmp_path):
     print(error.value)
 
 
-@pytest.mark.parametrize("kind", ["key folder", "home", "shared", "someone's /"])
+@pytest.mark.parametrize("kind", ["a key folder outside $HOME", "a folder holding a key", "home", "shared",
+                                  "someone's /"])
 def test_a_tmp_that_is_no_place_for_scratch_is_refused(tmp_path, monkeypatch, kind):
-    home = tmp_path / "home"
-    (home / ".ssh").mkdir(parents=True, mode=0o700)
-    (home / ".ssh" / "id_ed25519").write_text("KEY")
+    # $HOME is left alone except for "home": a key folder must be refused
+    # wherever it is, by its name or by what is in it (as an outside probe found).
+    elsewhere = tmp_path / "fake-home"
+    (elsewhere / ".ssh").mkdir(parents=True, mode=0o700)
+    (elsewhere / ".ssh" / "id_ed25519").write_text("KEY")
+    keyed = tmp_path / "work"
+    (keyed / "deep" / "er").mkdir(parents=True, mode=0o700)
+    keyed.chmod(0o700)
+    (keyed / "deep" / "er" / ".env").write_text("OPENAI_API_KEY=sk-test\n")
     shared = tmp_path / "shared"
     shared.mkdir()
     shared.chmod(0o777)
-    monkeypatch.setenv("HOME", str(home))
-    target = {"key folder": home / ".ssh", "home": home, "shared": shared, "someone's /": "/"}[kind]
-    link = tmp_path / "scratch"
-    os.symlink(target, link)
-    plan = Policy(tmp=str(link), log=False)
+    if kind == "home":
+        monkeypatch.setenv("HOME", str(elsewhere))
+    target = {"a key folder outside $HOME": elsewhere / ".ssh", "a folder holding a key": keyed,
+              "home": elsewhere, "shared": shared, "someone's /": "/"}[kind]
+    plan = Policy(tmp=str(target), log=False)
     with pytest.raises(Invalid, match="can't be the agent's scratch folder") as error:
         jail._scratch(plan)
     print(error.value)
@@ -183,15 +198,13 @@ def test_a_tmp_that_is_no_place_for_scratch_is_refused(tmp_path, monkeypatch, ki
 
 @REAL
 def test_a_confined_program_cannot_reach_keys_through_a_tmp_link(tmp_path):
-    home = tmp_path / "home"
+    home = tmp_path / "fake-home"  # not $HOME, as in the outside probe
     (home / ".ssh").mkdir(parents=True, mode=0o700)
     (home / ".ssh" / "id_ed25519").write_text("TOPSECRET")
     link = tmp_path / "scratch"
     os.symlink(home / ".ssh", link)
     done = boot(
         f"""
-        import os
-        os.environ["HOME"] = {str(home)!r}
         import hlyn
         try:
             print("READ", hlyn.run(lambda: open({str(link / "id_ed25519")!r}).read(),
