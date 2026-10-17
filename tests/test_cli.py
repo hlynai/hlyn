@@ -213,7 +213,8 @@ def test_flags_add_to_a_policy_file_never_replace_it(tmp_path):
         "--intent", "--json",
     ).stdout)
     assert out["net"] == [443, 8080]
-    assert set(out["exec"]) == {"/usr/bin/true", "/bin/ls"}
+    # By real path, as the kernel grants them (`/bin` is `/usr/bin` on merged-/usr Linux).
+    assert set(out["exec"]) == {os.path.realpath("/usr/bin/true"), os.path.realpath("/bin/ls")}
     assert set(out["env"]) == {"A", "B"}
 
 

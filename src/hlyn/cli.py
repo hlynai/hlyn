@@ -156,7 +156,7 @@ def _policy(args: argparse.Namespace, start: Policy | None = None) -> Policy:
     # is not the path that was typed.
     from .policy import linked
 
-    for flag, typed in (("--read", args.read), ("--write", args.write)):
+    for flag, typed in (("--read", args.read), ("--write", args.write), ("--exec", args.exec)):
         for name, target in linked(typed or ()):
             print(f"hlyn: {flag} {name} is a link; granting what it names: {target}", file=sys.stderr)
     if args.read:
@@ -533,7 +533,9 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
         if plan.tmp is True:
             plan = plan.with_(tmp=tempfile.mkdtemp(prefix="hlyn-"))
         if isinstance(plan.tmp, str):
-            os.makedirs(plan.tmp, exist_ok=True)
+            from .policy import scratch
+
+            scratch(plan.tmp)  # a caller's folder: private, theirs, not home or keys
             blocked = report.Blocked.start(plan.tmp, (brief or {}).get("hide"))
     # Everything from here on is undone on the way out, however it goes: a
     # Ctrl-C while the macOS listener is starting would otherwise leave its
@@ -1047,7 +1049,7 @@ def _log(plan: Policy) -> None:
     if plan.log is False:
         log.off()
     elif isinstance(plan.log, str):
-        log.sink(plan.log)
+        log.sink(plan.log, plan.writes())
     else:
         log.sink(True)
 

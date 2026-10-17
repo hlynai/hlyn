@@ -21,13 +21,16 @@ be talked out of. `hlyn run` hears them from outside instead, and writes a
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
+import stat
 import sys
 import time
+from collections.abc import Iterable
 from typing import Any, TextIO
 
-__all__ = ["allow", "deny", "emit", "fileno", "line", "off", "seal", "sink", "totals"]
+__all__ = ["allow", "deny", "emit", "fileno", "line", "off", "record", "seal", "sink", "totals"]
 
 
 _where: TextIO | None = None
@@ -45,8 +48,12 @@ _seen: dict[str, int] = {}
 LIMIT = 10_000
 
 
-def sink(target: bool | str | TextIO = True) -> None:
-    """Choose where records go: stderr, a file path, an open stream, or off."""
+def sink(target: bool | str | TextIO = True, writable: Iterable[str] | bool = ()) -> None:
+    """Choose where records go: stderr, a file path, an open stream, or off.
+
+    A path is opened through `record`, which refuses a link, a file with a
+    second name, and a file inside `writable` (the agent's write grants).
+    """
     global _where, _on
     if target is False:
         _on = False
@@ -57,10 +64,101 @@ def sink(target: bool | str | TextIO = True) -> None:
     elif isinstance(target, str):
         # Held open for the life of the process on purpose: this is a sink,
         # not a one-shot write, and reopening per record would lose ordering
-        # between agents sharing a file.
-        _where = open(target, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
+        # between agents sharing a file. A copy of `record`'s descriptor, so
+        # every writer in this process writes through the one file checked.
+        _where = os.fdopen(os.dup(record(target, writable)), "a", buffering=1, encoding="utf-8")
     else:
         _where = target
+
+
+# The record's descriptor, per path, opened once by `record`, with the file's
+# identity: a process that closes descriptors before sealing (`fds.shut`) may
+# reuse the number for something else.
+_held: dict[str, int] = {}
+_ids: dict[str, tuple[int, int]] = {}
+
+
+def record(path: str, writable: Iterable[str] | bool = ()) -> int:
+    """The descriptor the record at `path` is written through, opened once.
+
+    Every channel (this module's sink, the proxy's and the gate's denials)
+    writes through this one descriptor, so they all write the file that was
+    checked, and only it:
+
+    - The folder is opened first and the file opened relative to it with
+      `O_NOFOLLOW`: a link as the last component is refused (`ELOOP`), and a
+      link swapped in for a folder after the check can't redirect the open,
+      since what is checked is the folder actually opened.
+    - The opened file must be a regular file with one name (`st_nlink == 1`):
+      a hard link elsewhere would be a second way in.
+    - The opened folder, by its real path, must be outside every `writable`
+      grant: the agent could otherwise unlink the file and leave a forgery.
+
+    Raises `ValueError` (`policy.Invalid`) with what to change.
+    """
+    from .error import Invalid
+    from .policy import under
+
+    key = os.path.abspath(os.path.expanduser(path))
+    if key in _held:
+        try:
+            info = os.fstat(_held[key])
+            if (info.st_dev, info.st_ino) == _ids[key]:
+                return _held[key]
+        except OSError:
+            pass
+        # Closed since (or the number reused): open and check it again.
+        del _held[key]
+    folder, name = os.path.split(key)
+    directory = os.open(folder or os.sep, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_CLOEXEC)
+    try:
+        try:
+            fd = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                         dir_fd=directory)
+        except OSError as error:
+            if error.errno == errno.ELOOP:  # O_NOFOLLOW met a link
+                raise Invalid(f"log: {path} is a link. hlyn writes the record only to a plain file; "
+                              f"name a file, not a link.") from None
+            raise
+        where = _folder(directory, folder)
+    finally:
+        os.close(directory)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise Invalid(f"log: {path} is not a regular file. Name a file.")
+        if info.st_nlink != 1:
+            raise Invalid(f"log: {path} has another name (a hard link), and the agent could write it "
+                          f"through that one. Use a new file.")
+        if writable is True:
+            raise Invalid(f"log: the agent can write every folder (write=True), so it could replace "
+                          f"{path}. Use a narrower write grant, or no log file.")
+        root = next((item for item in writable or () if under(where, os.path.realpath(item))), None)
+        if root:
+            raise Invalid(f"log: {path} is inside {root}, which the agent can write: it could delete the "
+                          f"record and leave a forged one in its place. "
+                          f"Put the log outside every --write folder.")
+    except BaseException:
+        os.close(fd)
+        raise
+    _held[key] = fd
+    _ids[key] = (info.st_dev, info.st_ino)
+    return fd
+
+
+def _folder(directory: int, fallback: str) -> str:
+    """The real path of an open folder: the one actually opened, whatever a
+    name for it leads to now."""
+    if sys.platform == "linux":
+        with contextlib.suppress(OSError):
+            return os.readlink(f"/proc/self/fd/{directory}")
+    if sys.platform == "darwin":
+        import fcntl
+
+        with contextlib.suppress(OSError, AttributeError):
+            found = fcntl.fcntl(directory, fcntl.F_GETPATH, bytes(1024))
+            return os.fsdecode(found.split(b"\0", 1)[0])
+    return os.path.realpath(fallback)
 
 
 def off() -> None:

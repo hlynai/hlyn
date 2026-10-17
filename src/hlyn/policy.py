@@ -602,6 +602,46 @@ def network() -> tuple[str, ...]:
     return prune(os.path.abspath(item) for item in out if os.path.exists(item))
 
 
+def scratch(path: str) -> str:
+    """Make sure a caller-named `tmp` folder is fit to be the agent's scratch
+    space, creating it if missing; return its real path.
+
+    `tmp` is a read and write grant the agent gets whole, and hlyn writes
+    files into it (the certificate copy, the blocked list). So it must be a
+    folder this user owns that no one else can write (a shared folder could
+    hold names planted for hlyn to write through), and not the home folder, a
+    folder above it, `/`, or a place keys live. Checked on the folder opened,
+    not on its name.
+    """
+    from .secret import credential
+
+    typed = os.path.abspath(os.path.expanduser(path))
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(typed, 0o700)
+    folder = os.open(typed, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_CLOEXEC)
+    try:
+        info = os.fstat(folder)
+    finally:
+        os.close(folder)
+    real = os.path.realpath(typed)
+    home = os.path.realpath(os.path.expanduser("~"))
+    why = ""
+    if info.st_uid != os.getuid():
+        why = "it belongs to another user"
+    elif info.st_mode & 0o022:
+        why = "other users can write it, so names in it could be planted for hlyn to write through"
+    elif real == os.sep or under(home, real):
+        why = "it is your home folder or holds it"
+    elif credential(real):
+        why = "keys or tokens live there"
+    if why:
+        raise Invalid(
+            f"tmp: {path} can't be the agent's scratch folder: {why}. Name a new folder of your own "
+            f"(hlyn creates it), or leave tmp unset for a fresh private one."
+        )
+    return real
+
+
 def trusted(path: str) -> bool:
     """True if `path` is inside one of the system's own trust stores."""
     real = os.path.realpath(path)
@@ -646,7 +686,13 @@ def trust_copy(env: dict[str, str], box: str | None) -> dict[str, str]:
             out[name] = target
         else:
             target = os.path.join(box, "hlyn-certs")
-            os.makedirs(target, mode=0o700, exist_ok=True)
+            try:
+                os.mkdir(target, 0o700)  # new, not a planted folder or link
+            except FileExistsError:
+                raise Invalid(
+                    f"tmp: {target} already exists, so hlyn won't put the certificate copies there. "
+                    f"Give the agent a new, empty scratch folder (or leave tmp unset)."
+                ) from None
             for base, data in copies:
                 _write(os.path.join(target, base), data)
             out[name] = target
@@ -682,30 +728,92 @@ def _cert_copies(name: str, item: str) -> list[tuple[str, bytes]]:
         data = _cert_bytes(path)
         if data is None:
             raise Invalid(
-                f"{name}: {path} is not a certificate (or holds a private key). hlyn won't hand it to "
-                f"the agent. Point {name} at certificates only, or unset it."
+                f"{name}: {path} holds something besides certificates (a key, text outside the "
+                f"BEGIN/END blocks, or a damaged block). hlyn won't hand it to the agent. Point {name} at "
+                f"certificates only, or unset it."
             )
         out.append((base, data))
     return out
 
 
 def _cert_bytes(path: str) -> bytes | None:
-    """The file's bytes if it holds certificates or revocation lists and no
-    private key, read once; None otherwise."""
+    """The certificates and revocation lists in the file, read once and rebuilt
+    from what was parsed; None if it holds anything else.
+
+    Only the blocks themselves reach the copy, re-encoded from their decoded
+    bytes, never the text around them: a bundle with a certificate and then
+    `TOKEN=...` gives a copy with the certificate alone. Each block must be a
+    known label, matched at both ends, with a body that is base64 and decodes
+    to DER (a SEQUENCE); a key, an encrypted block or a damaged one refuses the
+    whole file. Text between blocks (comments, OpenSSL's "explanatory text",
+    which macOS's own bundle has) is dropped.
+    """
     try:
         with open(path, "rb") as handle:
             data = handle.read(CERT_BYTES + 1)
     except OSError:
         return None
-    if len(data) > CERT_BYTES or b"PRIVATE KEY" in data:
+    if len(data) > CERT_BYTES:
         return None
-    return data if any(mark in data for mark in CERT_MARKS) else None
+    return pem_blocks(data)
+
+
+def pem_blocks(data: bytes, strict: bool = False) -> bytes | None:
+    """`data` rebuilt from its certificate and CRL blocks alone, or None if a
+    block is anything else (see `_cert_bytes`). `strict` also refuses text
+    between blocks other than `#` comments and blank lines: for a file granted
+    as it is rather than copied, where that text would be readable."""
+    import base64
+    import binascii
+
+    out: list[bytes] = []
+    label: bytes | None = None
+    body: list[bytes] = []
+    for raw in data.splitlines():
+        line = raw.strip()
+        if label is None:
+            if not (line.startswith(b"-----BEGIN ") and line.endswith(b"-----")):
+                if line.startswith(b"-----") or (strict and line and not line.startswith(b"#")):
+                    return None
+                continue
+            label = line[len(b"-----BEGIN "):-len(b"-----")]
+            if label not in CERT_LABELS:
+                return None
+            body = []
+            continue
+        if line == b"-----END " + label + b"-----":
+            try:
+                der = base64.b64decode(b"".join(body), validate=True)
+            except (binascii.Error, ValueError):
+                return None
+            if len(der) < 2 or der[0] != 0x30:  # DER: a SEQUENCE
+                return None
+            encoded = base64.encodebytes(der).replace(b"\n", b"")
+            lines = [encoded[i:i + 64] for i in range(0, len(encoded), 64)]
+            out.append(b"-----BEGIN " + label + b"-----\n" + b"\n".join(lines)
+                       + b"\n-----END " + label + b"-----\n")
+            label = None
+            continue
+        if not line or line.startswith(b"-----") or b":" in line:  # headers mean encryption
+            return None
+        body.append(line)
+    if label is not None or not out:
+        return None
+    return b"".join(out)
 
 
 def _write(path: str, data: bytes) -> None:
-    """Write a fresh file only this user can read; never follow a link."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o600)
+    """Write a new file only this user can read. Never through a link, and never
+    into a file that already exists: `O_EXCL` refuses both, so a planted name
+    (a link, or a hard link to a file elsewhere) can't be truncated."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        raise Invalid(
+            f"tmp: {path} already exists, so hlyn won't write the certificate copy there. "
+            f"Give the agent a new, empty scratch folder (or leave tmp unset)."
+        ) from None
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)
 
@@ -713,17 +821,18 @@ def _write(path: str, data: bytes) -> None:
 # A certificate file is small; a folder of them a few hundred files.
 CERT_BYTES = 4 << 20
 CERT_FILES = 2000
-CERT_MARKS = (
-    b"-----BEGIN CERTIFICATE-----",
-    b"-----BEGIN TRUSTED CERTIFICATE-----",
-    b"-----BEGIN X509 CRL-----",
-)
+CERT_LABELS = frozenset({b"CERTIFICATE", b"TRUSTED CERTIFICATE", b"X509 CRL"})
 
 
 def _cert_file(path: str) -> bool:
-    """True if `path` is a PEM file of certificates or revocation lists and
-    holds no private key."""
-    return _cert_bytes(path) is not None
+    """True if `path` is a PEM file of certificates or revocation lists only,
+    comments aside: it is granted as it is, so nothing else may be in it."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(CERT_BYTES + 1)
+    except OSError:
+        return False
+    return len(data) <= CERT_BYTES and pem_blocks(data, strict=True) is not None
 
 
 def _certs(path: str) -> bool:
@@ -789,19 +898,23 @@ class Policy:
 
     def __post_init__(self) -> None:
         put = object.__setattr__  # frozen dataclass, so assign through the base
-        # Read and write grants are stored by real path: the kernel grants what
-        # a link points at, so the policy, `hlyn show` and the seal record name
-        # that, not the link. `linked` lists the ones that were links, for the CLI
-        # to say so.
+        # Every path grant is stored by real path: the kernel grants what a link
+        # points at (Landlock opens it, Seatbelt resolves it), so the policy,
+        # `hlyn show` and the seal record name that, not the link. `linked` lists
+        # the ones that were links, for the CLI to say so; `jail._unchanged`
+        # checks them again just before the seal.
         kept = _KEPT.get()
-        for field in ("read", "write"):
+        for field in ("read", "write", "exec"):
             value = paths(getattr(self, field), field)
             put(self, field, value if field in kept else real(value))
-        put(self, "exec", paths(self.exec, "exec"))
         put(self, "net", ports(self.net))
         put(self, "env", names(self.env))
         if not isinstance(self.tmp, (bool, str)):
             raise Invalid(f"tmp: expected a bool or a directory, got {self.tmp!r}.")
+        if isinstance(self.tmp, str):
+            # A read and write grant like any other: by real path.
+            typed = _one(self.tmp, "tmp")
+            put(self, "tmp", typed if "tmp" in kept else os.path.realpath(typed))
         if not isinstance(self.log, (bool, str)):
             raise Invalid(f"log: expected a bool or a file path, got {self.log!r}.")
         if not isinstance(self.shm, bool):
@@ -818,7 +931,22 @@ class Policy:
         at that path, and whoever opens the path later reads the forgery. So the
         folder must be outside every grant.
         """
-        folder = os.path.realpath(os.path.dirname(os.path.abspath(os.path.expanduser(where))))
+        path = os.path.abspath(os.path.expanduser(where))
+        # The file itself, not only its folder: a link (or a second name, a
+        # hard link) can put the record inside a writable grant while its
+        # folder is outside. `log.record` checks the opened file again.
+        if os.path.islink(path):
+            raise Invalid(
+                f"log: {where} is a link (to {os.path.realpath(path)}). hlyn writes the record "
+                f"only to a plain file, so it can't be redirected. Name a file, not a link."
+            )
+        with contextlib.suppress(OSError):
+            if os.stat(path).st_nlink > 1:
+                raise Invalid(
+                    f"log: {where} has another name (a hard link), and the agent could write it "
+                    f"through that one. Use a new file."
+                )
+        folder = os.path.realpath(os.path.dirname(path))
         granted = self.writes()
         if granted is True:
             root = "every folder (write=True)"
@@ -917,7 +1045,7 @@ class Policy:
         link swapped in since, and `jail._unchanged` could then no longer see
         that the folder shown is not the folder about to be sealed.
         """
-        token = _KEPT.set(frozenset({"read", "write"}) - set(edits))
+        token = _KEPT.set(frozenset({"read", "write", "exec", "tmp"}) - set(edits))
         try:
             return replace(self, **edits)  # type: ignore[arg-type]
         finally:

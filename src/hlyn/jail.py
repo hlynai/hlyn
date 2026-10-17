@@ -24,7 +24,7 @@ from typing import Any, NoReturn
 
 from . import log
 from .error import Failed, Invalid, Sealed, Unsupported
-from .policy import Policy, preset, presets, trust_copy, under
+from .policy import Policy, preset, presets, scratch, trust_copy, under
 
 __all__ = ["back", "on", "probe", "run", "sealed", "spawn"]
 
@@ -116,11 +116,12 @@ def _scratch(policy: Policy) -> tuple[Policy, str | None]:
     which is why it can be on by default without weakening deny-by-default.
     """
     if policy.tmp is True:
-        box = tempfile.mkdtemp(prefix="hlyn-")
-        return policy.with_(tmp=box), box
+        made = policy.with_(tmp=tempfile.mkdtemp(prefix="hlyn-"))
+        return made, str(made.tmp)  # by real path, as the policy stores it
     if isinstance(policy.tmp, str):
-        os.makedirs(policy.tmp, exist_ok=True)
-        return policy, policy.tmp
+        # Checked as the folder it is now: created private if missing, refused
+        # if shared, someone else's, or a home or key folder (`policy.scratch`).
+        return policy, scratch(policy.tmp)
     return policy, None
 
 
@@ -322,7 +323,9 @@ def _denials(plan: Policy) -> Iterator[int | None]:
         yield None
         return
     if isinstance(plan.log, str):
-        opened = os.open(plan.log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        # A copy of the one descriptor `log.record` opened and checked, so the
+        # helpers write the same file as this process, never one found by name.
+        opened = os.dup(log.record(plan.log, plan.writes()))
         try:
             yield opened
         finally:
@@ -530,7 +533,7 @@ def _seal(
     if plan.log is False:
         log.off()
     elif isinstance(plan.log, str):
-        log.sink(plan.log)
+        log.sink(plan.log, plan.writes())
     if found:
         log.emit("exposed", paths=found[:20])
 
@@ -561,7 +564,7 @@ def _seal(
 
 
 def _unchanged(plan: Policy) -> None:
-    """Refuse if a grant stopped being the folder that was checked.
+    """Refuse if a grant (read, write, exec or tmp) stopped being the path that was checked.
 
     Grants are stored by real path when the policy is built (`policy.real`),
     which is what `hlyn show` and `hlyn claude`'s table display. Between that
@@ -569,7 +572,8 @@ def _unchanged(plan: Policy) -> None:
     grant wherever the link points. Checked again here, the last step before
     the kernel is told, so what was shown is what is sealed.
     """
-    for field in (plan.read, plan.write):
+    tmp = (plan.tmp,) if isinstance(plan.tmp, str) else ()
+    for field in (plan.read, plan.write, plan.exec, tmp):
         for item in field if isinstance(field, tuple) else ():
             if os.path.lexists(item) and os.path.realpath(item) != item:
                 raise Invalid(

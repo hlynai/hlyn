@@ -357,3 +357,86 @@ def test_a_trust_store_inside_a_write_grant_still_hands_the_agent_the_checked_co
     )
     print(done.stdout, done.stderr)
     assert "copy: ['corp.pem'] is the original: False" in done.stdout, done.stdout + done.stderr
+
+
+# A trust store is copied as the blocks it parses to, never as the file's bytes:
+# what reaches the agent is certificates and revocation lists, re-encoded.
+CRL = "-----BEGIN X509 CRL-----\nMAMCAQA=\n-----END X509 CRL-----\n"  # a DER SEQUENCE, enough for the parser
+
+
+@pytest.mark.parametrize("extra", [
+    "AWS_SECRET_ACCESS_KEY=abcd1234SECRET\n",
+    "Certificate:\n    Data:\n        SECRET=abcd1234\n",  # OpenSSL's explanatory text, as macOS's bundle has
+    "# SECRET=abcd1234 in a comment\n",
+])
+def test_text_around_certificates_never_reaches_the_copy(tmp_path, extra):
+    bundle = tmp_path / "corp.pem"
+    bundle.write_text(extra + _a_certificate() + extra + CRL + extra)
+    box = tmp_path / "box"
+    box.mkdir()
+    copy = Path(trust_copy({"SSL_CERT_FILE": str(bundle)}, str(box))["SSL_CERT_FILE"]).read_text()
+    print(repr(copy[:80]), "...", copy.count("-----BEGIN"), "blocks")
+    assert "SECRET" not in copy
+    assert copy.count("-----BEGIN CERTIFICATE-----") == 1 and copy.count("-----BEGIN X509 CRL-----") == 1
+
+
+@pytest.mark.parametrize("bad", [
+    "a private key", "an encrypted key", "an unknown block", "a damaged body", "not DER", "no END",
+    "no blocks",
+])
+def test_a_bundle_with_any_other_block_is_refused(tmp_path, bad):
+    body = {
+        "a private key": KEY,
+        "an encrypted key": ("-----BEGIN ENCRYPTED PRIVATE KEY-----\nMAMCAQA=\n"
+                             "-----END ENCRYPTED PRIVATE KEY-----\n"),
+        "an unknown block": "-----BEGIN SECRET-----\nMAMCAQA=\n-----END SECRET-----\n",
+        "a damaged body": "-----BEGIN CERTIFICATE-----\nnot*base64!\n-----END CERTIFICATE-----\n",
+        "not DER": "-----BEGIN CERTIFICATE-----\nU0VDUkVU\n-----END CERTIFICATE-----\n",  # b"SECRET"
+        "no END": "-----BEGIN CERTIFICATE-----\nMAMCAQA=\n",
+        "no blocks": "just text\n",
+    }[bad]
+    bundle = tmp_path / "corp.pem"
+    bundle.write_text(body if bad == "no blocks" else _a_certificate() + body)
+    box = tmp_path / "box"
+    box.mkdir()
+    with pytest.raises(Invalid, match="holds something besides certificates") as error:
+        trust_copy({"SSL_CERT_FILE": str(bundle)}, str(box))
+    print(bad, "->", error.value)
+    assert list(box.iterdir()) == []
+
+
+def test_several_certificates_all_survive_and_still_load(tmp_path):
+    import ssl
+
+    paths = ssl.get_default_verify_paths()
+    bundle = next((item for item in (paths.openssl_cafile, *TRUST) if item and os.path.isfile(item)), None)
+    if bundle is None:
+        pytest.skip("no certificate bundle on this machine")
+    box = tmp_path / "box"
+    box.mkdir()
+    copy = trust_copy({"SSL_CERT_FILE": bundle}, str(box))["SSL_CERT_FILE"]
+    stats = ssl.create_default_context(cafile=copy).cert_store_stats()
+    original = ssl.create_default_context(cafile=bundle).cert_store_stats()
+    print(bundle, original, "->", copy, stats)
+    assert stats["x509"] == original["x509"] > 1
+
+
+@pytest.mark.parametrize("planted", ["a hard link to another file", "a link", "a link for the folder"])
+def test_a_planted_name_in_the_scratch_folder_is_never_written_through(tmp_path, planted):
+    precious = tmp_path / "precious.txt"
+    precious.write_text("PRECIOUS")
+    box = tmp_path / "box"
+    box.mkdir(mode=0o700)
+    name = "SSL_CERT_DIR" if planted == "a link for the folder" else "SSL_CERT_FILE"
+    if planted == "a hard link to another file":
+        os.link(precious, box / "hlyn-certs.pem")
+    elif planted == "a link":
+        os.symlink(precious, box / "hlyn-certs.pem")
+    else:
+        os.symlink(tmp_path, box / "hlyn-certs")
+    source = _folder(tmp_path, "corp.pem")
+    value = str(source) if name == "SSL_CERT_DIR" else str(source / "corp.pem")
+    with pytest.raises(Invalid, match="already exists") as error:
+        trust_copy({name: value}, str(box))
+    print(planted, "->", error.value)
+    assert precious.read_text() == "PRECIOUS" and not (tmp_path / "corp.pem").exists()

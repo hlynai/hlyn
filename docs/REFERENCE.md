@@ -227,7 +227,7 @@ A policy has seven fields. Each one answers a single question.
 | `exec` | Which programs can it start? | None |
 | `net` | Which hosts (or TCP ports) can it connect to? | None, and no network at all |
 | `env` | Which environment variables survive? | Only a safe list (`PATH`, `HOME`, `LANG`, `TZ`, …) |
-| `tmp` | Does it get a private scratch folder? | Yes, a fresh empty one |
+| `tmp` | Does it get a private scratch folder? `true`, `false`, or a folder of your own, which must be private to you and not your home or a key folder (created if missing) | Yes, a fresh empty one |
 | `log` | Where does the record of what happened go? | stderr |
 
 Every field takes one of the same three shapes:
@@ -244,8 +244,8 @@ A few rules worth knowing:
 - **Writing implies reading what you wrote.** A path in `write` can also be read back.
 - **Paths must exist.** A typo such as `read=["./scr"]` is an error, not a grant that silently matches nothing.
 - **`net` holds hosts or ports, never both.** A port reaches every host on it, so mixing them would make the hosts meaningless; hlyn refuses and names both fixes. See [Hosts in `net`](#hosts-in-net).
-- **Allowing any network also allows what the network needs.** DNS configuration and TLS certificate stores become readable automatically, so `net=["api.openai.com"]` really can make HTTPS requests. Private key folders such as `/etc/ssl/private` are never included. A custom store named by `SSL_CERT_FILE` or `SSL_CERT_DIR` is never granted: the agent gets a private copy in its scratch folder, read once and checked to hold only certificates.
-- **A link is granted as what it names.** `--read ./src`, when `./src` is a symlink, grants its target, and the policy, `hlyn show` and the log name the target; the CLI says so. Grants are checked again just before the seal.
+- **Allowing any network also allows what the network needs.** DNS configuration and TLS certificate stores become readable automatically, so `net=["api.openai.com"]` really can make HTTPS requests. Private key folders such as `/etc/ssl/private` are never included. A custom store named by `SSL_CERT_FILE` or `SSL_CERT_DIR` is never granted: the agent gets a private copy in its scratch folder, rebuilt from the certificate and revocation-list blocks it parses to: text between them is dropped, and a key or a damaged block refuses the run.
+- **A link is granted as what it names.** `--read ./src` (or `--write`, `--exec`, a `tmp` folder), when `./src` is a symlink, grants its target, and the policy, `hlyn show` and the log name the target; the CLI says so. Grants are checked again just before the seal.
 
 ### Hosts in `net`
 
@@ -521,7 +521,7 @@ Flags for `run`, `claude` (all but `-p` and `-f`) and `show`:
 | `--env NAME` | Keep an environment variable (repeatable) |
 | `--env-any` | Keep the whole environment, secrets included |
 | `--no-tmp` | No private scratch folder |
-| `--log PATH` / `--no-log` | Write the log to a file, or nowhere. The file must be outside every `--write` folder, or hlyn refuses to start |
+| `--log PATH` / `--no-log` | Write the log to a file, or nowhere. It must be a plain file (not a link, and with no second name) outside every `--write` folder, or hlyn refuses to start. Every writer, the proxy included, writes through the one descriptor checked |
 
 Only on `run` and `claude`:
 

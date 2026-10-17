@@ -466,7 +466,8 @@ def prepare(env: MutableMapping[str, str]) -> str:
     for path in map(os.path.expanduser, KEEPING):
         if os.path.isdir(os.path.dirname(path)):
             os.makedirs(path, mode=0o700, exist_ok=True)
-    box = tempfile.mkdtemp(prefix="hlyn-claude-")
+    # By its real path, as the policy stores `tmp`, so every name for it agrees.
+    box = os.path.realpath(tempfile.mkdtemp(prefix="hlyn-claude-"))
     env["CLAUDE_CODE_TMPDIR"] = box
     env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
     if _asks_renderer(env):
