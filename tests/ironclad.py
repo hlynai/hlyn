@@ -4,7 +4,7 @@
 
 Only creates synthetic canaries under a fresh temporary directory. Run as a
 regular user with Hlyn installed, preferably in a disposable VM:
-    python tests/crucible.py   (or: python3 -m pytest -vv -rA tests/crucible.py)
+    python tests/ironclad.py   (or: python3 -m pytest -vv -rA tests/ironclad.py)
 
 The probes deliberately attempt the action from inside hlyn.run()'s confined
 child. Host-side code verifies the outcome after the child exits.
@@ -89,10 +89,10 @@ def main() -> int:
                 read=[], write=[], exec=False, net=False, env=False,
                 tmp=str(link), log=False,
             )
-            if state == "RETURNED" and isinstance(value, tuple) and value[0] == "READ" and value[1] == CANARY:
+            if state == "RETURNED" and isinstance(value, (tuple, list)) and value[0] == "READ" and value[1] == CANARY:
                 result("tmp symlink to fake ~/.ssh", "VULNERABLE", "confined child read the synthetic key through tmp")
                 failures += 1
-            elif state == "RETURNED" and isinstance(value, tuple) and value[0] == "BLOCKED":
+            elif state == "RETURNED" and isinstance(value, (tuple, list)) and value[0] == "BLOCKED":
                 result("tmp symlink to fake ~/.ssh", "BLOCKED", f"kernel denied read ({value[1]}, errno={value[2]})")
             elif state == "RAISED":
                 # A policy rejection here is expected on a fixed build; other
@@ -136,10 +136,10 @@ def main() -> int:
                 read=[], write=[], exec=False, net=False, env=False,
                 tmp=False, log=False,
             )
-            if state == "RETURNED" and isinstance(value, tuple) and value[0] == "CONNECTED":
+            if state == "RETURNED" and isinstance(value, (tuple, list)) and value[0] == "CONNECTED":
                 result("TCP to host loopback", "VULNERABLE", f"connected to denied port {tcp_port}")
                 failures += 1
-            elif state == "RETURNED" and isinstance(value, tuple) and value[0] == "BLOCKED":
+            elif state == "RETURNED" and isinstance(value, (tuple, list)) and value[0] == "BLOCKED":
                 result("TCP to host loopback", "BLOCKED", f"kernel denied connection ({value[1]}, errno={value[2]})")
             else:
                 result("TCP to host loopback", "INCONCLUSIVE", f"state={state}, result={value!r}")
@@ -182,7 +182,7 @@ def main() -> int:
             if delivered:
                 result("UDP to host loopback", "VULNERABLE", f"denied datagram reached port {udp_port}")
                 failures += 1
-            elif state == "RETURNED" and isinstance(value, tuple) and value[0] in ("SENT", "BLOCKED"):
+            elif state == "RETURNED" and isinstance(value, (tuple, list)) and value[0] in ("SENT", "BLOCKED"):
                 result("UDP to host loopback", "BLOCKED", "no datagram reached the host-side receiver")
             else:
                 result("UDP to host loopback", "INCONCLUSIVE", f"state={state}, result={value!r}")
@@ -261,6 +261,82 @@ def main() -> int:
                 result("audit log via hard link", "INCONCLUSIVE", f"state={state}, result={value!r}, log={content[:120]!r}")
                 inconclusive += 1
 
+            # The result channel. The child's reply to the parent is untrusted
+            # input: a forged reply (here a valid pickle of a plain value, which
+            # an unpickling parent would accept as the function's return) and an
+            # oversized one must both be refused, and the parent must come out
+            # still in charge of the answer.
+            def forge_reply():
+                import pickle
+                import stat
+
+                data = pickle.dumps(("ok", "FORGED-REPLY-ACCEPTED"))
+                for fd in range(3, 256):
+                    try:
+                        if stat.S_ISFIFO(os.fstat(fd).st_mode):
+                            os.write(fd, data)
+                            os._exit(0)
+                    except OSError:
+                        continue
+                return "NO-PIPE-FOUND"
+
+            state, value = call_hlyn(
+                "forged-reply", forge_reply,
+                read=[], write=[], exec=False, net=False, env=False, tmp=False, log=False,
+            )
+            if state == "RETURNED" and value == "FORGED-REPLY-ACCEPTED":
+                result("forged reply on the result pipe", "VULNERABLE", "the parent accepted bytes the child forged as its return value")
+                failures += 1
+            elif state == "RAISED" and any(word in str(value).lower() for word in ("not a result", "dropped", "nothing")):
+                result("forged reply on the result pipe", "REFUSED", str(value))
+            else:
+                result("forged reply on the result pipe", "INCONCLUSIVE", f"state={state}, result={value!r}")
+                inconclusive += 1
+
+            state, value = call_hlyn(
+                "huge-reply", lambda: "x" * (64 << 20),
+                read=[], write=[], exec=False, net=False, env=False, tmp=False, log=False,
+            )
+            if state == "RETURNED":
+                result("oversized reply", "VULNERABLE", f"the parent took {len(value)} bytes from the child into memory")
+                failures += 1
+            elif state == "RAISED" and "size limit" in str(value):
+                result("oversized reply", "REFUSED", str(value))
+            else:
+                result("oversized reply", "INCONCLUSIVE", f"state={state}, result={value!r}")
+                inconclusive += 1
+
+            # Controls: the same probes against a policy that allows them. A
+            # probe that cannot see a connection when one is permitted cannot
+            # vouch for the blocked ones above.
+            control = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            control.bind(("127.0.0.1", 0))
+            control.listen(1)
+            control_port = control.getsockname()[1]
+
+            def reach_control():
+                client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client.settimeout(2)
+                try:
+                    client.connect(("127.0.0.1", control_port))
+                    return ("CONNECTED", None)
+                except OSError as exc:
+                    return ("BLOCKED", type(exc).__name__, exc.errno)
+                finally:
+                    client.close()
+
+            state, value = call_hlyn(
+                "tcp-control", reach_control,
+                read=[], write=[], exec=False, net=[control_port], env=False, tmp=False, log=False,
+            )
+            control.close()
+            if state == "RETURNED" and isinstance(value, (tuple, list)) and value[0] == "CONNECTED":
+                result("control: TCP to a port the policy names", "CONTROL OK", f"connected to port {control_port}")
+            else:
+                result("control: TCP to a port the policy names", "INCONCLUSIVE",
+                       f"the probe could not connect even where allowed: state={state}, result={value!r}")
+                inconclusive += 1
+
         finally:
             for key, value in saved_ssl.items():
                 if value is None:
@@ -283,7 +359,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-def crucible():
+def ironclad():
     """The probe above, run by the suite: every case must end refused (by the
     policy) or blocked (by the kernel). A confirmed failure or an inconclusive
     case both fail the test, since an inconclusive probe is not a pass."""

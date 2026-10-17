@@ -22,8 +22,12 @@ import time
 import pytest
 from conftest import SRC
 
+# SIGINT is put back to its default first: a suite started in the background
+# (`cmd &`, a CI job runner) inherits it as ignored, and a shell cannot trap a
+# signal that was ignored when it started, so the INT case could never pass there.
 BOOT = textwrap.dedent(f"""
-    import os, sys
+    import os, signal, sys
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     sys.path.insert(0, {SRC!r})
     from hlyn import gate
     cmd = sys.argv[2:]
@@ -109,12 +113,18 @@ def test_the_gate_keeps_the_original_pid_and_the_command_is_its_child():
 @pytest.mark.parametrize("number", [
     signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGUSR1, signal.SIGUSR2,
 ])
-def test_a_signal_sent_to_the_original_pid_reaches_the_command(number):
+def test_a_signal_sent_to_the_original_pid_reaches_the_command(number, tmp_path):
     name = number.name[3:]
-    process = start("forward", "/bin/sh", "-c",
-                    f"trap 'echo command got {name}; exit 42' {name}; while :; do sleep 0.05; done")
+    ready = tmp_path / "trap-is-set"
+    script = f"trap 'echo command got {name}; exit 42' {name}; : > {ready}; while :; do sleep 0.05; done"
+    process = start("forward", "/bin/sh", "-c", script)
     child_of(process.pid)
-    time.sleep(0.5)  # the trap is set once "ready" could be printed; give the shell a beat
+    # Signal only once the shell says its trap is set. A fixed sleep here failed
+    # once in a loaded full run: the signal came first and the shell died of it.
+    end = time.monotonic() + 30
+    while not ready.exists() and time.monotonic() < end:
+        time.sleep(0.02)
+    assert ready.exists(), "the shell never set its trap"
     os.kill(process.pid, number)
     got, out, _ = finish(process)
     assert f"command got {name}" in out and got == 42

@@ -68,9 +68,9 @@ def test_seatbelt_is_loaded_without_ctypes_util():
 
 
 @pytest.mark.skipif(not enforces(), reason="this machine can't enforce")
-def test_run_imports_pickle_before_it_forks_and_still_returns_results_and_errors(monkeypatch):
-    # The child is sealed, and a threaded caller may hold the import lock: so
-    # `pickle` must already be loaded when `run` forks.
+def test_run_returns_results_and_errors_without_ever_loading_pickle(monkeypatch):
+    # What a confined child sends back is untrusted (tests/test_return_channel.py),
+    # so `run` must not load pickle at all, in the parent or at the fork.
     import hlyn
 
     real, seen = os.fork, []
@@ -88,5 +88,5 @@ def test_run_imports_pickle_before_it_forks_and_still_returns_results_and_errors
 
     with pytest.raises(ValueError, match="from the confined child"):
         hlyn.run(boom)
-    print("pickle loaded at each fork:", seen)
-    assert seen and all(seen)
+    print("pickle loaded at each fork:", seen, "| loaded after:", "pickle" in sys.modules)
+    assert seen and not any(seen) and "pickle" not in sys.modules

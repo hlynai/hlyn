@@ -14,6 +14,7 @@ pretends to restore anything on exit. The three entry points differ only in
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import sys
@@ -614,7 +615,6 @@ def run(fn: Callable[[], Any], policy: object = None, *, keep_fds: Sequence[int]
     _ready(plan)
     # Before the fork, never after: see the note above.
     back().ready()
-    _pickle()  # imported now, before the fork: only `run` needs it, and not in the sealed child
     named = plan.hosts()
     watch = not named and watched(plan)
     share = None
@@ -681,8 +681,14 @@ def run(fn: Callable[[], Any], policy: object = None, *, keep_fds: Sequence[int]
         if told is not None:
             os.close(told)
             told = None
-        with os.fdopen(read, "rb") as fh:
-            body = fh.read()
+        body, over = _collect(read)
+        if over:
+            _stop(kid)
+            raise Failed(
+                f"the confined child's result went over the {_LIMIT >> 20} MiB size limit, "
+                f"so hlyn stopped it. "
+                f"Write big results to a file the policy grants (--write) and return its name."
+            )
         _, status = os.waitpid(kid, 0)
     finally:
         if share is not None:
@@ -699,13 +705,7 @@ def run(fn: Callable[[], Any], policy: object = None, *, keep_fds: Sequence[int]
             )
         raise Failed(f"the confined child returned nothing (exit {os.WEXITSTATUS(status)})")
 
-    # The bytes come from a child this process forked moments ago, over a pipe
-    # nothing else holds. It is not untrusted input; it is this program's own
-    # return value coming back across a process boundary.
-    kind, value = _pickle().loads(body)
-    if kind == "ok":
-        return value
-    raise value
+    return _decode(body)
 
 
 def _usable() -> list[int]:
@@ -725,13 +725,135 @@ def _gate_fds() -> list[int]:  # read at the seal: `gate.become` sets it in the 
     return [chan.fileno()] if chan is not None else []
 
 
-def _pickle() -> ModuleType:
-    """`pickle`, imported on first use: `on()` and `hlyn run` never need it,
-    and it costs about 5 ms to import. `run` calls this before it forks, so the
-    child, which is sealed, finds it already loaded."""
-    import pickle
+# What a confined child may send back, and how much. The child is the code hlyn
+# exists to confine, so what it writes to this pipe is untrusted input: plain
+# data only (JSON, which can't carry code), never pickle, and never more than
+# `_LIMIT` bytes in the unconfined parent's memory.
+_LIMIT = 16 << 20
+_DEPTH = 64
 
-    return pickle
+
+def _collect(fd: int) -> tuple[bytes, bool]:
+    """Everything the child writes to `fd`, up to `_LIMIT` bytes; the flag says
+    it wrote more. Closes `fd`."""
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                return b"".join(chunks), False
+            size += len(chunk)
+            if size > _LIMIT:
+                return b"", True
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+
+
+def _stop(pid: int) -> None:
+    """End a child that wrote too much and reap it: ask (a gate passes it on to
+    the confined program), then insist."""
+    import signal
+    import time
+
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, sig)
+        end = time.monotonic() + 2
+        while time.monotonic() < end:
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                return
+            time.sleep(0.01)
+    os.waitpid(pid, 0)
+
+
+def _plain(value: object, depth: int = 0) -> None:
+    """Raise TypeError unless `value` is plain data: None, bool, int, finite
+    float, str, list or tuple of those (a tuple comes back as a list), or a
+    dict with str keys."""
+    if depth > _DEPTH:
+        raise TypeError("nested too deeply")
+    if value is None or isinstance(value, (bool, int, str)):
+        return
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise TypeError("a float that is NaN or infinite")
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _plain(item, depth + 1)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"a dict key of type {type(key).__name__}, not str")
+            _plain(item, depth + 1)
+        return
+    raise TypeError(f"a {type(value).__name__}")
+
+
+def _exceptions() -> dict[str, type[BaseException]]:
+    """The exception classes a child's failure may come back as, by name: the
+    built-in ones and hlyn's own. Nothing else is ever built from the child's
+    words."""
+    import builtins
+
+    from . import error
+
+    table: dict[str, type[BaseException]] = {
+        name: cls for name, cls in vars(builtins).items()
+        if isinstance(cls, type) and issubclass(cls, Exception)
+    }
+    table.update({name: getattr(error, name) for name in error.__all__})
+    return table
+
+
+def _encode(out: tuple[str, Any]) -> bytes:
+    kind, value = out
+    if kind == "ok":
+        _plain(value)
+        return json.dumps({"ok": value}, allow_nan=False).encode()
+    code = getattr(value, "errno", None)
+    text = str(value)
+    if isinstance(value, OSError) and type(code) is int and isinstance(value.strerror, str):
+        text = value.strerror + (f": {value.filename!r}" if value.filename is not None else "")
+    return json.dumps({
+        "no": {"type": type(value).__name__, "message": text[:4096],
+               "errno": code if type(code) is int else None},
+    }).encode()
+
+
+def _decode(body: bytes) -> Any:
+    """The child's result, or its exception raised. `body` is untrusted: it is
+    parsed as JSON and checked, and an exception is rebuilt only from a name in
+    a fixed table and one string."""
+    try:
+        got = json.loads(body.decode("utf-8"), parse_constant=_nonfinite)
+    except (ValueError, RecursionError):
+        got = None
+    if not isinstance(got, dict) or len(got) != 1:
+        raise Failed("the confined child sent back something that is not a result, so hlyn dropped it")
+    if "ok" in got:
+        return got["ok"]
+    info = got.get("no")
+    if not (isinstance(info, dict) and isinstance(info.get("type"), str)
+            and isinstance(info.get("message"), str)):
+        raise Failed("the confined child sent back something that is not a result, so hlyn dropped it")
+    cls = _exceptions().get(info["type"])
+    if cls is None:
+        raise Failed(f"{info['type']}: {info['message']}")
+    code = info.get("errno")
+    try:
+        if issubclass(cls, OSError) and type(code) is int:
+            raise cls(code, info["message"])
+        raise cls(info["message"])
+    except TypeError:  # a class that takes more than one message
+        raise Failed(f"{info['type']}: {info['message']}") from None
+
+
+def _nonfinite(name: str) -> float:
+    raise ValueError(name)
 
 
 def _flush() -> None:
@@ -755,11 +877,15 @@ def _child(fn: Callable[[], Any], seal: Callable[[], object], write: int) -> NoR
     except BaseException as exc:  # noqa: BLE001 - report it rather than die silently
         out, code = ("no", exc), 1
     try:
-        body = _pickle().dumps(out)
-    except Exception:  # noqa: BLE001 - any pickling failure, not a known set
-        # A result or exception that will not pickle must not look like a
-        # crash, which is what an empty pipe would mean.
-        body = _pickle().dumps(("no", Failed(f"the result could not be returned: {out[0]}")))
+        body = _encode(out)
+    except (TypeError, ValueError, RecursionError) as bad:
+        # A result that is not plain data must not look like a crash, which
+        # is what an empty pipe would mean.
+        code = 1
+        body = _encode(("no", Failed(
+            f"the result could not be returned ({bad}). hlyn.run returns None, bool, int, float, "
+            f"str, list and dict with str keys."
+        )))
     try:
         with os.fdopen(write, "wb") as fh:
             fh.write(body)

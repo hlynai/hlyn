@@ -17,6 +17,7 @@ use landlock::{
 };
 use std::ffi::{c_char, CStr, CString};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What a caller asks for. Arrays are borrowed for the duration of the call.
 ///
@@ -50,6 +51,20 @@ const EARGS: i32 = -1;
 const EBUILD: i32 = -2;
 const ERULE: i32 = -3;
 const ESEAL: i32 = -4;
+const EOPEN: i32 = -5;
+
+/// Set when `pin` found `openat2` itself refused (`ENOSYS`, or `EPERM` from a
+/// container's seccomp profile), so the seal can say that instead of "a path
+/// could not be opened".
+static NO_OPENAT2: AtomicBool = AtomicBool::new(false);
+
+fn unopened() -> i32 {
+    if NO_OPENAT2.load(Ordering::Relaxed) {
+        EOPEN
+    } else {
+        ERULE
+    }
+}
 
 /// The rights a grant asks for, in their fullest form.
 ///
@@ -177,10 +192,10 @@ fn directory(fd: &impl AsFd) -> Option<bool> {
 /// checked path named, or the seal fails. The kernel's own facility for this
 /// (Linux 5.6, below hlyn's 6.12 floor), as the gate uses for socket paths.
 ///
-/// Where a container's seccomp profile refuses `openat2` itself (`ENOSYS` or
-/// `EPERM`, before Docker 20.10), falls back to the crate's `O_PATH` open:
-/// the seal still works, with the check-then-open window `_unchanged`
-/// narrows to microseconds.
+/// Where `openat2` itself is refused (`ENOSYS`, or `EPERM` from a container's
+/// seccomp profile, before Docker 20.10) there is no fallback: an ordinary open
+/// would follow a link swapped in after the check, so the seal fails (`EOPEN`)
+/// rather than grant a path a link could redirect.
 fn pin(path: &str) -> Option<OwnedFd> {
     let name = CString::new(path).ok()?;
     // SAFETY: `open_how` is plain data; zeroed is its documented "no options"
@@ -206,12 +221,7 @@ fn pin(path: &str) -> Option<OwnedFd> {
     }
     let code = std::io::Error::last_os_error().raw_os_error();
     if code == Some(libc::ENOSYS) || code == Some(libc::EPERM) {
-        // SAFETY: `name` outlives the call.
-        let fd = unsafe { libc::open(name.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
-        if fd >= 0 {
-            // SAFETY: as above, a descriptor the kernel just returned.
-            return Some(unsafe { OwnedFd::from_raw_fd(fd) });
-        }
+        NO_OPENAT2.store(true, Ordering::Relaxed);
     }
     None
 }
@@ -387,7 +397,7 @@ unsafe fn build(plan: &Plan) -> Result<RulesetCreated, i32> {
             // rights and the inode they land on are the same answer.
             let fd = match pin(path) {
                 Some(value) => value,
-                None => return Err(ERULE),
+                None => return Err(unopened()),
             };
             let dir = match directory(&fd) {
                 Some(value) => value,
@@ -403,7 +413,7 @@ unsafe fn build(plan: &Plan) -> Result<RulesetCreated, i32> {
     for path in writes.iter() {
         let fd = match pin(path) {
             Some(value) => value,
-            None => return Err(ERULE),
+            None => return Err(unopened()),
         };
         let dir = match directory(&fd) {
             Some(value) => value,
@@ -909,5 +919,84 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
         assert!(direct.is_some());
         assert!(refused.is_none() && refused_inside.is_none());
+    }
+
+    /// Answers `errno` to `openat2` for this process and its children, as a
+    /// container's seccomp profile does (everything else is allowed).
+    fn refuse_openat2(errno: u32) {
+        let filter = [
+            libc::sock_filter { code: 0x20, jt: 0, jf: 0, k: 0 }, // ld [syscall number]
+            libc::sock_filter { code: 0x15, jt: 0, jf: 1, k: libc::SYS_openat2 as u32 },
+            libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x0005_0000 | errno }, // ret ERRNO
+            libc::sock_filter { code: 0x06, jt: 0, jf: 0, k: 0x7fff_0000 },          // ret ALLOW
+        ];
+        let program = libc::sock_fprog { len: filter.len() as u16, filter: filter.as_ptr() as *mut _ };
+        // SAFETY: plain prctl calls on this process; `program` outlives them.
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program), 0);
+        }
+    }
+
+    /// Runs `check` in a forked child (the filter can't be removed) and
+    /// asserts it exited 0.
+    fn in_child(check: fn()) {
+        // SAFETY: the child only runs `check` and `_exit`s; no locks are held here.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            let ok = std::panic::catch_unwind(check).is_ok();
+            unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+        }
+        let mut status = 0;
+        // SAFETY: `pid` is our child.
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child status {status}");
+    }
+
+    fn real_folder() -> String {
+        let dir = std::env::temp_dir().join(format!("hlyn-nofallback-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn control_a_plain_open_of_the_folder_works_where_openat2_is_refused() {
+        // Without this, the tests below could pass because the folder can't be opened at all.
+        in_child(|| {
+            let dir = real_folder();
+            refuse_openat2(libc::EPERM as u32);
+            let name = CString::new(dir).unwrap();
+            let fd = unsafe { libc::open(name.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+            assert!(fd >= 0, "the plain open must work here, or the test proves nothing");
+        });
+    }
+
+    #[test]
+    fn a_refused_openat2_fails_closed_with_eperm() {
+        in_child(|| {
+            let dir = real_folder();
+            assert!(pin(&dir).is_some(), "control: pin works before the filter");
+            refuse_openat2(libc::EPERM as u32);
+            assert!(pin(&dir).is_none(), "pin fell back to an open that follows links");
+            assert_eq!(unopened(), EOPEN, "the seal must say why");
+        });
+    }
+
+    #[test]
+    fn a_refused_openat2_fails_closed_with_enosys() {
+        in_child(|| {
+            let dir = real_folder();
+            refuse_openat2(libc::ENOSYS as u32);
+            assert!(pin(&dir).is_none(), "pin fell back to an open that follows links");
+            assert_eq!(unopened(), EOPEN);
+        });
+    }
+
+    #[test]
+    fn an_ordinary_open_failure_is_not_blamed_on_openat2() {
+        in_child(|| {
+            assert!(pin("/nonexistent-hlyn-path").is_none());
+            assert_eq!(unopened(), ERULE);
+        });
     }
 }

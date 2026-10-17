@@ -136,6 +136,38 @@ def _a_certificate() -> str:
     pytest.skip("no certificate bundle on this machine to copy one from")
 
 
+def _der_of(pem: str) -> bytes:
+    import base64
+
+    return base64.b64decode("".join(line for line in pem.splitlines() if not line.startswith("-----")))
+
+
+def _relabelled(der: bytes, label: str = "CERTIFICATE") -> str:
+    """`der` under a PEM label, the way an attacker would dress it."""
+    import base64
+
+    body = base64.encodebytes(der).decode().replace("\n", "")
+    lines = "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
+    return f"-----BEGIN {label}-----\n{lines}\n-----END {label}-----\n"
+
+
+def _a_private_key_der() -> bytes:
+    """A real PKCS#8 private key (a DER SEQUENCE, like a certificate), made by openssl."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    exe = shutil.which("openssl")
+    if exe is None:
+        pytest.skip("no openssl to make a key with")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "k.der")
+        subprocess.run([exe, "genpkey", "-algorithm", "ed25519", "-outform", "DER", "-out", out],
+                       check=True, capture_output=True)
+        with open(out, "rb") as handle:
+            return handle.read()
+
+
 @pytest.mark.parametrize("name", ["SSL_CERT_DIR", "SSL_CERT_FILE"])
 def test_a_certificate_variable_pointing_at_keys_is_not_granted(tmp_path, monkeypatch, name):
     keys = tmp_path / "ssh"
@@ -360,8 +392,7 @@ def test_a_trust_store_inside_a_write_grant_still_hands_the_agent_the_checked_co
 
 
 # A trust store is copied as the blocks it parses to, never as the file's bytes:
-# what reaches the agent is certificates and revocation lists, re-encoded.
-CRL = "-----BEGIN X509 CRL-----\nMAMCAQA=\n-----END X509 CRL-----\n"  # a DER SEQUENCE, enough for the parser
+# what reaches the agent is certificates, re-encoded, each one parsed by OpenSSL.
 
 
 @pytest.mark.parametrize("extra", [
@@ -371,18 +402,19 @@ CRL = "-----BEGIN X509 CRL-----\nMAMCAQA=\n-----END X509 CRL-----\n"  # a DER SE
 ])
 def test_text_around_certificates_never_reaches_the_copy(tmp_path, extra):
     bundle = tmp_path / "corp.pem"
-    bundle.write_text(extra + _a_certificate() + extra + CRL + extra)
+    bundle.write_text(extra + _a_certificate() + extra + _a_certificate() + extra)
     box = tmp_path / "box"
     box.mkdir()
     copy = Path(trust_copy({"SSL_CERT_FILE": str(bundle)}, str(box))["SSL_CERT_FILE"]).read_text()
     print(repr(copy[:80]), "...", copy.count("-----BEGIN"), "blocks")
     assert "SECRET" not in copy
-    assert copy.count("-----BEGIN CERTIFICATE-----") == 1 and copy.count("-----BEGIN X509 CRL-----") == 1
+    assert copy.count("-----BEGIN CERTIFICATE-----") == 2
 
 
 @pytest.mark.parametrize("bad", [
     "a private key", "an encrypted key", "an unknown block", "a damaged body", "not DER", "no END",
-    "no blocks",
+    "no blocks", "a key under a certificate label", "a certificate with bytes after it",
+    "an empty sequence", "a revocation list", "a trusted-certificate block",
 ])
 def test_a_bundle_with_any_other_block_is_refused(tmp_path, bad):
     body = {
@@ -394,6 +426,11 @@ def test_a_bundle_with_any_other_block_is_refused(tmp_path, bad):
         "not DER": "-----BEGIN CERTIFICATE-----\nU0VDUkVU\n-----END CERTIFICATE-----\n",  # b"SECRET"
         "no END": "-----BEGIN CERTIFICATE-----\nMAMCAQA=\n",
         "no blocks": "just text\n",
+        "a key under a certificate label": _relabelled(_a_private_key_der()),
+        "a certificate with bytes after it": _relabelled(_der_of(_a_certificate()) + b"PRIVATE-KEY-BYTES"),
+        "an empty sequence": _relabelled(b"\x30\x00"),
+        "a revocation list": "-----BEGIN X509 CRL-----\nMAMCAQA=\n-----END X509 CRL-----\n",
+        "a trusted-certificate block": _relabelled(_der_of(_a_certificate()), "TRUSTED CERTIFICATE"),
     }[bad]
     bundle = tmp_path / "corp.pem"
     bundle.write_text(body if bad == "no blocks" else _a_certificate() + body)

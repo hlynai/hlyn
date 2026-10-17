@@ -37,12 +37,18 @@ FULL = 2
 # Failure codes, matching native/src/lib.rs. ERULE is named because it is the
 # one the caller can usually act on, and it gets a second look in `_blame`.
 ERULE = -3
+EOPEN = -5
 
 WHY = {
     -1: "the shim was called with arguments it could not read",
     -2: "the ruleset could not be built",
     ERULE: "a path in the policy could not be opened",
     -4: "the kernel refused to apply the ruleset",
+    EOPEN: (
+        "this environment refuses openat2, the call hlyn opens each granted path with so that a swapped "
+        "link can't redirect it, and hlyn will not fall back to an open that can. Allow openat2 in the "
+        "container's seccomp profile (Docker 20.10 and newer do by default), or run on the host"
+    ),
 }
 
 
@@ -174,16 +180,16 @@ def _paths(value: tuple[str, ...] | bool, refused: list[tuple[str, str]],
 
 
 def _open(path: str) -> int:
-    """The shim's open of a grant: `O_PATH`, no symlink in any component.
-    Falls back as the shim does where seccomp refuses `openat2` itself."""
+    """The shim's open of a grant: `O_PATH`, no symlink in any component. No
+    fallback where seccomp refuses `openat2` itself: the shim has none."""
     from .notify import pin
 
     try:
         return pin(path)
     except OSError as exc:
-        if exc.errno not in (errno.ENOSYS, errno.EPERM):
-            raise
-    return os.open(path, os.O_PATH | os.O_CLOEXEC)  # type: ignore[attr-defined,unused-ignore]  # Linux only
+        if exc.errno in (errno.ENOSYS, errno.EPERM):
+            raise Unsupported("landlock: " + WHY[EOPEN] + ".") from None
+        raise
 
 
 def _blame(groups: Sequence[tuple[str, list[bytes]]]) -> str:

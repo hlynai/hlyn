@@ -244,7 +244,7 @@ A few rules worth knowing:
 - **Writing implies reading what you wrote.** A path in `write` can also be read back.
 - **Paths must exist.** A typo such as `read=["./scr"]` is an error, not a grant that silently matches nothing.
 - **`net` holds hosts or ports, never both.** A port reaches every host on it, so mixing them would make the hosts meaningless; hlyn refuses and names both fixes. See [Hosts in `net`](#hosts-in-net).
-- **Allowing any network also allows what the network needs.** DNS configuration and TLS certificate stores become readable automatically, so `net=["api.openai.com"]` really can make HTTPS requests. Private key folders such as `/etc/ssl/private` are never included. A custom store named by `SSL_CERT_FILE` or `SSL_CERT_DIR` is never granted: the agent gets a private copy in its scratch folder, rebuilt from the certificate and revocation-list blocks it parses to: text between them is dropped, and a key or a damaged block refuses the run.
+- **Allowing any network also allows what the network needs.** DNS configuration and TLS certificate stores become readable automatically, so `net=["api.openai.com"]` really can make HTTPS requests. Private key folders such as `/etc/ssl/private` are never included. A custom store named by `SSL_CERT_FILE` or `SSL_CERT_DIR` is never granted: the agent gets a private copy in its scratch folder, rebuilt from the certificate blocks OpenSSL parses it to: text between them is dropped, and a key, a revocation list or a damaged block refuses the run.
 - **A link is granted as what it names.** `--read ./src` (or `--write`, `--exec`, a `tmp` folder), when `./src` is a symlink, grants its target, and the policy, `hlyn show` and the log name the target; the CLI says so. Grants are checked again just before the seal.
 
 ### Hosts in `net`
@@ -542,7 +542,7 @@ Every command that prints data prints plain text by default, and JSON with `--js
 | Call | What it does |
 |---|---|
 | `hlyn.on(policy=None, **fields)` | Confines **this process**, permanently. Returns what was applied. |
-| `hlyn.run(fn, policy=None, **fields)` | Runs `fn()` in a confined child process and returns its result (or re-raises its exception). The caller stays unconfined. |
+| `hlyn.run(fn, policy=None, **fields)` | Runs `fn()` in a confined child process and returns its result (or re-raises its exception). The caller stays unconfined. The result is plain data: `None`, `bool`, `int`, `float`, `str`, `list` (a tuple comes back as a list) and `dict` with `str` keys, up to 16 MiB; anything else is refused with a message saying so. An exception comes back as the same built-in or hlyn class with its message (and `errno`); any other class comes back as `hlyn.Failed` naming it. |
 | `hlyn.spawn(cmd, policy=None, **fields)` | Confines this process, then replaces it with `cmd`. Does not return. With hosts, this process stays as `cmd`'s gate instead: same PID, signals passed on, `cmd`'s exit status. |
 | `hlyn.probe()` | Reports what this machine can enforce, as a dict. Changes nothing. |
 | `hlyn.exposed(policy)` | Lists secret files the policy lets the agent read while the network is open. |

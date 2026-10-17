@@ -665,7 +665,7 @@ def trust_copy(env: dict[str, str], box: str | None) -> dict[str, str]:
     folder it names is the user's: granting it would hand the agent whatever is
     in it, and whatever is put in it later, through a symlink swap, a new file
     or a race with the check. So it is never granted. Each named file is read
-    once, checked to hold only certificates or revocation lists, and those
+    once, checked to hold only certificates, and those
     same bytes are written into the agent's private scratch folder; the
     variable then names the copy. What the agent reads is exactly what was
     checked. Paths inside the system's own stores are left alone (already
@@ -747,16 +747,17 @@ def _cert_copies(name: str, item: str) -> list[tuple[str, bytes]]:
 
 
 def _cert_bytes(path: str) -> bytes | None:
-    """The certificates and revocation lists in the file, read once and rebuilt
-    from what was parsed; None if it holds anything else.
+    """The certificates in the file, read once and rebuilt from what was
+    parsed; None if it holds anything else.
 
     Only the blocks themselves reach the copy, re-encoded from their decoded
     bytes, never the text around them: a bundle with a certificate and then
     `TOKEN=...` gives a copy with the certificate alone. Each block must be a
     known label, matched at both ends, with a body that is base64 and decodes
-    to DER (a SEQUENCE); a key, an encrypted block or a damaged one refuses the
-    whole file. Text between blocks (comments, OpenSSL's "explanatory text",
-    which macOS's own bundle has) is dropped.
+    to exactly one X.509 certificate, as OpenSSL parses it (`_certificate`); a
+    key, an encrypted block or a damaged one refuses the whole file. Text
+    between blocks (comments, OpenSSL's "explanatory text", which macOS's own
+    bundle has) is dropped.
     """
     try:
         with open(path, "rb") as handle:
@@ -769,7 +770,7 @@ def _cert_bytes(path: str) -> bytes | None:
 
 
 def pem_blocks(data: bytes, strict: bool = False) -> bytes | None:
-    """`data` rebuilt from its certificate and CRL blocks alone, or None if a
+    """`data` rebuilt from its certificate blocks alone, or None if a
     block is anything else (see `_cert_bytes`). `strict` also refuses text
     between blocks other than `#` comments and blank lines: for a file granted
     as it is rather than copied, where that text would be readable."""
@@ -796,12 +797,13 @@ def pem_blocks(data: bytes, strict: bool = False) -> bytes | None:
                 der = base64.b64decode(b"".join(body), validate=True)
             except (binascii.Error, ValueError):
                 return None
-            if len(der) < 2 or der[0] != 0x30:  # DER: a SEQUENCE
-                return None
             encoded = base64.encodebytes(der).replace(b"\n", b"")
             lines = [encoded[i:i + 64] for i in range(0, len(encoded), 64)]
-            out.append(b"-----BEGIN " + label + b"-----\n" + b"\n".join(lines)
-                       + b"\n-----END " + label + b"-----\n")
+            block = (b"-----BEGIN " + label + b"-----\n" + b"\n".join(lines)
+                     + b"\n-----END " + label + b"-----\n")
+            if not _certificate(der, block):
+                return None
+            out.append(block)
             label = None
             continue
         if not line or line.startswith(b"-----") or b":" in line:  # headers mean encryption
@@ -810,6 +812,32 @@ def pem_blocks(data: bytes, strict: bool = False) -> bytes | None:
     if label is not None or not out:
         return None
     return b"".join(out)
+
+
+def _certificate(der: bytes, block: bytes) -> bool:
+    """True if `block` is one X.509 certificate and nothing else. OpenSSL, through
+    `ssl`, decides what a certificate is: a private key, or any other DER under
+    a CERTIFICATE label, is refused by the parser everything else uses. `der`
+    must also be exactly one DER element, since OpenSSL ignores bytes after it
+    and a copy would carry them."""
+    import ssl
+
+    if len(der) < 4 or der[0] != 0x30:
+        return False
+    if der[1] < 0x80:
+        head, size = 2, der[1]
+    else:
+        count = der[1] & 0x7F
+        if not 1 <= count <= 4 or len(der) < 2 + count:
+            return False
+        head, size = 2 + count, int.from_bytes(der[2:2 + count], "big")
+    if head + size != len(der):
+        return False
+    try:
+        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=block.decode("ascii"))
+    except (ssl.SSLError, ValueError):
+        return False
+    return True
 
 
 def _write(path: str, data: bytes) -> None:
@@ -831,11 +859,11 @@ def _write(path: str, data: bytes) -> None:
 # A certificate file is small; a folder of them a few hundred files.
 CERT_BYTES = 4 << 20
 CERT_FILES = 2000
-CERT_LABELS = frozenset({b"CERTIFICATE", b"TRUSTED CERTIFICATE", b"X509 CRL"})
+CERT_LABELS = frozenset({b"CERTIFICATE"})
 
 
 def _cert_file(path: str) -> bool:
-    """True if `path` is a PEM file of certificates or revocation lists only,
+    """True if `path` is a PEM file of certificates only,
     comments aside: it is granted as it is, so nothing else may be in it."""
     try:
         with open(path, "rb") as handle:
@@ -848,7 +876,7 @@ def _cert_file(path: str) -> bool:
 def _certs(path: str) -> bool:
     """True if `path` may be granted as a trust store: inside a known one, a
     certificate file, or a folder holding only certificate files (OpenSSL's
-    hashed links included, and the revocation lists beside them)."""
+    hashed links included)."""
     real = os.path.realpath(path)
     if any(under(real, os.path.realpath(root)) for root in TRUST):
         return True
