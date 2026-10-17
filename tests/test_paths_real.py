@@ -322,3 +322,112 @@ def test_a_closed_record_descriptor_is_opened_and_checked_again(logs):
     with pytest.raises(Invalid, match="is a link") as error:
         log.record(str(record))
     print(error.value)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Landlock opens grants itself; Seatbelt resolves them")
+@pytest.mark.parametrize("swap", [True, False], ids=["swapped after the check", "control"])
+def test_a_link_swapped_in_after_the_last_check_is_refused_by_the_open_itself(tree, tmp_path, swap):
+    # The window `_unchanged` can't close: a swap after it, before the grant
+    # is opened for Landlock. Simulated by skipping `_unchanged`. Grants are
+    # opened with openat2(RESOLVE_NO_SYMLINKS) (the probe in landlock._paths
+    # and `pin` in the shim), so the seal is refused rather than land the rule
+    # on the secrets. The control seals the same layout unswapped.
+    _, secrets = tree
+    target = tmp_path / "docs"
+    target.mkdir()
+    (target / "key").write_text("fine")
+    done = boot(f"""
+        import os, hlyn
+        from hlyn import jail
+        plan = hlyn.Policy(read=[{str(target)!r}], log=False)
+        jail._unchanged = lambda plan: None  # the swap lands after the last check
+        if {swap}:
+            os.rename({str(target)!r}, {str(target) + ".old"!r})
+            os.symlink({str(secrets)!r}, {str(target)!r})
+        try:
+            hlyn.on(plan)
+            print("SEALED", open({str(target / "key")!r}).read())
+        except hlyn.Error as error:
+            print("REFUSED", error)
+        """)
+    print(done.stdout, done.stderr[-300:])
+    if swap:
+        assert done.stdout.startswith("REFUSED")
+        assert "a link appeared in it after it was checked" in done.stdout
+        assert "TOPSECRET" not in done.stdout
+    else:
+        assert done.stdout.strip() == "SEALED fine"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="renameat2 RENAME_EXCHANGE and Landlock are Linux's")
+@pytest.mark.parametrize("guard", ["both checks", "the native open alone"])
+def test_a_grant_swapped_back_and_forth_during_sealing_never_reaches_the_other_target(tree, tmp_path, guard):
+    # A second process swaps the granted folder and a link to the secrets
+    # (atomically, RENAME_EXCHANGE) as fast as it can, while 300 confined
+    # children are sealed with the folder granted and then read through its
+    # path. Each must end one of three ways: sealed on the folder and reads
+    # its own file; sealed on the folder and refused through the link; or
+    # refused at the seal. Never the secrets. Both a seal and a refusal must
+    # be seen, so the swap really did race the seal.
+    _, secrets = tree
+    target = tmp_path / "docs"
+    target.mkdir()
+    (target / "key").write_text("fine")
+    spare = tmp_path / "spare"
+    os.symlink(secrets, spare)
+    done = boot(f"""
+        import collections, ctypes, os, signal, hlyn
+        libc = ctypes.CDLL(None, use_errno=True)
+        plan = hlyn.Policy(read=[{str(target)!r}], log=False, tmp=False)
+        if {guard == "the native open alone"}:
+            from hlyn import jail
+            jail._unchanged = lambda plan: None  # leave only openat2 (the probe and the shim)
+        pid = os.fork()
+        if pid == 0:
+            while True:
+                libc.renameat2(-100, {str(target).encode()!r}, -100, {str(spare).encode()!r}, 2)
+        def read():
+            return open({str(target / "key")!r}).read()
+        seen = collections.Counter()
+        for _ in range(300):
+            try:
+                seen["read " + hlyn.run(read, plan)] += 1
+            except PermissionError:
+                seen["sealed, refused through the link"] += 1
+            except FileNotFoundError:
+                seen["sealed, path missing mid-swap"] += 1
+            except hlyn.Error as error:
+                seen["refused at the seal: " + str(error).split(":")[0][:40]] += 1
+        os.kill(pid, signal.SIGKILL)
+        print(dict(seen))
+        """)
+    print(done.stdout, done.stderr[-500:])
+    seen = eval(done.stdout.strip().splitlines()[-1])  # noqa: S307 - our own child's dict
+    assert not any("TOPSECRET" in key for key in seen), seen
+    assert seen.get("read fine", 0) > 0, "no seal landed on the folder: the swap may have stopped everything"
+    assert sum(n for key, n in seen.items() if key.startswith("refused at the seal")) > 0, \
+        "no seal was refused: the swap never raced the seal"
+
+
+def test_a_record_opened_before_is_checked_against_the_grants_of_each_seal(logs):
+    # Opened once with no grants (`hlyn.log.sink(path)` from a program), then
+    # asked for by a seal whose write grants cover it: refused, not reused.
+    safe, _ = logs
+    record = safe / "audit.jsonl"
+    log.record(str(record))
+    with pytest.raises(Invalid, match="which the agent can write") as error:
+        log.record(str(record), [str(safe)])
+    print(error.value)
+
+
+def test_a_record_refused_when_new_leaves_no_file_behind(logs):
+    _, out = logs
+    record = out / "audit.jsonl"
+    with pytest.raises(Invalid, match="which the agent can write") as error:
+        log.record(str(record), [str(out)])
+    print(error.value, "| left behind:", record.exists())
+    assert not record.exists()
+    record.write_text("someone's\n")  # a file that was already there is the user's, and stays
+    with pytest.raises(Invalid):
+        log.record(str(record), [str(out)])
+    assert record.read_text() == "someone's\n"

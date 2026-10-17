@@ -618,12 +618,14 @@ def scratch(path: str) -> str:
     typed = os.path.abspath(os.path.expanduser(path))
     with contextlib.suppress(FileExistsError):
         os.mkdir(typed, 0o700)
+    from .log import _folder
+
     folder = os.open(typed, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_CLOEXEC)
     try:
         info = os.fstat(folder)
+        real = _folder(folder, typed)  # the folder opened, whatever its name leads to now
     finally:
         os.close(folder)
-    real = os.path.realpath(typed)
     home = os.path.realpath(os.path.expanduser("~"))
     why = ""
     if info.st_uid != os.getuid():

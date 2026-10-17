@@ -12,6 +12,7 @@ understands is *handled*, and only the paths named here are granted back.
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import sys
 from collections.abc import Sequence
@@ -135,8 +136,17 @@ def ready() -> bool:
 # -- turning a policy into a plan -------------------------------------------
 
 
-def _paths(value: tuple[str, ...] | bool, refused: list[tuple[str, str]]) -> list[bytes]:
+def _paths(value: tuple[str, ...] | bool, refused: list[tuple[str, str]],
+           checked: frozenset[str] = frozenset()) -> list[bytes]:
     """Encode a grant as paths. `True` means the whole tree.
+
+    The shim opens grants with `openat2(RESOLVE_NO_SYMLINKS)` (`pin` in
+    lib.rs), which refuses a link in any component. The caller's own grants
+    (`checked`) are real paths already, confirmed by `jail._unchanged` just
+    before, and are passed exactly as checked: a link swapped in since fails
+    the seal instead of being followed. The paths hlyn adds itself (the
+    runtime, the system's name-lookup and trust files, where `/etc/resolv.conf`
+    and `/lib64` are links) are resolved here.
 
     Each path is probed with the same open the shim will perform, rather than
     with `os.path.exists`. They disagree in exactly the case that matters: a
@@ -150,15 +160,30 @@ def _paths(value: tuple[str, ...] | bool, refused: list[tuple[str, str]]) -> lis
         return []
     out = []
     for item in value:
+        real = item if item in checked else os.path.realpath(item)
         try:
-            fd = os.open(item, os.O_PATH)  # type: ignore[attr-defined,unused-ignore]  # Linux only
+            os.close(_open(real))
         except OSError as exc:
             why = exc.strerror or (os.strerror(exc.errno) if exc.errno else "cannot be opened")
+            if exc.errno == errno.ELOOP:
+                why = "a link appeared in it after it was checked; hlyn won't follow it"
             refused.append((item, why))
             continue
-        os.close(fd)
-        out.append(os.fsencode(item))
+        out.append(os.fsencode(real))
     return out
+
+
+def _open(path: str) -> int:
+    """The shim's open of a grant: `O_PATH`, no symlink in any component.
+    Falls back as the shim does where seccomp refuses `openat2` itself."""
+    from .notify import pin
+
+    try:
+        return pin(path)
+    except OSError as exc:
+        if exc.errno not in (errno.ENOSYS, errno.EPERM):
+            raise
+    return os.open(path, os.O_PATH | os.O_CLOEXEC)  # type: ignore[attr-defined,unused-ignore]  # Linux only
 
 
 def _blame(groups: Sequence[tuple[str, list[bytes]]]) -> str:
@@ -177,9 +202,12 @@ def _blame(groups: Sequence[tuple[str, list[bytes]]]) -> str:
     for field, items in groups:
         for item in items:
             try:
-                fd = os.open(item, os.O_PATH)  # type: ignore[attr-defined,unused-ignore]  # Linux only
+                fd = _open(os.fsdecode(item))
             except OSError as exc:
                 where = os.fsdecode(item)
+                if exc.errno == errno.ELOOP:
+                    return (f" The path {field} names, {where!r}: a link appeared in it after it was "
+                            f"checked; hlyn won't follow it. Check what changed it, then run again.")
                 return f" The path {field} names, {where!r}, could not be opened: {exc.strerror}."
             else:
                 os.close(fd)
@@ -268,9 +296,11 @@ def load(policy: Policy) -> int:
     _alone()
 
     refused: list[tuple[str, str]] = []
-    reads = _paths(policy.reads(), refused)
-    writes = _paths(policy.writes(), refused)
-    runs = _paths(policy.runs(), refused)
+    fields = (policy.read, policy.write, policy.exec, (policy.tmp,) if isinstance(policy.tmp, str) else ())
+    checked = frozenset(item for field in fields if isinstance(field, tuple) for item in field)
+    reads = _paths(policy.reads(), refused, checked)
+    writes = _paths(policy.writes(), refused, checked)
+    runs = _paths(policy.runs(), refused, checked)
     if refused:
         # A typo in a security policy must never be silently dropped, so this
         # refuses rather than granting what it can. The reason comes from the

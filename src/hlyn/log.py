@@ -76,6 +76,7 @@ def sink(target: bool | str | TextIO = True, writable: Iterable[str] | bool = ()
 # reuse the number for something else.
 _held: dict[str, int] = {}
 _ids: dict[str, tuple[int, int]] = {}
+_where_of: dict[str, str] = {}
 
 
 def record(path: str, writable: Iterable[str] | bool = ()) -> int:
@@ -97,13 +98,13 @@ def record(path: str, writable: Iterable[str] | bool = ()) -> int:
     Raises `ValueError` (`policy.Invalid`) with what to change.
     """
     from .error import Invalid
-    from .policy import under
 
     key = os.path.abspath(os.path.expanduser(path))
     if key in _held:
         try:
             info = os.fstat(_held[key])
             if (info.st_dev, info.st_ino) == _ids[key]:
+                _outside(path, _where_of[key], writable)  # the grants may be new since
                 return _held[key]
         except OSError:
             pass
@@ -111,39 +112,54 @@ def record(path: str, writable: Iterable[str] | bool = ()) -> int:
         del _held[key]
     folder, name = os.path.split(key)
     directory = os.open(folder or os.sep, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_CLOEXEC)
+    fd, made = -1, False
     try:
+        flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
         try:
-            fd = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
-                         dir_fd=directory)
+            try:
+                fd, made = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory), True
+            except FileExistsError:
+                fd = os.open(name, flags, dir_fd=directory)
         except OSError as error:
             if error.errno == errno.ELOOP:  # O_NOFOLLOW met a link
                 raise Invalid(f"log: {path} is a link. hlyn writes the record only to a plain file; "
                               f"name a file, not a link.") from None
             raise
         where = _folder(directory, folder)
-    finally:
-        os.close(directory)
-    try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise Invalid(f"log: {path} is not a regular file. Name a file.")
         if info.st_nlink != 1:
             raise Invalid(f"log: {path} has another name (a hard link), and the agent could write it "
                           f"through that one. Use a new file.")
-        if writable is True:
-            raise Invalid(f"log: the agent can write every folder (write=True), so it could replace "
-                          f"{path}. Use a narrower write grant, or no log file.")
-        root = next((item for item in writable or () if under(where, os.path.realpath(item))), None)
-        if root:
-            raise Invalid(f"log: {path} is inside {root}, which the agent can write: it could delete the "
-                          f"record and leave a forged one in its place. "
-                          f"Put the log outside every --write folder.")
+        _outside(path, where, writable)
     except BaseException:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
+            if made:  # don't leave an empty record behind where it was refused
+                with contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=directory)
         raise
-    _held[key] = fd
-    _ids[key] = (info.st_dev, info.st_ino)
+    finally:
+        os.close(directory)
+    _held[key], _ids[key], _where_of[key] = fd, (info.st_dev, info.st_ino), where
     return fd
+
+
+def _outside(path: str, where: str, writable: Iterable[str] | bool) -> None:
+    """Refuse a record whose folder (`where`, the one actually opened) the
+    agent can write: it could delete the file and leave a forged one."""
+    from .error import Invalid
+    from .policy import under
+
+    if writable is True:
+        raise Invalid(f"log: the agent can write every folder (write=True), so it could replace "
+                      f"{path}. Use a narrower write grant, or no log file.")
+    root = next((item for item in writable or () if under(where, os.path.realpath(item))), None)
+    if root:
+        raise Invalid(f"log: {path} is inside {root}, which the agent can write: it could delete the "
+                      f"record and leave a forged one in its place. "
+                      f"Put the log outside every --write folder.")
 
 
 def _folder(directory: int, fallback: str) -> str:

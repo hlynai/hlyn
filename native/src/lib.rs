@@ -12,11 +12,11 @@
 //! refuse to continue.
 
 use landlock::{
-    Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath, PathFd,
-    Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetStatus, Scope, ABI,
+    Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath, Ruleset,
+    RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetStatus, Scope, ABI,
 };
-use std::ffi::{c_char, CStr};
-use std::os::fd::{AsFd, AsRawFd};
+use std::ffi::{c_char, CStr, CString};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 
 /// What a caller asks for. Arrays are borrowed for the duration of the call.
 ///
@@ -156,7 +156,7 @@ fn fit(want: BitFlags<AccessFs>, dir: bool, abi: ABI) -> BitFlags<AccessFs> {
 ///
 /// `fstat` is explicitly permitted on an `O_PATH` descriptor, which is what
 /// `PathFd` holds.
-fn directory(fd: &PathFd) -> Option<bool> {
+fn directory(fd: &impl AsFd) -> Option<bool> {
     // SAFETY: `stat` is plain data, and the descriptor is owned by `fd` and
     // stays open for this call.
     let mut info: libc::stat = unsafe { std::mem::zeroed() };
@@ -164,6 +164,56 @@ fn directory(fd: &PathFd) -> Option<bool> {
         return None;
     }
     Some(info.st_mode & libc::S_IFMT == libc::S_IFDIR)
+}
+
+/// Open a grant for a rule without following any symlink on the way.
+///
+/// The paths reaching here are real paths (`policy.real`, then `_paths` in
+/// `landlock.py`), checked by `jail._unchanged` just before this call. Opening
+/// them by name the ordinary way would still follow a link swapped in after
+/// that check, and the rule would land on wherever it points. `openat2` with
+/// `RESOLVE_NO_SYMLINKS` (which implies `RESOLVE_NO_MAGICLINKS`) refuses a
+/// symlink in any component with `ELOOP`, so the rule is on the object the
+/// checked path named, or the seal fails. The kernel's own facility for this
+/// (Linux 5.6, below hlyn's 6.12 floor), as the gate uses for socket paths.
+///
+/// Where a container's seccomp profile refuses `openat2` itself (`ENOSYS` or
+/// `EPERM`, before Docker 20.10), falls back to the crate's `O_PATH` open:
+/// the seal still works, with the check-then-open window `_unchanged`
+/// narrows to microseconds.
+fn pin(path: &str) -> Option<OwnedFd> {
+    let name = CString::new(path).ok()?;
+    // SAFETY: `open_how` is plain data; zeroed is its documented "no options"
+    // value, and every field is then set.
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    how.flags = (libc::O_PATH | libc::O_CLOEXEC) as u64;
+    how.resolve = libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS;
+    // SAFETY: `name` and `how` outlive the call, and the size passed is the
+    // struct's own.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            libc::AT_FDCWD,
+            name.as_ptr(),
+            &how as *const libc::open_how,
+            std::mem::size_of::<libc::open_how>(),
+        )
+    };
+    if fd >= 0 {
+        // SAFETY: the kernel just returned this descriptor, and nothing else
+        // owns it.
+        return Some(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+    }
+    let code = std::io::Error::last_os_error().raw_os_error();
+    if code == Some(libc::ENOSYS) || code == Some(libc::EPERM) {
+        // SAFETY: `name` outlives the call.
+        let fd = unsafe { libc::open(name.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        if fd >= 0 {
+            // SAFETY: as above, a descriptor the kernel just returned.
+            return Some(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+    }
+    None
 }
 
 /// Borrow a C string array as paths.
@@ -335,9 +385,9 @@ unsafe fn build(plan: &Plan) -> Result<RulesetCreated, i32> {
             // O_PATH open; a path that cannot be opened cannot be granted.
             // Everything after this asks the descriptor, not the path, so the
             // rights and the inode they land on are the same answer.
-            let fd = match PathFd::new(path) {
-                Ok(value) => value,
-                Err(_) => return Err(ERULE),
+            let fd = match pin(path) {
+                Some(value) => value,
+                None => return Err(ERULE),
             };
             let dir = match directory(&fd) {
                 Some(value) => value,
@@ -351,9 +401,9 @@ unsafe fn build(plan: &Plan) -> Result<RulesetCreated, i32> {
     }
 
     for path in writes.iter() {
-        let fd = match PathFd::new(path) {
-            Ok(value) => value,
-            Err(_) => return Err(ERULE),
+        let fd = match pin(path) {
+            Some(value) => value,
+            None => return Err(ERULE),
         };
         let dir = match directory(&fd) {
             Some(value) => value,
@@ -457,7 +507,7 @@ pub unsafe fn hlyn_build_only(plan: *const Plan) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
+    use landlock::PathFd;
 
     /// Keeps the `CString`s alive for as long as the pointers are used.
     fn strings(items: &[&str]) -> (Vec<CString>, Vec<*const c_char>) {
@@ -842,5 +892,22 @@ mod tests {
             "reported ABI {abi} but Landlock is {}usable",
             if usable { "" } else { "un" }
         );
+    }
+
+    #[test]
+    fn a_grant_is_opened_only_through_real_folders() {
+        // A link anywhere in the path is refused, not followed: the rule must
+        // land on the object the checked path named, or the seal fails.
+        let base = std::env::temp_dir().join(format!("hlyn-pin-{}", std::process::id()));
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+        let through = base.join("link").join(".");
+        let direct = pin(real.to_str().unwrap());
+        let refused = pin(base.join("link").to_str().unwrap());
+        let refused_inside = pin(through.to_str().unwrap());
+        std::fs::remove_dir_all(&base).unwrap();
+        assert!(direct.is_some());
+        assert!(refused.is_none() && refused_inside.is_none());
     }
 }
