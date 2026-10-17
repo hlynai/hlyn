@@ -124,8 +124,9 @@ def keychains(policy: Policy) -> bool:
     if reads is True:
         return True
     places = [real(os.path.expanduser("~/Library/Keychains")), "/Library/Keychains"]
+    mine = granted(policy)
     for item in reads:
-        path = real(item)
+        path = item if item in mine else real(item)  # what the rule will name, as in `where`
         if path.endswith((".keychain", ".keychain-db")):
             return True
         if any(path == place or path.startswith(place + "/") or place.startswith(path.rstrip("/") + "/")
@@ -245,7 +246,17 @@ def quote(path: str) -> str:
     return f'"{path}"'
 
 
-def where(paths: Iterable[str], refused: list[str] | None = None) -> list[str]:
+def granted(policy: Policy) -> frozenset[str]:
+    """The paths the caller named (read, write, exec, tmp). The policy stores
+    them by real path and `jail._unchanged` has just checked each still is one;
+    they go into the profile exactly as stored, never resolved again."""
+    tmp = (policy.tmp,) if isinstance(policy.tmp, str) else ()
+    return frozenset(item for field in (policy.read, policy.write, policy.exec, tmp)
+                     if isinstance(field, tuple) for item in field)
+
+
+def where(paths: Iterable[str], refused: list[str] | None = None,
+          checked: frozenset[str] = frozenset()) -> list[str]:
     """Render path filters, matching a whole tree or a single file.
 
     `subpath` covers a directory and everything under it. For a plain file it
@@ -257,10 +268,26 @@ def where(paths: Iterable[str], refused: list[str] | None = None) -> list[str]:
     refused on the other -- policies are written on macOS and deployed on
     Linux, and a rule that vanishes on the machine it was authored on is one
     nobody finds out about until it matters.
+
+    A path in `checked` is the caller's own grant, already a real path that was
+    verified just before. It is used as it is. Resolving it here a second time
+    would name wherever a link swapped in since then points, and the profile would
+    grant that instead (Linux avoids the same race by opening each grant without
+    following links, `native/src/lib.rs` `pin`). Seatbelt matches the real path
+    of what is accessed, so a rule that names the checked path can't grow if the
+    path later becomes a link. If it is a link already, the policy is refused.
     """
     out = []
     for path in paths:
-        item = real(path)
+        if path in checked:
+            item = path
+            if os.path.lexists(item) and os.path.realpath(item) != item:
+                raise Invalid(
+                    f"{path} now leads somewhere else ({os.path.realpath(path)}) than when the policy "
+                    f"was checked, so hlyn won't seal it. Check what changed it, then run again."
+                )
+        else:
+            item = real(path)
         if not os.path.exists(item):
             if refused is not None:
                 refused.append(path)
@@ -302,26 +329,27 @@ def profile(policy: Policy, tag: str | None = None, port: int | None = None) -> 
     deny = f"(deny default (with message {quote(tag)}))" if tag else "(deny default)"
     lines = ["(version 1)", deny, *BASE, *services(policy), *start()]
     refused: list[str] = []
+    mine = granted(policy)
 
     reads = policy.reads()
     if reads is True:
         lines.append("(allow file-read*)")
     else:
-        for item in where(reads, refused):
+        for item in where(reads, refused, mine):
             lines.append(f"(allow file-read* {item})")
 
     writes = policy.writes()
     if writes is True:
         lines.append("(allow file-write*)")
     else:
-        for item in where(writes, refused):
+        for item in where(writes, refused, mine):
             lines.append(f"(allow file-write* {item})")
 
     runs = policy.runs()
     if runs is True:
         lines.append("(allow process-exec)")
     elif runs:
-        for item in where(runs, refused):
+        for item in where(runs, refused, mine):
             lines.append(f"(allow process-exec {item})")
 
     if policy.shm:
@@ -441,7 +469,7 @@ def hosts(policy: Policy, port: int, tag: str | None = None) -> list[str]:
     if writes is True:
         out.append("(allow network-outbound (remote unix-socket))")
     else:
-        for item in where(writes):
+        for item in where(writes, None, granted(policy)):
             out.append(f"(allow network-outbound (remote unix-socket {item}))")
     said = f" (with message {quote(tag)})" if tag else ""
     for pattern in REFUSED:
