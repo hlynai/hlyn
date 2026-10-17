@@ -52,6 +52,7 @@ AGENT = textwrap.dedent("""
     signal.signal(signal.SIGINT, interrupted)
     print("agent ready", os.getpid(), flush=True)
     print("agent read:", sys.stdin.readline().strip(), flush=True)
+    print("agent waiting", flush=True)
     sys.stdin.readline()  # waits here for Ctrl-C
 """)
 
@@ -156,6 +157,12 @@ def test_ctrl_z_fg_and_ctrl_c_at_an_interactive_shell(tmp_path, net):
         after_fg = state(agent)
         term.send("hello\n")
         term.expect(r"agent read: hello")
+        term.expect(r"agent waiting")
+        # Python acts on a signal only when its read returns or at its next
+        # instruction: one that lands just before the read blocks is held until
+        # more input arrives (what the CI failures showed: `agent got INT` came
+        # only when the test typed `exit` 30 s later). So wait until it is blocked.
+        time.sleep(0.3)
 
         term.send("\x03")  # Ctrl-C
         try:
@@ -194,6 +201,7 @@ REFUSING = textwrap.dedent("""
         except PermissionError:
             pass
     print("agent ready", flush=True)
+    print("agent waiting", flush=True)
     sys.stdin.readline()  # waits here for Ctrl-C
 """)
 
@@ -217,6 +225,8 @@ def test_ctrl_c_still_gives_the_report(tmp_path, net):
         term.send(f"{sys.executable} -m hlyn.cli run --no-log --read {script} {' '.join(net)} "
                   f"-- {sys.executable} {script} {' '.join(map(str, secrets))}\n")
         term.expect(r"agent ready")
+        term.expect(r"agent waiting")
+        time.sleep(0.3)  # blocked in its read, so Python sees the signal (see the test above)
         term.send("\x03")  # Ctrl-C
         term.expect(r"the command exited with code 130")
         term.expect(PROMPT)
