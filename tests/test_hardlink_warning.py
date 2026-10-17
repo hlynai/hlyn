@@ -117,3 +117,17 @@ def test_hlyn_run_warns_before_the_command_reads_it(tmp_path):
                             "--net", "443", "--", "true"], capture_output=True, text=True, check=False,
                            env={**env, "PYTHONWARNINGS": "ignore::hlyn.Exposed"})
     assert "hard link" not in quiet.stderr
+
+
+def test_a_file_owned_by_someone_else_with_two_names_is_not_flagged_but_the_users_own_is(tmp_path, monkeypatch):
+    """System files (a toolchain's, /usr's) often have several names, and are not
+    the user's to have linked a secret to: CI's Xcode runtime was listed."""
+    outside, proj = tree(tmp_path)
+    (outside / "stash.cfg").write_text("x")
+    os.link(outside / "stash.cfg", proj / "notes.txt")
+    mine = check(proj)
+    monkeypatch.setattr(os, "geteuid", lambda: os.stat(proj / "notes.txt").st_uid + 1)
+    theirs = check(proj)
+    print("own:", [os.path.basename(p) for p in mine], "| someone else's:", theirs)
+    assert [os.path.basename(p) for p in mine] == ["notes.txt"]
+    assert theirs == []

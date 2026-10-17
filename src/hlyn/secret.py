@@ -364,14 +364,16 @@ renamed: set[str] = set()
 
 
 def _also_named(path: str, names: dict[tuple[int, int], list[str]], entry: os.DirEntry[str]) -> None:
-    """Note `entry` if it is a regular file with more than one link."""
+    """Note `entry` if it is one of the user's regular files with more than one link."""
     try:
         if not entry.is_file(follow_symlinks=False):
             return
         info = entry.stat(follow_symlinks=False)
     except OSError:
         return
-    if info.st_nlink > 1:
+    # Only the user's own files: a link planted to reach a secret is to a file
+    # the user owns, and system files (Xcode's, /usr's) often have several names.
+    if info.st_nlink > 1 and info.st_uid == os.geteuid():
         names.setdefault((info.st_dev, info.st_ino), [info.st_nlink]).append(path)  # type: ignore[arg-type]
 
 
