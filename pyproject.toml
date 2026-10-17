@@ -136,6 +136,8 @@ ignore = [
 # Hardcoded /tmp paths in tests are the subject under test, not a mistake.
 "tests/*" = ["S101", "S603", "S607", "S108"]
 "tools/*" = ["S101", "S603", "S607"]
+# An outside black-box probe, kept exactly as written: not restyled.
+"tests/crucible.py" = ["S101", "S603", "S607", "S108", "E501", "BLE001", "B904", "UP041"]
 
 [tool.mypy]
 python_version = "3.10"
@@ -154,6 +156,9 @@ testpaths = ["tests"]
 # silently import the unmutated original instead.
 pythonpath = ["src"]
 addopts = "-q --strict-markers"
+# The outside black-box probe keeps its own name: tests/crucible.py, crucible().
+python_files = ["test_*.py", "crucible.py"]
+python_functions = ["test_*", "crucible"]
 markers = [
     "linux: requires a Linux kernel with Landlock and seccomp",
     "mac: requires macOS Seatbelt",
