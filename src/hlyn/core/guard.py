@@ -20,6 +20,8 @@ gate. `Guard` answers them from one loop:
 | unix abstract name, before Landlock ABI 9              | `EACCES`, and say so         |
 | route netlink connect                                  | the kernel's answer (0, `EPERM`, `EINVAL`) |
 | a send on any socket that names no socket file         | let it run                   |
+| chmod, chown, utime, setxattr (and kin) on a path or descriptor in a write grant | done by the gate, on the object it checked |
+| the same anywhere else                                | `EPERM`, naming `--write`    |
 | anything unreadable or unknown                        | `EACCES` (fail closed)       |
 
 A *swap* is the gate opening its own connection to the proxy, writing the
@@ -161,6 +163,41 @@ def granted(writes: tuple[str, ...] | bool) -> list[str]:
                 out.append(real)
     return sorted(set(out))
 
+# The metadata calls (seccomp.METADATA), by what names the file: a path, a
+# path under a directory descriptor (AT_FDCWD or a descriptor), or a
+# descriptor. (kind, directory-descriptor argument, path or descriptor
+# argument, flags argument or None.)
+SHAPES: dict[str, tuple[str, int | None, int, int | None]] = {
+    "chmod": ("path", None, 0, None),
+    "fchmodat": ("at", 0, 1, None),
+    "fchmodat2": ("at", 0, 1, 3),
+    "fchmod": ("fd", None, 0, None),
+    "chown": ("path", None, 0, None),
+    "lchown": ("link", None, 0, None),
+    "fchownat": ("at", 0, 1, 4),
+    "fchown": ("fd", None, 0, None),
+    "utime": ("path", None, 0, None),
+    "utimes": ("path", None, 0, None),
+    "futimesat": ("at", 0, 1, None),
+    "utimensat": ("at", 0, 1, 3),
+    "setxattr": ("path", None, 0, None),
+    "lsetxattr": ("link", None, 0, None),
+    "fsetxattr": ("fd", None, 0, None),
+    "setxattrat": ("at", 0, 1, 2),
+    "removexattr": ("path", None, 0, None),
+    "lremovexattr": ("link", None, 0, None),
+    "fremovexattr": ("fd", None, 0, None),
+    "removexattrat": ("at", 0, 1, 2),
+}
+AT_FDCWD = -100
+NOFOLLOW = 0x100  # AT_SYMLINK_NOFOLLOW
+EMPTY = 0x1000  # AT_EMPTY_PATH
+UTIME_NOW = (1 << 30) - 1
+UTIME_OMIT = (1 << 30) - 2
+PATH_MAX = 4096
+NAME_MAX = 255  # XATTR_NAME_MAX
+VALUE_MAX = 65536  # XATTR_SIZE_MAX
+
 # MSG_FASTOPEN. The filter refuses it; the gate checks the register again.
 FASTOPEN = 0x20000000
 
@@ -199,6 +236,11 @@ class Config:
     `ports` are the TCP ports `net` names in ports mode, which the gate
     checks as Landlock would when it connects for the agent (`_ports`).
 
+    `meta`: the gate also answers the calls that change a file's mode,
+    owner, times or attributes, which Landlock has no right for: it does
+    them only inside the `writes` folders (`_metadata`). Mode `"meta"` is a
+    gate that does only that.
+
     `socket_check` is who checks a unix connect's socket file, as `hlyn
     probe` says it: `"gate"` before Landlock ABI 9 (Linux 7.1), `"kernel"`
     from it. Where it is the gate, nothing else would check a call the gate
@@ -212,6 +254,7 @@ class Config:
     mode: str = "hosts"
     socket_check: str = "gate"
     ports: tuple[int, ...] = ()
+    meta: bool = False
 
     def dumps(self) -> bytes:
         return json.dumps({
@@ -223,6 +266,7 @@ class Config:
             "mode": self.mode,
             "socket_check": self.socket_check,
             "ports": list(self.ports),
+            "meta": self.meta,
         }).encode()
 
     @classmethod
@@ -239,7 +283,30 @@ class Config:
             # Missing means the stricter answer: the gate checks.
             socket_check="kernel" if raw.get("socket_check") == "kernel" else "gate",
             ports=tuple(int(port) for port in raw.get("ports", [])),
+            meta=bool(raw.get("meta", False)),
         )
+
+
+@dataclass
+class _Subject:
+    """What a metadata call names, once checked: `real` is its path (for the
+    report), `path` what the gate does the call on (`/proc/self/fd/N` of a
+    pinned descriptor, or, for a link itself, its name under `parent`)."""
+
+    real: str
+    path: str
+    parent: int | None = None
+
+
+def _int(value: int) -> int:
+    """An int argument as the kernel reads it: the low 32 bits, signed."""
+    value &= 0xFFFFFFFF
+    return value - (1 << 32) if value & 0x80000000 else value
+
+
+def _id(value: int) -> int:
+    """A uid or gid argument: 0xFFFFFFFF is "leave it" (-1)."""
+    return -1 if value == 0xFFFFFFFF else value
 
 
 @dataclass
@@ -287,6 +354,16 @@ class Guard:
         self.sendto_nr = seccomp._nr("sendto")
         self.socket_nr = seccomp._nr("socket")
         self.served = 0
+        # The metadata calls this architecture has, by number (the old
+        # libseccomp names are found as the filter finds them).
+        self.meta_calls: dict[int, str] = {}
+        if self.config.meta:
+            for name in seccomp.METADATA:
+                nr = seccomp._nr(name)
+                if nr == seccomp.BAD:
+                    nr = seccomp.LATE.get(name, seccomp.BAD)
+                if nr != seccomp.BAD:
+                    self.meta_calls[nr] = name
         writes = self.config.writes
         self.writes: tuple[str, ...] | Literal[True] = (
             True if writes is True else tuple(os.path.realpath(item) for item in writes)
@@ -375,6 +452,9 @@ class Guard:
     # -- deciding ---------------------------------------------------------
 
     def _decide(self, call: notify.Call) -> None:
+        if call.nr in self.meta_calls:
+            self._metadata(call, self.meta_calls[call.nr])
+            return
         if call.nr == self.socket_nr:
             # Only IP sockets other than TCP come here (the filter): refuse,
             # and say what it was, from the registers alone.
@@ -781,6 +861,281 @@ class Guard:
         if self.writes is True:
             return True
         return any(real == item or real.startswith(item.rstrip("/") + "/") for item in self.writes)
+
+
+    # -- metadata calls -----------------------------------------------------
+
+    def _metadata(self, call: notify.Call, name: str) -> None:
+        """A call that changes a file's mode, owner, times or attributes.
+        Landlock has no right for these, so a confined program could change
+        any file it can see. Done here instead, and only inside a write
+        grant: the gate works out which object the call names, checks that
+        object's path against the grants, and does the call itself on the
+        object it checked, through a descriptor it holds. The agent's own
+        call never runs, so a path swapped for a link, or a descriptor
+        replaced, after the check reaches nothing else. Anything outside
+        the grants is `EPERM`, as the kernel refuses a change it does not
+        allow; anything the gate cannot read or check is refused too.
+
+        What changes: the call is done by the gate, which has the agent's
+        user, not its Landlock domain, so what the agent could not do
+        itself it still cannot (the grant is checked first). A file
+        reached by a path outside the grants but also by a hard link inside
+        one is changed through the link only (`hlyn show` warns about
+        those)."""
+        kind, dirarg, subject, flagarg = SHAPES[name]
+        args = call.args
+        flags = args[flagarg] & 0xFFFFFFFF if flagarg is not None else 0
+        held: list[int] = []
+        try:
+            where = self._subject(call, name, kind, dirarg, subject, flags, held)
+            if isinstance(where, int):
+                self._no(call, where)
+                return
+            code = self._change(call, name, where)
+            if code is not None:
+                self._no(call, code)
+        finally:
+            for fd in held:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+
+    def _subject(self, call: notify.Call, name: str, kind: str, dirarg: int | None, subject: int,
+                 flags: int, held: list[int]) -> _Subject | int:
+        """The object a metadata call names, checked against the write
+        grants: a `_Subject`, or the errno to answer. Descriptors opened on
+        the way are appended to `held`, which the caller closes."""
+        args = call.args
+        refuse = errno.EPERM
+        empty = False
+        if kind == "fd":
+            number = _int(args[subject])
+            return self._by_descriptor(call, name, number, held)
+        if kind == "link":
+            flags |= NOFOLLOW
+        if flags & ~(NOFOLLOW | EMPTY):
+            return errno.EINVAL
+        if self.config.reduced:
+            self._event(call, "meta", "(unknown path)", None,
+                        detail="reduced mode: the gate can't read paths here")
+            return refuse
+        pointer = args[subject]
+        base = _int(args[dirarg]) if dirarg is not None else AT_FDCWD
+        if pointer & notify.UNTAG == 0:
+            # utimensat and futimesat name the descriptor alone when the path is NULL.
+            if name in ("utimensat", "futimesat") and base != AT_FDCWD:
+                return self._by_descriptor(call, name, base, held)
+            return errno.EFAULT
+        try:
+            raw = notify.text(call.pid, pointer, PATH_MAX - 1)
+        except OverflowError:
+            return errno.ENAMETOOLONG
+        if raw is None or not notify.valid(self.fd, call):
+            return errno.EFAULT
+        text = os.fsdecode(raw)
+        if not text:
+            empty = bool(flags & EMPTY) and name in ("fchownat", "fchmodat2", "setxattrat", "removexattrat")
+            if not empty:
+                return errno.ENOENT
+            return self._by_descriptor(call, name, base, held) if base != AT_FDCWD else \
+                self._by_path(call, name, ".", base, False, held)
+        return self._by_path(call, name, text, base, not flags & NOFOLLOW, held)
+
+    def _by_path(self, call: notify.Call, name: str, text: str, base: int, follow: bool,
+                 held: list[int]) -> _Subject | int:
+        if not os.path.isabs(text):
+            if base == AT_FDCWD:
+                folder = notify.cwd(call.pid)
+            else:
+                folder = self._folder(call.pid, base)
+            if folder is None:
+                return errno.EBADF if base != AT_FDCWD else errno.EACCES
+            text = os.path.join(folder, text)
+        leaf = os.path.basename(text)
+        link = None
+        if not follow and leaf not in ("", ".", ".."):
+            candidate = os.path.join(os.path.realpath(os.path.dirname(text) or "."), leaf)
+            if os.path.islink(candidate):
+                link = candidate
+        real = link or os.path.realpath(text)
+        if not self._granted(real):
+            return self._outside(call, name, real)
+        try:
+            if link is None:
+                fd = notify.pin(real)
+                held.append(fd)
+                return _Subject(real, f"/proc/self/fd/{fd}")
+            parent = notify.pin(os.path.dirname(link))
+            held.append(parent)
+            return _Subject(real, os.path.basename(link), parent)
+        except OSError as exc:
+            # ENOENT and the like are the kernel's own answers. ELOOP: a link
+            # appeared where there was none a moment ago: refused.
+            return errno.EACCES if exc.errno == errno.ELOOP else (exc.errno or errno.EACCES)
+
+    def _by_descriptor(self, call: notify.Call, name: str, number: int, held: list[int]) -> _Subject | int:
+        """The very file the agent's descriptor `number` refers to, checked
+        by the path it was opened by."""
+        fd = notify.hold(call.pid, number)
+        if fd is None:
+            return errno.EBADF
+        held.append(fd)
+        try:
+            real = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            return errno.EACCES
+        if not notify.valid(self.fd, call):
+            return errno.EACCES
+        if not real.startswith("/") or real.endswith(" (deleted)"):
+            # A pipe, a socket, or a file with no name left to check.
+            self._event(call, "meta", real, None,
+                        detail="a file with no path the gate can check")
+            return errno.EPERM
+        if not self._granted(real):
+            return self._outside(call, name, real)
+        return _Subject(real, f"/proc/self/fd/{fd}")
+
+    @staticmethod
+    def _folder(pid: int, number: int) -> str | None:
+        """The folder a directory descriptor of thread `pid` is open on."""
+        try:
+            folder = os.readlink(f"/proc/{pid}/fd/{number}")
+        except OSError:
+            return None
+        return folder if folder.startswith("/") and not folder.endswith(" (deleted)") else None
+
+    def _outside(self, call: notify.Call, name: str, real: str) -> int:
+        self._event(call, "meta", real, f"--write {shlex.quote(os.path.dirname(real) or '/')}",
+                    detail=f"{name} changes a file's mode, owner, times or attributes")
+        return errno.EPERM
+
+    def _change(self, call: notify.Call, name: str, where: _Subject) -> int | None:
+        """Do the call on `where`: None once it is answered here (0 on
+        success), or the errno to answer."""
+        args = call.args
+
+        def word(i: int) -> int:
+            return args[i] & 0xFFFFFFFF  # an int argument: the half the kernel reads
+
+        try:
+            if name in ("chmod", "fchmod", "fchmodat", "fchmodat2"):
+                mode = word(1 if name in ("chmod", "fchmod") else 2)
+                if where.parent is not None:
+                    return errno.EOPNOTSUPP  # fchmodat2 on a link: the kernel's answer
+                os.chmod(where.path, mode & 0o7777)
+            elif "chown" in name:
+                first = 1 if name in ("chown", "lchown", "fchown") else 2
+                uid, gid = (_id(word(first)), _id(word(first + 1)))
+                if where.parent is not None:
+                    os.chown(where.path, uid, gid, dir_fd=where.parent, follow_symlinks=False)
+                else:
+                    os.chown(where.path, uid, gid)
+            elif name.startswith(("utime", "futimesat")):
+                times = self._times(call, name)
+                if isinstance(times, int):
+                    return times
+                self._set_times(where, times)
+            elif "xattr" in name:
+                return self._attribute(call, name, where)
+            else:
+                return errno.ENOSYS
+        except OSError as exc:
+            return exc.errno or errno.EIO
+        if not notify.valid(self.fd, call):
+            return None  # the thread went: nothing waits for the answer
+        notify.answer(self.notice, call, value=0)
+        return None
+
+    def _times(self, call: notify.Call, name: str) -> tuple[int | None, int | None] | int:
+        """The (access, modification) times a utime-family call asks for, in
+        nanoseconds: None for "now", -1 for "leave it" (`UTIME_OMIT`). Or
+        the errno."""
+        args = call.args
+        pointer = args[2 if name in ("utimensat", "futimesat") else 1]
+        if pointer & notify.UNTAG == 0:
+            return (None, None)
+        if name == "utime":
+            data = notify.whole(call.pid, pointer, 16)
+            if data is None:
+                return errno.EFAULT
+            a, m = struct.unpack("=qq", data)
+            return (a * 10**9, m * 10**9)
+        data = notify.whole(call.pid, pointer, 32)
+        if data is None:
+            return errno.EFAULT
+        first, second, third, fourth = struct.unpack("=qqqq", data)
+        if name == "utimensat":
+            out: list[int | None] = []
+            for seconds, nanos in ((first, second), (third, fourth)):
+                if nanos == UTIME_NOW:
+                    out.append(None)
+                elif nanos == UTIME_OMIT:
+                    out.append(-1)
+                elif 0 <= nanos < 10**9:
+                    out.append(seconds * 10**9 + nanos)
+                else:
+                    return errno.EINVAL
+            return (out[0], out[1])
+        if not (0 <= second < 10**6 and 0 <= fourth < 10**6):
+            return errno.EINVAL
+        return (first * 10**9 + second * 1000, third * 10**9 + fourth * 1000)
+
+    @staticmethod
+    def _set_times(where: _Subject, times: tuple[int | None, int | None]) -> None:
+        access, modified = times
+        follow = where.parent is None
+        extra: dict[str, object] = {} if follow else {"dir_fd": where.parent, "follow_symlinks": False}
+        if access is None and modified is None:
+            os.utime(where.path, None, **extra)  # type: ignore[arg-type]
+            return
+        if access is None or modified is None or access == -1 or modified == -1:
+            now = time.time_ns()
+            current = os.stat(where.path, **extra)  # type: ignore[arg-type]
+            access = current.st_atime_ns if access == -1 else now if access is None else access
+            modified = current.st_mtime_ns if modified == -1 else now if modified is None else modified
+        os.utime(where.path, ns=(access, modified), **extra)  # type: ignore[arg-type]
+
+    def _attribute(self, call: notify.Call, name: str, where: _Subject) -> int | None:
+        """setxattr or removexattr, on a file (not a link: the kernel allows
+        no user attribute on one, and answers `EPERM`)."""
+        args = call.args
+        at = name.endswith("at")
+        first = 3 if at else 1  # where the attribute's name is
+        if where.parent is not None:
+            return errno.EPERM
+        try:
+            raw = notify.text(call.pid, args[first], NAME_MAX)
+        except OverflowError:
+            return errno.ERANGE
+        if raw is None or not raw:
+            return errno.EFAULT if raw is None else errno.ERANGE
+        attribute = raw
+        if name.startswith(("remove", "fremove", "lremove")):
+            if not notify.valid(self.fd, call):
+                return None
+            os.removexattr(where.path, attribute)
+            notify.answer(self.notice, call, value=0)
+            return None
+        if at:
+            # setxattrat's value, size and flags are in a struct the agent points to.
+            if (args[5] & 0xFFFFFFFF) < 16:
+                return errno.EINVAL
+            block = notify.whole(call.pid, args[4], 16)
+            if block is None:
+                return errno.EFAULT
+            pointer, size, kind = struct.unpack("=QII", block)
+        else:
+            pointer, size, kind = args[2], args[3], args[4] & 0xFFFFFFFF
+        if size > VALUE_MAX:
+            return errno.E2BIG
+        value = notify.whole(call.pid, pointer, size) if size else b""
+        if value is None:
+            return errno.EFAULT
+        if not notify.valid(self.fd, call):
+            return None
+        os.setxattr(where.path, attribute, value, kind)
+        notify.answer(self.notice, call, value=0)
+        return None
 
     # -- answering --------------------------------------------------------
 

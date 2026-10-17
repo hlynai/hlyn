@@ -170,6 +170,18 @@ PROMISES: list[dict[str, object]] = [
         "control": [HOSTS],
     },
     {
+        "says": "changing the mode, owner, times or extended attributes of a file outside the write grants",
+        "tests": ["test_metadata.py::test_changes_outside_the_grants_are_refused_and_change_nothing",
+                  "test_metadata.py::test_a_link_inside_a_grant_does_not_reach_a_file_outside_it",
+                  "test_metadata.py::test_a_descriptor_to_a_file_that_was_removed_is_refused",
+                  "test_metadata.py::test_the_report_names_the_folder_to_grant"],
+        "control": ["test_metadata.py::test_the_same_changes_inside_a_grant_work_and_take_effect",
+                    "test_metadata.py::test_an_attribute_inside_a_grant_is_set_and_removed",
+                    "test_metadata.py::test_with_writes_open_nothing_is_trapped_and_the_call_just_runs"],
+        "gap": "REMAINING #66: not checked where no gate can start (inside another seccomp listener, "
+               "libseccomp before 2.5); a file reached by a hard link inside a grant is changed through it",
+    },
+    {
         "says": "On macOS, system services that resolve names or fetch URLs",
         "tests": ["test_mac_hosts.py::test_row_25_trustd_and_dnssd_are_refused_and_libinfo_works",
                   "test_mac.py::test_dnssd_cannot_look_up_names_with_the_network_off",

@@ -54,12 +54,15 @@ __all__ = [
     "fdflags",
     "grab",
     "grabbable",
+    "hold",
     "inode",
     "netlink",
     "pin",
     "proto",
     "read",
     "receive",
+    "text",
+    "whole",
     "sockaddr",
     "tcp",
     "unix",
@@ -532,6 +535,45 @@ def read(pid: int, where: int, size: int) -> bytes | None:
         return b""
     finally:
         os.close(fd)
+
+
+def whole(pid: int, where: int, size: int) -> bytes | None:
+    """Exactly `size` bytes of thread `pid`'s memory at `where`, in as many
+    reads as `read`'s cap needs. `None`: unreadable, or short (the kernel's
+    EFAULT). Call `valid()` afterwards, as for `read`."""
+    out = b""
+    while len(out) < size:
+        got = read(pid, where + len(out), size - len(out))
+        if not got:
+            return None
+        out += got
+    return out
+
+
+def text(pid: int, where: int, most: int) -> bytes | None:
+    """The NUL-ended string at `where` in thread `pid`, without the NUL.
+    `None`: unreadable. Raises `OverflowError` when there is no NUL within
+    `most` bytes (the kernel's ENAMETOOLONG or ERANGE)."""
+    out = b""
+    while len(out) <= most:
+        got = read(pid, where + len(out), min(MOST, most + 1 - len(out)))
+        if not got:
+            return None
+        end = got.find(b"\0")
+        if end >= 0:
+            return out + got[:end]
+        out += got
+    raise OverflowError(most)
+
+
+def hold(pid: int, fd: int) -> int | None:
+    """An `O_PATH` descriptor for the very file thread `pid`'s descriptor
+    `fd` refers to (not a path looked up again), or `None` if there is no
+    such descriptor. The caller closes it."""
+    try:
+        return os.open(f"/proc/{pid}/fd/{fd}", O_PATH | os.O_CLOEXEC)
+    except OSError:
+        return None
 
 
 # ---------------------------------------------------------------------------

@@ -1245,6 +1245,10 @@ def seal() -> str:
     from .fds import Inherited
     from .policy import Policy
 
+    if sys.platform == "linux":
+        from .core import linux
+
+        linux.GUARD = False  # no gate for the metadata calls: see core/linux.GUARD
     with warnings.catch_warnings():
         # The event loop's own sockets are open here: hlyn's, not a launcher's.
         warnings.simplefilter("ignore", Inherited)

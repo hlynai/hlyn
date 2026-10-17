@@ -622,6 +622,7 @@ GATE_SAYS = {
     "unix-send": ("/run/some.sock", "--net-any"),
     "unix-bound": ("/run/some.sock", "--net-any"),
     "unix-abstract": ("@own-agent", "--net-any"),
+    "meta": ("/srv/data/file", "--write /srv/data"),
     "gate-error": ("ValueError", ""),
     "direct": ("1.1.1.1:443", "--net 1.1.1.1:443"),
     "dns": ("8.8.8.8:53", ""),
@@ -655,7 +656,7 @@ def test_a_network_refusal_carries_its_machine_key_in_json(tmp_path, source, why
     out = json.loads(json.dumps(report.json(1)))["blocked"]
     print(f"{source} {why!r} -> {out}")
     assert [item["why"] for item in out] == [why]  # exactly the key, never the prose
-    assert out[0]["source"] == source and out[0]["kind"] == "net"
+    assert out[0]["source"] == source and out[0]["kind"] == ("write" if why == "meta" else "net")
 
 
 def test_an_unknown_reason_is_dropped_not_given_a_made_up_key(tmp_path):

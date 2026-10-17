@@ -464,6 +464,9 @@ def _machine(out: dict[str, object]) -> str:
          f" ({out['scope_why']})" if out.get("scope_why") else ""),
         ("local sockets only in write-granted folders" + _checker(out), out.get("sockets"),
          " (needs Linux 7.1 or newer, or libseccomp 2.5 or newer for hlyn's gate)" if linux else ""),
+        ("mode, owner and times changed only in write-granted folders",
+         out.get("metadata"), " (needs libseccomp 2.5 or newer, and not inside another seccomp listener)"
+         if linux else ""),
         ("listing what was blocked, after hlyn run", out.get("report"), ""),
     ]
     tried = out.get("tried")

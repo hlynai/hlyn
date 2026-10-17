@@ -28,7 +28,7 @@ TYPE_CHECKING = False
 if TYPE_CHECKING:
     from ..policy import Policy
 
-__all__ = ["MISSING", "SHARED", "SHUT", "busy", "load", "program", "ready", "why"]
+__all__ = ["METADATA", "MISSING", "SHARED", "SHUT", "busy", "load", "program", "ready", "why"]
 
 
 # -- libseccomp constants ---------------------------------------------------
@@ -127,6 +127,23 @@ SENDS = {"sendto": 3, "sendmsg": 2, "sendmmsg": 3}
 # run without ever having a path. Landlock enforces an exec allowlist per path,
 # and has nothing to match against when there is no path.
 EMPTY = 0x1000  # AT_EMPTY_PATH
+
+# Calls that change a file's mode, owner, times or extended attributes. Landlock
+# has no right for them (measured on 7.0.14: a confined program with no write
+# grants changed the mode of a file it could only read), so with writes limited
+# the gate answers each and does it only inside a write grant (guard._metadata).
+# Path-based, then descriptor-based; the ones an architecture lacks (aarch64 has
+# no chmod, chown, utime or utimes) are skipped by `_rule`.
+METADATA: tuple[str, ...] = (
+    "chmod", "fchmodat", "fchmodat2", "fchmod",
+    "chown", "lchown", "fchownat", "fchown",
+    "utime", "utimes", "futimesat", "utimensat",
+    "setxattr", "lsetxattr", "fsetxattr", "setxattrat",
+    "removexattr", "lremovexattr", "fremovexattr", "removexattrat",
+)
+# Where a libseccomp too old to know a name still has the call (the numbers
+# are the same on x86_64 and aarch64).
+LATE = {"fchmodat2": 452, "setxattrat": 463, "removexattrat": 466}
 
 # ioctl requests that type into the terminal (see `_build`).
 TIOCSTI = 0x5412
@@ -406,6 +423,17 @@ def _rule(ctx: int, action: int, name: str, args: Iterable[Arg] = ()) -> None:
         raise Failed(f"could not add a seccomp rule for {name!r}: error {-rc}")
 
 
+def _notify_call(ctx: int, name: str) -> None:
+    """Send `name` to the gate, by number where this libseccomp lacks the name."""
+    nr = _nr(name)
+    if nr == BAD and name in LATE:
+        rc = lib().seccomp_rule_add_array(ctx, NOTIFY, LATE[name], 0, None)
+        if rc != 0:
+            raise Failed(f"could not add a seccomp rule for {name!r}: error {-rc}")
+        return
+    _rule(ctx, NOTIFY, name)
+
+
 def alone() -> None:
     """Add a filter that refuses every `connect` and every send with an
     address (EPERM), on top of whatever this process is already sealed with.
@@ -471,12 +499,14 @@ def busy() -> bool:
     return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2
 
 
-def _build(policy: Policy, watch: bool = False, datagrams: bool = False) -> int:
+def _build(policy: Policy, watch: bool = False, datagrams: bool = False, meta: bool = False) -> int:
     """The compiled filter for `policy`, as a libseccomp context the caller
     releases. Nothing is loaded. `watch`: send unix connects to a gate
     without naming hosts (see `load`). `datagrams`: refuse unix datagram
     sockets (see UNIX_KINDS); `linux.load` asks for it while a gate checks
-    unix sockets on a kernel before Landlock ABI 9."""
+    unix sockets on a kernel before Landlock ABI 9. `meta`: send the calls
+    that change a file's mode, owner, times or attributes to the gate
+    (METADATA)."""
     named = bool(policy.hosts())
     api = lib()
     ctx = api.seccomp_init(ALLOW)
@@ -497,7 +527,7 @@ def _build(policy: Policy, watch: bool = False, datagrams: bool = False) -> int:
         # (SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV, Linux 5.19). libseccomp
         # before 2.6 has no attribute for it and refuses the call; the gate
         # then answers the restarted call itself (FINDINGS.md, "half").
-        if named or watch:
+        if named or watch or meta:
             api.seccomp_attr_set(ctx, WAITKILL, 1)
 
         # On x86_64 a syscall number can carry the x32 bit. Adding the x32
@@ -633,6 +663,10 @@ def _build(policy: Policy, watch: bool = False, datagrams: bool = False) -> int:
             _rule(ctx, NOTIFY, "connect")
             _rule(ctx, NOTIFY, "sendto", [Arg(4, NE, 0, 0), Arg(3, MASKED, FASTOPEN, 0)])
 
+        if meta:
+            for name in METADATA:
+                _notify_call(ctx, name)
+
         if policy.exec is False:
             for name in BIRTH:
                 _rule(ctx, ERROR | EPERM, name)
@@ -643,14 +677,14 @@ def _build(policy: Policy, watch: bool = False, datagrams: bool = False) -> int:
     return int(ctx)
 
 
-def program(policy: Policy, watch: bool = False, datagrams: bool = False) -> bytes:
+def program(policy: Policy, watch: bool = False, datagrams: bool = False, meta: bool = False) -> bytes:
     """The BPF program `load` would install for `policy`, for inspection:
     what the filter answers is read from here in tests, including paths no
     kernel here can take (a foreign architecture)."""
     import tempfile
 
     api = lib()
-    ctx = _build(policy, watch, datagrams)
+    ctx = _build(policy, watch, datagrams, meta)
     try:
         with tempfile.TemporaryFile() as out:
             rc = api.seccomp_export_bpf(ctx, out.fileno())
@@ -662,7 +696,7 @@ def program(policy: Policy, watch: bool = False, datagrams: bool = False) -> byt
         api.seccomp_release(ctx)
 
 
-def load(policy: Policy, watch: bool = False, datagrams: bool = False) -> int | None:
+def load(policy: Policy, watch: bool = False, datagrams: bool = False, meta: bool = False) -> int | None:
     """Compile and install the syscall filter for `policy`.
 
     One-way. Once loaded the filter applies to this process and every thread
@@ -673,12 +707,13 @@ def load(policy: Policy, watch: bool = False, datagrams: bool = False) -> int | 
     `connect()` then waits for an answer on it, so it must be handed to the
     gate at once and this process's copy closed (5.2, step 5). Otherwise
     returns None. `datagrams`: refuse unix datagram sockets (UNIX_KINDS).
+    `meta`: the metadata calls wait on the descriptor too.
     """
-    named = bool(policy.hosts()) or watch
+    named = bool(policy.hosts()) or watch or meta
     api = lib()
     if named:
         notify._lib()  # raises, naming the fix, before anything is loaded
-    ctx = _build(policy, watch, datagrams)
+    ctx = _build(policy, watch, datagrams, meta)
     try:
         ctypes.set_errno(0)
         rc = api.seccomp_load(ctx)

@@ -74,6 +74,10 @@ def probe() -> dict[str, object]:
         "ports": ok,  # network rules at all
         # Host names in `net`: the notify API and no other listener here.
         "hosts": ok and filter and notify.ready() and not seccomp.busy(),
+        # Calls that change a file's mode, owner, times or attributes done
+        # only inside the write grants: Landlock has no right for them, so
+        # this is the gate's, with the same needs as host mode's.
+        "metadata": ok and filter and notify.ready() and not seccomp.busy(),
         # Socket files outside the write grants refused: by the kernel itself
         # from Landlock ABI 9 (the shim's `bonus`), before that by hlyn's gate
         # in every mode but an open network (`watched`, guard's pinned swap).
@@ -213,23 +217,44 @@ def ready_hosts() -> None:
     _checked = True
 
 
-def watched(policy: Policy) -> bool:
+def sockets(policy: Policy) -> bool:
     """Whether sealing `policy` here needs a gate for unix sockets although
     `net` names no hosts: the network is off or limited to ports, and
     Landlock can't check socket files (ABI 9, Linux 7.1). Before that a
     confined program reached any unix socket on the machine, among them the
     user's systemd bus and docker.sock, each a way to run code outside the
-    environment (FINDINGS.md, "Checking the eight decisions").
+    environment (FINDINGS.md, "Checking the eight decisions")."""
+    return not (policy.net is True or policy.hosts() or landlock.abi() >= 9)
+
+
+# Cleared by the proxy helper before it seals itself: it has no files to write
+# and no program to run, and a gate of its own would be a second process in
+# every run for a process that only serves connections.
+GUARD = True
+
+
+def guards(policy: Policy) -> bool:
+    """Whether the gate also does the calls that change a file's mode,
+    owner, times or attributes. Landlock has no right for them, so with
+    writes limited a confined program could change any file it can see
+    (measured on Linux 7.0.14); the gate does them only inside the write
+    grants (guard `_metadata`). Not needed when every path is writable."""
+    return GUARD and policy.writes() is not True
+
+
+def watched(policy: Policy) -> bool:
+    """Whether sealing `policy` here starts a gate although `net` names no
+    hosts: for unix sockets (`sockets`) or for metadata calls (`guards`).
 
     False where no gate can be installed: libseccomp before 2.5, or this
     process already inside a notification listener (the kernel allows one
     per process tree: an outer hlyn in host mode, whose gate then checks
-    this process's unix sockets by its own rules). The seal says which
-    applies (`jail._seal`). Asked by each entry point before it starts
-    anything; a forked child keeps the answer."""
-    if policy.net is True or policy.hosts():
+    this process's unix sockets by its own rules, and none of its metadata
+    calls). The seal says which applies (`jail._seal`). Asked by each entry
+    point before it starts anything; a forked child keeps the answer."""
+    if policy.hosts():
         return False
-    if landlock.abi() >= 9:
+    if not (sockets(policy) or guards(policy)):
         return False
     return notify.ready() and not seccomp.busy()
 
@@ -261,17 +286,24 @@ def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int
                               "connections (hlyn.on, run, spawn and hlyn run start one). Nothing was sealed.")
         writes = policy.writes()
         config = guard.Config(port=port, rules=named, writes=writes, connect=CONNECT,
-                              socket_check="kernel" if landlock.abi() >= 9 else "gate")
+                              socket_check="kernel" if landlock.abi() >= 9 else "gate",
+                              meta=guards(policy))
     # Unix sockets without hosts (`watched`): the entry point started a gate
     # when it was needed and possible; that decision is read here, from
     # whether there is a gate to hand to.
-    watch = not named and policy.net is not True and gate._handoff is not None
+    gated = not named and gate._handoff is not None
+    watch = gated and sockets(policy)
+    meta = (bool(named) or gated) and guards(policy)
     if watch:
-        # Only before Landlock ABI 9 (`watched`): the gate checks socket files.
+        # Only before Landlock ABI 9 (`sockets`): the gate checks socket files.
         config = guard.Config(port=0, rules=(), writes=policy.writes(), connect=CONNECT,
                               mode="off" if policy.net is False else "ports", socket_check="gate",
                               ports=tuple(port for port in policy.net if isinstance(port, int))
-                              if isinstance(policy.net, tuple) else ())
+                              if isinstance(policy.net, tuple) else (), meta=meta)
+    elif gated and meta:
+        # Only the metadata calls (`guards`): no unix socket check, no proxy.
+        config = guard.Config(port=0, rules=(), writes=policy.writes(), connect=CONNECT,
+                              mode="meta", socket_check="kernel", meta=True)
     # Unix datagram sockets while a gate checks unix sockets, before Landlock
     # ABI 9 (seccomp.UNIX_KINDS). From ABI 9 the kernel checks each send's
     # path itself, so they are left alone there.
@@ -300,7 +332,7 @@ def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int
                 f"through it. Close them before calling hlyn.on(), or use hlyn.run(fn)."
             )
     abi = landlock.load(policy)
-    fd = seccomp.load(policy, watch=watch, datagrams=refuse)
+    fd = seccomp.load(policy, watch=watch, datagrams=refuse, meta=meta)
     if fd is not None:
         gate.hand(fd, config)
     return abi

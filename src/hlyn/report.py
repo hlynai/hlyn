@@ -214,7 +214,7 @@ METADATA_NOTE = (
 # proxy's reasons (WHY), the gate's own (`unix*`, `udp`, `gate-error`), and the
 # ones both say. Stable: scripts match on these, never on the prose.
 REASONS: tuple[str, ...] = (
-    *WHY, "udp", "unix", "unix-send", "unix-bound", "unix-abstract", "gate-error",
+    *WHY, "udp", "unix", "unix-send", "unix-bound", "unix-abstract", "meta", "gate-error",
 )
 
 # Why a resolver, D-Bus or container-runtime socket is never allowed while
@@ -742,6 +742,19 @@ class Report:
                                  "file in a folder you grant with --write (--net-any if you trust it)",
             }[why]
             return Entry("net", shown, None, note, source="gate")
+        if why == "meta":
+            if where == "(unknown path)":
+                return Entry("write", "a file's mode, owner or times", None,
+                             "the gate can't read paths here (Yama ptrace_scope 2 or 3), so changing "
+                             "them is refused; see hlyn probe", source="gate")
+            shown = safe(tilde(where))[:300]
+            if where.endswith("…") or denial.allow is None:
+                return Entry("write", shown, None,
+                             "a file with no path the gate can check: its mode, owner and times "
+                             "can't be changed", source="gate")
+            return Entry("write", shown, flag("--write", os.path.dirname(where) or "/"),
+                         "changing its mode, owner, times or attributes needs write access to its "
+                         "folder", source="gate")
         if why == "udp":
             return Entry("net", f"a name lookup or QUIC ({safe(where)[:20]})", None, LOOKUP, source="gate")
         if why == "gate-error":

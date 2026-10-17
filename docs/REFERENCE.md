@@ -120,6 +120,7 @@ ok  hlyn can confine programs on this machine (Linux 6.18.44)
     yes host names in net (api.openai.com)
     yes isolation between agents on this machine
     yes local sockets only in write-granted folders, checked by hlyn's gate (Linux 7.1 or newer checks them in the kernel)
+    yes mode, owner and times changed only in write-granted folders
     yes listing what was blocked, after hlyn run
 ```
 

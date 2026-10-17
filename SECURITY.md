@@ -22,6 +22,7 @@ explanation within 30 days. Credit is given to reporters who want it.
 Anything that lets a confined process reach past its policy:
 
 - reading, writing, or executing a path the policy did not grant,
+- changing the mode, owner, times or extended attributes of a file outside the write grants (on Linux Landlock has no right for these, so the gate does them, and only inside a write grant, on the object it checked; where no gate can start, inside another seccomp listener or with libseccomp older than 2.5, they are not checked and `hlyn probe` says so),
 - reaching a TCP port the policy did not name,
 - reaching a host `net` does not list, or reaching anything at all except
   through hlyn's proxy when `net` names hosts (a direct connection, UDP, DNS,

@@ -220,6 +220,8 @@ def probe() -> dict[str, object]:
         # (host mode) or with the whole network, and Seatbelt checks the path
         # the kernel uses, so there is no race to win.
         "sockets": ready(),
+        # chmod, chown, utime and setxattr outside the write grants: refused by the profile.
+        "metadata": ready(),
         # Whether `hlyn run` can list what was blocked. Read from the system
         # log, so it needs nothing built or installed.
         "report": os.access("/usr/bin/log", os.X_OK),
