@@ -307,6 +307,8 @@ def exposed(plan: Policy) -> list[str]:
     budget: list[float] = [LOOKS, time.monotonic() + TIME]
     linked = _linked_secrets(home)
     cut.clear()
+    renamed.clear()
+    names: dict[tuple[int, int], list[str]] = {}
     for root in roots:
         if not os.path.isdir(root):
             continue  # a file granted on its own: a decision, see above
@@ -316,6 +318,7 @@ def exposed(plan: Policy) -> list[str]:
         for entry in _walk(root, budget):
             path = entry.path
             if not (secret_file(path) or _is_link_to(entry, linked)):
+                _also_named(path, names, entry)
                 continue
             if _within(path, roots) and os.path.exists(path):
                 found.append(path)
@@ -323,6 +326,12 @@ def exposed(plan: Policy) -> list[str]:
                     return found
         if budget[0] < 0 or time.monotonic() > budget[1]:
             cut.append(root)
+    if not cut and len(found) < 20:
+        # Only a complete scan can say a name is missing from it.
+        for path in _found_elsewhere(names)[: 20 - len(found)]:
+            if path not in found:
+                found.append(path)
+                renamed.add(path)
     # The known places, checked by name against everything the policy lets the
     # agent read, not only what was typed: the walk skips caches and stops at
     # its budget, and grants the user never typed (the runtime, `tmp`, the
@@ -345,6 +354,35 @@ def exposed(plan: Policy) -> list[str]:
                 if len(found) >= 20:
                     break
     return found
+
+
+# Files in the granted folders that also have a name where the scan did not look
+# (outside the grants, or in a folder it skips): reading one through the granted
+# name reads whatever the other name points at, and no file name says what that
+# is. Filled by the last `exposed`; `warning` says so beside the paths.
+renamed: set[str] = set()
+
+
+def _also_named(path: str, names: dict[tuple[int, int], list[str]], entry: os.DirEntry[str]) -> None:
+    """Note `entry` if it is a regular file with more than one link."""
+    try:
+        if not entry.is_file(follow_symlinks=False):
+            return
+        info = entry.stat(follow_symlinks=False)
+    except OSError:
+        return
+    if info.st_nlink > 1:
+        names.setdefault((info.st_dev, info.st_ino), [info.st_nlink]).append(path)  # type: ignore[arg-type]
+
+
+def _found_elsewhere(names: dict[tuple[int, int], list[str]]) -> list[str]:
+    """The files with more links than names seen in the scan: another name
+    exists that the scan did not see."""
+    out = []
+    for links, *seen in names.values():
+        if links > len(seen):  # type: ignore[operator]
+            out.append(seen[0])  # type: ignore[arg-type]
+    return sorted(out, key=lambda item: (item.count(os.sep), item))
 
 
 # The granted folders whose last `exposed` scan stopped at its budget before
@@ -374,7 +412,11 @@ def warning(found: list[str], cli: bool) -> str:
         real = os.path.realpath(path)
         return "./" + os.path.relpath(real, here) if under(real, here) and real != here else tilde(path)
 
-    shown = "\n".join(f"  {safe(near(path))}" for path in found)
+    shown = "\n".join(
+        f"  {safe(near(path))}" + ("  (also has a name elsewhere)" if path in renamed else "")
+        for path in found
+    )
+    plain = [path for path in found if path not in renamed]
     one = len(found) == 1
     narrow = "--read ./src" if cli else 'read=["./src"]'
     keep = "--env NAME" if cli else 'env=["NAME"]'
@@ -383,9 +425,25 @@ def warning(found: list[str], cli: bool) -> str:
         if cli
         else 'warnings.filterwarnings("ignore", category=hlyn.Exposed) stops this warning.'
     )
+    if renamed and not plain:
+        head = (
+            f"hlyn: warning: the agent can read {len(found)} file{'' if one else 's'} that "
+            f"also {'has' if one else 'have'} a name elsewhere (a hard link), and reach the network. "
+            f"Whatever the other name points at is readable through this one:\n"
+        )
+    elif renamed:
+        head = (
+            f"hlyn: warning: the agent can read {len(plain)} secret file{'' if len(plain) == 1 else 's'} "
+            f"and {len(found) - len(plain)} that also {'has' if len(found) - len(plain) == 1 else 'have'} "
+            f"a name elsewhere (a hard link), and reach the network, so it could send them out:\n"
+        )
+    else:
+        head = (
+            f"hlyn: warning: the agent can read {len(found)} secret file{'' if one else 's'} "
+            f"and reach the network, so it could send {'it' if one else 'them'} out:\n"
+        )
     return (
-        f"hlyn: warning: the agent can read {len(found)} secret file{'' if one else 's'} "
-        f"and reach the network, so it could send {'it' if one else 'them'} out:\n"
+        head +
         f"{shown}\n"
         f"  Grant only the folders it needs (e.g. {narrow} instead of the whole project),\n"
         f"  pass a key it needs as a variable instead ({keep}), or move the secrets out.\n"
