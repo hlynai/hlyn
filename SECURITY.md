@@ -117,7 +117,7 @@ maintainers' design notes, which are private.
 
 ## Scope
 
-The library, the CLI, the native shim, the proxy and gate helpers, and the
-framework adapters in this repository. The kernel facilities underneath —
+The library, the CLI, the native shim, and the proxy and gate helpers in this
+repository. The kernel facilities underneath —
 Landlock, seccomp, Seatbelt — belong to their own projects; report kernel bugs
 upstream, though we would like to know so we can work around them.
