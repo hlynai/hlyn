@@ -131,3 +131,17 @@ def test_a_file_owned_by_someone_else_with_two_names_is_not_flagged_but_the_user
     print("own:", [os.path.basename(p) for p in mine], "| someone else's:", theirs)
     assert [os.path.basename(p) for p in mine] == ["notes.txt"]
     assert theirs == []
+
+
+def test_a_file_in_an_installed_tree_with_two_names_is_not_flagged_but_the_same_in_a_project_is(tmp_path, monkeypatch):
+    """A toolchain's libraries have several names even when the user owns them (CI's
+    Xcode); a project folder's second name is the thing to warn about."""
+    outside, proj = tree(tmp_path)
+    (outside / "stash.cfg").write_text("x")
+    os.link(outside / "stash.cfg", proj / "notes.txt")
+    project = check(proj)
+    monkeypatch.setattr(secret, "INSTALLED", (str(proj),))
+    installed = check(proj)
+    print("in a project:", [os.path.basename(p) for p in project], "| in an installed tree:", installed)
+    assert [os.path.basename(p) for p in project] == ["notes.txt"]
+    assert installed == []

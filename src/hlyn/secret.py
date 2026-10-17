@@ -363,8 +363,20 @@ def exposed(plan: Policy) -> list[str]:
 renamed: set[str] = set()
 
 
+# Where programs are installed, not projects kept: files there routinely have several
+# names (a toolchain's libraries, Homebrew's links), even when the user owns them
+# (CI's Xcode did), and a secret is not linked into them to be read through a
+# program's name.
+INSTALLED: tuple[str, ...] = (
+    "/Applications", "/Library", "/System", "/usr", "/opt", "/bin", "/sbin", "/lib", "/lib64",
+    "/etc", "/nix", "/snap", "/var/lib",
+)
+
+
 def _also_named(path: str, names: dict[tuple[int, int], list[str]], entry: os.DirEntry[str]) -> None:
     """Note `entry` if it is one of the user's regular files with more than one link."""
+    if any(path == tree or path.startswith(tree + "/") for tree in INSTALLED):
+        return
     try:
         if not entry.is_file(follow_symlinks=False):
             return
