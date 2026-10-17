@@ -98,8 +98,18 @@ def build() -> argparse.ArgumentParser:
     cc.add_argument("--logout", action="store_true", help="macOS: remove the token --login kept")
     cc.add_argument("cmd", nargs=argparse.REMAINDER, help="-- arguments for claude")
 
+    keep = sub.add_parser("log", help="check a --log file for edits")
+    keeps = keep.add_subparsers(dest="act", required=True)
+    verify = keeps.add_parser("verify", help="say whether the log is intact, edited or cut short")
+    verify.add_argument("file", help="the --log file")
+    verify.add_argument("--anchor", metavar="HASH",
+                        help="the last seal's hash as you kept it; the log must end in that seal")
+    verify.add_argument("--json", action="store_true", help="print as JSON")
+
     check = sub.add_parser("probe", help="report what this machine can enforce")
     check.add_argument("--json", action="store_true", help="print as JSON")
+    check.add_argument("--quick", action="store_true",
+                       help="read the kernel's version and libraries only; don't confine a test program")
 
     kinds = sub.add_parser("presets", help="list the built-in presets and what each grants")
     kinds.add_argument("--json", action="store_true", help="print as JSON")
@@ -456,6 +466,11 @@ def _machine(out: dict[str, object]) -> str:
          " (needs Linux 7.1 or newer, or libseccomp 2.5 or newer for hlyn's gate)" if linux else ""),
         ("listing what was blocked, after hlyn run", out.get("report"), ""),
     ]
+    tried = out.get("tried")
+    if isinstance(tried, dict) and tried.get("ok") is not None:
+        # The rows above are read from versions and libraries; this one was done.
+        rows.insert(1, ("tried: a confined test program was refused the rest",
+                        tried["ok"], f": {tried['why']}"))
     lines = [head, *(f"    {'yes' if yes else 'no':<4}{name}{'' if yes else why}" for name, yes, why in rows)]
     if out.get("reduced"):
         lines.append(f"    note: host names work in reduced mode here: {out['reduced']}.")
@@ -553,6 +568,7 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
         ear.close()
         if blocked is not None:
             blocked.close()
+        _sealed(plan)
 
     if failed:
         return 1
@@ -565,6 +581,19 @@ def _launch(cmd: list[str], plan: Policy, quiet: bool = False, as_json: bool = F
     else:
         sys.stderr.write(book.text(code, cmd))
     return code if code >= 0 else 128 - code
+
+
+def _sealed(plan: Policy) -> None:
+    """Seal the record file, if the run wrote one, so a later edit shows
+    (`seal.py`). Never fails the run: a record that can't be sealed is said so."""
+    if not isinstance(plan.log, str):
+        return
+    from . import log
+
+    try:
+        log.seal_file(plan.log, plan.writes())
+    except (OSError, ValueError) as exc:
+        print(f"hlyn: the log {plan.log} could not be sealed: {exc}", file=sys.stderr)
 
 
 def _own(grants: Policy) -> Policy:
@@ -1097,6 +1126,30 @@ def _file(book: Any, denial: Any) -> None:
         )
 
 
+def _verify(args: argparse.Namespace) -> int:
+    """`hlyn log verify`: 0 when sealed and intact, 1 when edited, 3 when intact
+    but records follow the last seal (a run that was killed)."""
+    from . import seal
+
+    try:
+        out = seal.verify(args.file, args.anchor)
+    except OSError as exc:
+        print(f"hlyn: can't read {args.file}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(out, indent=2))
+    else:
+        mark = {"sealed": "intact", "unsealed": "not sealed to the end", "edited": "EDITED"}[out["state"]]
+        print(f"{mark}  {out['intact']} of {out['seals']} seals match" + (
+            f", {out['after_last_seal']} bytes after the last seal" if out["after_last_seal"] else ""))
+        for problem in out["problems"]:
+            print(f"  {problem}")
+        if out["last"]:
+            print(f"  last seal {out['last'][:16]}  keep it; check later with: "
+                  f"hlyn log verify {args.file} --anchor {out['last'][:16]}")
+    return {"sealed": 0, "unsealed": 3, "edited": 1}[out["state"]]
+
+
 def _log(plan: Policy) -> None:
     """Point this process's log where the policy says, as the child does."""
     from . import log
@@ -1126,8 +1179,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run(argv: Sequence[str] | None = None) -> int:
     args = build().parse_args(list(sys.argv[1:] if argv is None else argv))
 
+    if args.verb == "log":
+        return _verify(args)
+
     if args.verb == "probe":
-        out = jail.probe()
+        out = jail.probe(tried=not args.quick)
         sys.stdout.write(json.dumps(out, indent=2) + "\n" if args.json else _machine(out))
         # Non-zero when the machine cannot enforce, so this is usable as a
         # preflight check in a pipeline rather than something to eyeball.

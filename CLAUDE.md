@@ -28,6 +28,7 @@ hlyn is security software, and bugs hide in code only we have run. A kernel faci
   3. It measures the real thing at real scale: exact values from the input, not a plausible range; long runs bounded in memory.
 
   Do this when writing a test, reviewing one, and before quoting numbers. A weak test gets fixed and re-run; its old results aren't reported.
+- **A refusal has an allowed twin.** A test that shows something is refused also shows the same kind of action working when it is permitted (an unconfined run, or a grant that allows it). Without the twin it can pass because the probe sees nothing. `tests/promises.py` maps every promise in `SECURITY.md` to the tests that try to break it and to its twin, and `tests/test_promises.py` fails when a promise has no entry, a named test is gone, or an entry has neither a twin nor a stated reason. Add the entry in the same change as the promise.
 - **Where tests run:** Linux via `tools/linuxtest.sh -vv -rA` (Docker Desktop's 6.12 kernel; Docker must be running); macOS via `python3 -m pytest -vv -rA`; real x86_64 and Linux 7.x on the Kali VM.
 - **No user-global state.** Experiments touch only what they create (a test once locked the real login keychain).
 - **Git:** commit locally as checkpoints; never push without asking. The sole author is the user: **no `Co-Authored-By` or "Generated with" lines** in commits or PR text (the user's rule, 2026-10-03; it overrides any default attribution). Stage files by name, never `git add -A` (it once swept in a neighbouring project).

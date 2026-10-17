@@ -24,7 +24,7 @@ from types import ModuleType
 from typing import Any, NoReturn
 
 from . import log
-from .error import Failed, Invalid, Sealed, Unsupported
+from .error import Error, Failed, Invalid, Sealed, Unsupported
 from .policy import Policy, preset, presets, scratch, trust_copy, under
 
 __all__ = ["back", "on", "probe", "run", "sealed", "spawn"]
@@ -61,14 +61,65 @@ def sealed() -> bool:
     return _sealed
 
 
-def probe() -> dict[str, object]:
-    """What this machine can enforce. Changes nothing.
+def probe(tried: bool = False) -> dict[str, object]:
+    """What this machine can enforce. Changes nothing in this process.
 
     Worth calling before shipping: it is the difference between believing a
     boundary exists and knowing it does.
+
+    The answer is read from the kernel's version and libraries. `tried=True`
+    also confines a throwaway child and checks it reads what it was granted and
+    is refused the rest (`tried()` in the answer): a machine that looks able and
+    isn't (a container profile that blocks a call the seal needs) says no here.
+    The `hlyn probe` command does this unless given `--quick`.
     """
     out: dict[str, object] = back().probe()
+    if tried:
+        out["tried"] = _tried(out)
+        if out["tried"]["ok"] is False and out.get("enforce"):  # type: ignore[index]
+            out["enforce"] = False
+            out["why"] = "a test program could not be confined here: " + str(out["tried"]["why"])  # type: ignore[index]
     return out
+
+
+def _tried(known: Mapping[str, object]) -> dict[str, object]:
+    """Seal a throwaway child and see what it can read: `{"ok": True}` when it
+    read its grant and was refused the rest, `{"ok": False, "why": ...}` when it
+    could not be confined or was not refused, `{"ok": None, ...}` when this
+    machine is already known not to enforce (nothing to try)."""
+    if not known.get("enforce"):
+        return {"ok": None, "why": "not tried: this machine cannot enforce"}
+    with tempfile.TemporaryDirectory(prefix="hlyn-probe-") as root:
+        granted, outside = os.path.join(root, "granted"), os.path.join(root, "outside")
+        for folder in (granted, outside):
+            os.mkdir(folder)
+            with open(os.path.join(folder, "note"), "w", encoding="utf-8") as handle:
+                handle.write("x")
+        mine, other = os.path.join(granted, "note"), os.path.join(outside, "note")
+
+        def attempt() -> dict[str, str]:
+            got = {}
+            for name, path in (("granted", mine), ("refused", other)):
+                try:
+                    with open(path, encoding="utf-8") as handle:
+                        handle.read()
+                    got[name] = "read"
+                except OSError as exc:
+                    got[name] = f"errno {exc.errno}"
+            return got
+
+        try:
+            seen = run(attempt, read=[os.path.realpath(granted)], write=False, exec=False, net=False,
+                       tmp=False, log=False)
+        except Error as exc:
+            return {"ok": False, "why": str(exc)[:300]}
+        except Exception as exc:  # noqa: BLE001 - a probe reports, it does not raise
+            return {"ok": None, "why": f"not tried: {type(exc).__name__}: {exc}"[:300]}
+    if seen.get("granted") != "read":
+        return {"ok": False, "why": f"the confined test program could not read what it was granted ({seen})"}
+    if seen.get("refused") == "read":
+        return {"ok": False, "why": "the confined test program read a file it was not granted"}
+    return {"ok": True, "why": None}
 
 
 def _plan(policy: object, edits: Mapping[str, Any]) -> Policy:

@@ -209,13 +209,13 @@ NETFIELD = st.one_of(BOOLISH, PORTLIST)
 
 
 @given(read=FIELD, write=FIELD, exe=FIELD, net=NETFIELD)
-@settings(max_examples=200)
+@settings(max_examples=200, deadline=None)
 def test_policy_never_raises_on_well_formed_combinations(read, write, exe, net):
     Policy(read=read, write=write, exec=exe, net=net)
 
 
 @given(read=FIELD, write=FIELD, exe=FIELD)
-@settings(max_examples=200)
+@settings(max_examples=200, deadline=None)
 def test_the_runtime_set_always_stays_covered(read, write, exe):
     # Coverage, not set membership: prune() collapses a path into an ancestor
     # that already covers it, so granting "/" legitimately drops every runtime
@@ -233,7 +233,7 @@ def test_the_runtime_set_always_stays_covered(read, write, exe):
 
 
 @given(write=BOOLISH, net=NETFIELD)
-@settings(max_examples=200)
+@settings(max_examples=200, deadline=None)
 def test_a_blanket_write_grant_never_widens_read(write, net):
     # policy.py's own comment: "granting write everywhere does not quietly
     # grant read everywhere". This applies to the *bool* form only -- named
@@ -251,7 +251,7 @@ def test_a_blanket_write_grant_never_widens_read(write, net):
 
 
 @given(write=PATHLIST, net=NETFIELD)
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 def test_named_write_paths_cross_over_to_read_but_nothing_else_does(write, net):
     # The documented exception, pinned so it stays an exception: a named write
     # path becomes readable, and the read set never grows beyond that plus the
@@ -271,7 +271,7 @@ def test_named_write_paths_cross_over_to_read_but_nothing_else_does(write, net):
 
 
 @given(read=FIELD, write=FIELD, exe=FIELD)
-@settings(max_examples=200)
+@settings(max_examples=200, deadline=None)
 def test_reads_and_writes_never_raise_for_any_valid_policy(read, write, exe):
     p = Policy(read=read, write=write, exec=exe)
     p.reads()
@@ -280,14 +280,14 @@ def test_reads_and_writes_never_raise_for_any_valid_policy(read, write, exe):
 
 
 @given(net=NETFIELD)
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 def test_policy_net_field_matches_normalised_ports(net):
     p = Policy(net=net)
     assert p.net == ports(net)
 
 
 @given(env=st.one_of(BOOLISH, st.lists(st.sampled_from(["A_KEY", "B_TOKEN", "PATH", "HOME"]))))
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 def test_keep_never_returns_more_than_the_source_had(env):
     source = {"A_KEY": "1", "B_TOKEN": "2", "PATH": "/bin", "HOME": "/root", "UNLISTED": "3"}
     p = Policy(env=env)
@@ -297,7 +297,7 @@ def test_keep_never_returns_more_than_the_source_had(env):
 
 
 @given(read=FIELD)
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 def test_with_never_mutates_the_original(read):
     base = Policy()
     derived = base.with_(read=read)

@@ -30,7 +30,7 @@ import time
 from collections.abc import Iterable
 from typing import Any, TextIO
 
-__all__ = ["allow", "deny", "emit", "fileno", "line", "off", "record", "seal", "sink", "totals"]
+__all__ = ["allow", "deny", "emit", "fileno", "line", "off", "record", "seal", "seal_file", "sink", "totals"]
 
 
 _where: TextIO | None = None
@@ -114,7 +114,7 @@ def record(path: str, writable: Iterable[str] | bool = ()) -> int:
     directory = os.open(folder or os.sep, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_CLOEXEC)
     fd, made = -1, False
     try:
-        flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
+        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC  # read too: `seal` hashes the file
         try:
             try:
                 fd, made = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory), True
@@ -175,6 +175,14 @@ def _folder(directory: int, fallback: str) -> str:
             found = fcntl.fcntl(directory, fcntl.F_GETPATH, bytes(1024))
             return os.fsdecode(found.split(b"\0", 1)[0])
     return os.path.realpath(fallback)
+
+
+def seal_file(path: str, writable: Iterable[str] | bool = ()) -> str:
+    """Append a seal to the record at `path`, through the descriptor `record`
+    checked, and return its hash (see `seal.py`). Raises `OSError`."""
+    from . import seal as sealing
+
+    return sealing.seal(record(path, writable))
 
 
 def off() -> None:

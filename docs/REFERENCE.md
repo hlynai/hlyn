@@ -502,7 +502,8 @@ hlyn show --intent --read ./src --net 443 > policy.toml
 | `hlyn show [flags]` | Prints the full list of paths, hosts and ports a set of flags would grant |
 | `hlyn show --intent [flags]` | Prints the flags as a policy file you can check in |
 | `hlyn presets` | Lists the presets and what each grants |
-| `hlyn probe` | Says what this machine can enforce; exits non-zero if it can't |
+| `hlyn probe` | Says what this machine can enforce, and confines a small test program to check it; exits non-zero if it can't. `--quick` reads versions and libraries only |
+| `hlyn log verify FILE` | Says whether a `--log` file is intact, edited, or cut short (see [The log](#the-log)). `--anchor HASH` pins the last seal; `--json` |
 | `hlyn --version` | Prints the version |
 
 Flags for `run`, `claude` (all but `-p` and `-f`) and `show`:
@@ -676,6 +677,7 @@ hlyn writes one JSON object per line, to stderr by default (or `--log FILE` / `l
 | Record | Written when |
 |---|---|
 | `seal` | The boundary was applied. `read`, `write`… are what you asked for; `effective` is every path the kernel was told to allow, hlyn's own additions included |
+| `log-seal` | Under `hlyn run --log FILE`, when the run ends: a hash of everything written since the last seal, chained to it. `hlyn log verify FILE` finds a record that was changed, added, removed or reordered, and says when records follow the last seal (a run that was killed) |
 | `deny` | Under `hlyn run`: something was refused, written as it happens. With hosts, network refusals are written from every entry point, by the proxy and the gate |
 
 With hosts, the seal record also names them, the proxy's address and the helpers' process IDs:
@@ -683,6 +685,8 @@ With hosts, the seal record also names them, the proxy's address and the helpers
 ```json
 {"t": 1790529261.533, "kind": "seal", "pid": 4703, "backend": "linux", "level": 7, "read": [], "write": [], "exec": ["/usr/bin/true"], "net": ["api.openai.com:443", "localhost:5432"], "env": false, "tmp": "/tmp/hlyn-cga5azni", "proxy": "127.0.0.1:38483", "helpers": [4702, 4700], "closed": 0}
 ```
+
+A seal shows an edit; it does not prevent one. Someone who can rewrite the whole file and knows its format can rebuild every seal. Keep the last seal's hash somewhere else (`hlyn log verify` prints it) and check with `--anchor`: the file must end in that seal. The agent itself can't touch the file, which has to sit outside every `--write` folder. `hlyn.on()` and `hlyn.run(fn)` write records but don't seal them.
 
 Repeats are collapsed. The same refusal is written on its 1st, 2nd, 4th, 8th… occurrence with a running count, so a retry loop can't bury the lines that matter. `deny` records are written from outside the environment (by `hlyn run`'s own process, or by the proxy and the gate), never by the agent.
 
