@@ -28,7 +28,7 @@ TYPE_CHECKING = False
 if TYPE_CHECKING:
     from ..policy import Policy
 
-__all__ = ["METADATA", "MISSING", "SHARED", "SHUT", "busy", "load", "program", "ready", "why"]
+__all__ = ["METADATA", "MISSING", "SHARED", "SHUT", "busy", "load", "program", "ready", "unfiltered", "why"]
 
 
 # -- libseccomp constants ---------------------------------------------------
@@ -424,14 +424,43 @@ def _rule(ctx: int, action: int, name: str, args: Iterable[Arg] = ()) -> None:
 
 
 def _notify_call(ctx: int, name: str) -> None:
-    """Send `name` to the gate, by number where this libseccomp lacks the name."""
+    """Send `name` to the gate, by number where this libseccomp lacks the name
+    (a libseccomp that has neither refuses the number: `unfiltered` says which
+    calls are then left out)."""
     nr = _nr(name)
     if nr == BAD and name in LATE:
-        rc = lib().seccomp_rule_add_array(ctx, NOTIFY, LATE[name], 0, None)
-        if rc != 0:
-            raise Failed(f"could not add a seccomp rule for {name!r}: error {-rc}")
+        lib().seccomp_rule_add_array(ctx, NOTIFY, LATE[name], 0, None)
         return
     _rule(ctx, NOTIFY, name)
+
+
+def unfiltered() -> list[str]:
+    """The metadata calls this machine has that the filter cannot send to the
+    gate: newer than the installed libseccomp, which then refuses their number
+    (measured: error 14 from 2.5.5 for `setxattrat`). A call the kernel does
+    not have is not listed. Asked of a scratch filter and of the kernel with
+    empty arguments (EFAULT or EBADF; nothing changes)."""
+    api = lib()
+    ctx = api.seccomp_init(ALLOW)
+    if not ctx:
+        return []
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    out = []
+    try:
+        for name, nr in LATE.items():
+            if _nr(name) != BAD:
+                continue  # named: filtered
+            if api.seccomp_rule_add_array(ctx, NOTIFY, nr, 0, None) == 0:
+                continue  # filtered by number
+            ctypes.set_errno(0)
+            libc.syscall(ctypes.c_long(nr), ctypes.c_long(-1), ctypes.c_long(0), ctypes.c_long(0),
+                         ctypes.c_long(0), ctypes.c_long(0), ctypes.c_long(0))
+            if ctypes.get_errno() != ENOSYS:
+                out.append(name)
+    finally:
+        api.seccomp_release(ctx)
+    return out
 
 
 def alone() -> None:

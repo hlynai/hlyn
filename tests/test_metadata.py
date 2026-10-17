@@ -229,3 +229,41 @@ def test_the_filter_sends_these_calls_to_the_gate_only_when_asked():
     print("filter bytes: plain", len(plain), "| guarded", len(guarded))
     assert len(guarded) > len(plain)
     assert len(seccomp.program(plan, meta=False)) == len(plain)
+
+
+class _OldLibseccomp:
+    """The installed libseccomp, but one that has never heard of `setxattrat`
+    and refuses its number (what Ubuntu 24.04's 2.5.5 did on CI: error 14)."""
+
+    def __init__(self, real):
+        self.real = real
+        self.seccomp_syscall_resolve_name = self._resolve
+        self.seccomp_rule_add_array = self._add
+
+    def _resolve(self, name):
+        return -1 if name == b"setxattrat" else self.real.seccomp_syscall_resolve_name(name)
+
+    def _add(self, ctx, action, number, count, block):
+        return -14 if number == 463 else self.real.seccomp_rule_add_array(ctx, action, number, count, block)
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+def test_a_libseccomp_that_does_not_know_a_newer_call_still_builds_the_filter_and_says_what_is_left(monkeypatch):
+    from hlyn import Policy
+    from hlyn.core import seccomp
+
+    real = seccomp.lib()
+    plan = Policy(write=[], net=False)
+    whole = len(seccomp.program(plan, meta=True))
+    monkeypatch.setattr(seccomp, "lib", lambda: _OldLibseccomp(real))
+    old = len(seccomp.program(plan, meta=True))
+    left = seccomp.unfiltered()
+    print("filter bytes: this libseccomp", whole, "| one that refuses setxattrat", old, "| left out:", left)
+    assert 0 < old <= whole  # builds; the other 19 calls are still sent to the gate
+    import platform
+
+    major, minor = (int(part) for part in platform.release().split(".")[:2])
+    # Left out exactly when this kernel has the call (6.13 and newer).
+    assert left == (["setxattrat"] if (major, minor) >= (6, 13) else [])

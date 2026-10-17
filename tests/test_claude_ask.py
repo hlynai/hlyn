@@ -177,12 +177,19 @@ def test_in_the_home_folder_it_warns_and_enter_does_not_start(place):
     assert "hlyn: not started." in screen and "CLAUDE RAN" not in screen
 
 
-def test_risks_are_listed_last_and_short(place):
+def test_risks_are_listed_last_and_short(place, monkeypatch):
     _home, work, env = place
     (work / ".env").write_text("KEY=1\n")
     (work / ".git" / "hooks").mkdir(parents=True)
     _code, screen = typed(work, env, "n")
     print(screen)
+    from hlyn import claude, secret
+
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.chdir(work)
+    mine = secret.exposed(claude.policy(str(work), os.environ, claude.prepare(os.environ)))
+    print("secrets found:", mine, "| also named elsewhere:", sorted(secret.renamed))
     assert re.search(r"│ ! │ secret +│ \./\.env +│ readable", screen)
     assert re.search(r"│ ! │ runs later +│ \./\.git/hooks +│ writable", screen)
     assert "runs later: what's written there runs outside hlyn" in screen

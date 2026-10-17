@@ -77,7 +77,7 @@ def probe() -> dict[str, object]:
         # Calls that change a file's mode, owner, times or attributes done
         # only inside the write grants: Landlock has no right for them, so
         # this is the gate's, with the same needs as host mode's.
-        "metadata": ok and filter and notify.ready() and not seccomp.busy(),
+        "metadata": ok and filter and notify.ready() and not seccomp.busy() and not seccomp.unfiltered(),
         # Socket files outside the write grants refused: by the kernel itself
         # from Landlock ABI 9 (the shim's `bonus`), before that by hlyn's gate
         # in every mode but an open network (`watched`, guard's pinned swap).
@@ -115,6 +115,11 @@ def probe() -> dict[str, object]:
         missing.append("host names in net can't be enforced here: " + seccomp.BUSY)
     if missing:
         out["why"] = "; ".join(missing)
+    left = seccomp.unfiltered() if ok and filter else []
+    if left:
+        out["metadata_why"] = (f"this libseccomp doesn't know {', '.join(left)} (calls of a newer kernel), "
+                               "so changes made through "
+                               f"{'it are' if len(left) == 1 else 'them are'} not checked: upgrade libseccomp")
     if out["hosts"]:
         scope = ptrace()
         if scope is not None and scope >= 2:
