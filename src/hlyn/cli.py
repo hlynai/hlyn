@@ -73,6 +73,9 @@ def build() -> argparse.ArgumentParser:
     go.add_argument("--keep-fd", action="append", type=int, metavar="N", default=[],
                     help="pass on open descriptor N (3 or more; repeatable). Every other one "
                          "above 2 is closed")
+    go.add_argument("--no-stdin", action="store_true",
+                    help="give the command /dev/null as its standard input (otherwise it reads "
+                         "whatever this shell hands it)")
     go.add_argument("--no-report", action="store_true",
                     help="do not list what was blocked when the command ends")
     go.add_argument("--json", action="store_true",
@@ -894,6 +897,58 @@ def _shm(plan: Policy, quiet: bool = False) -> bool:
     return True
 
 
+def _no_stdin() -> None:
+    """Standard input becomes /dev/null, for this process and so for the command."""
+    null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null, 0)
+    os.close(null)
+
+
+def _fd_path(fd: int) -> str | None:
+    """The path of the file open on `fd`, or None if it has none (a pipe, a
+    terminal, a closed descriptor) or this system can't say."""
+    try:
+        if sys.platform == "linux":
+            found = os.readlink(f"/proc/self/fd/{fd}")
+            return found if found.startswith("/") else None
+        if sys.platform == "darwin":
+            import fcntl
+
+            raw = fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024))
+            return os.fsdecode(raw.split(b"\0", 1)[0]) or None
+    except (OSError, AttributeError):
+        pass
+    return None
+
+
+def _stdin(plan: Policy) -> None:
+    """Say so when standard input is a file the policy doesn't grant.
+
+    The command reads whatever is on its standard input, whatever `--read`
+    says: it is a descriptor already open, not a path to be allowed. Usually
+    that is a terminal or a pipe, and the person knows. A regular file is
+    worth a line: `hlyn run -- agent < ~/.ssh/id_ed25519` hands over the key
+    though no `--read` names it. A note, not a refusal: it may be meant.
+    """
+    import stat as stat_
+
+    from .policy import under
+    from .secret import secret_file
+
+    try:
+        if not stat_.S_ISREG(os.fstat(0).st_mode):
+            return
+    except OSError:
+        return
+    path = _fd_path(0)
+    reads = plan.reads()
+    if not path or reads is True or any(under(path, item) for item in reads):
+        return
+    what = "keys or tokens live there, and " if secret_file(os.path.realpath(path)) else ""
+    print(f"hlyn: standard input is {path}; {what}the command can read it although no --read "
+          f"names it. Add --no-stdin to give it /dev/null instead.", file=sys.stderr)
+
+
 def _exposed(plan: Policy, quiet: bool = False) -> bool:
     """Warn, on stderr, when the policy lets secrets out. By default the run
     goes ahead: the user may mean it, and the message says how to say so.
@@ -1227,6 +1282,10 @@ def _run(argv: Sequence[str] | None = None) -> int:
     jail._ready(plan)
     from . import fds
 
+    if args.no_stdin:
+        _no_stdin()
+    else:
+        _stdin(plan)
     return _launch(cmd, plan, args.no_report, args.json, keep=fds.keeps(args.keep_fd))
 
 

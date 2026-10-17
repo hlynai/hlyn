@@ -530,6 +530,7 @@ Only on `run` and `claude`:
 | `--no-report` | Don't list what was blocked |
 | `--shm` | POSIX shared memory and semaphores, for Python `multiprocessing` (`Lock`, `Queue`, `Pool`, `shared_memory`). Linux: opens `/dev/shm`, so also your other programs' segments there. macOS: only the names Python makes (`/mp-*`, `/psm_*`). Off by default |
 | `--keep-fd N` | Pass on open descriptor N (3 or more; repeatable). Every other descriptor above 2 the launcher left open is closed before the run |
+| `--no-stdin` | Give the command `/dev/null` as its standard input. Without it the command reads whatever this shell hands it, whatever `--read` says; `hlyn run` names it when that is a file the policy doesn't grant (`hlyn run -- agent < ~/.ssh/id_ed25519` would otherwise pass the key on silently) |
 | `--json` | Print the report as JSON (on stderr) |
 
 Every command that prints data prints plain text by default, and JSON with `--json`.
@@ -698,6 +699,7 @@ An environment that oversells itself is worse than one that doesn't, so here is 
 | **Host names on Linux are new** | Tested on x86_64 without Yama so far. aarch64, and kernels with Yama, are designed for but not yet run. | `hlyn probe` says what this machine can do. |
 | **Seal before threads** | A thread started before `on()` would keep its access, so hlyn refuses to seal. | Call `on()` first, or use `hlyn.run(fn)`. |
 | **A granted socket grants its service** | The service behind a socket you allow (e.g. `docker.sock`) can hand the agent anything it can open. | Treat a socket grant like `exec` on that service. |
+| **Standard input, output and error** | They are descriptors the command is born with, so no `--read` or `--write` decides them: what you pipe in reaches it, and what it prints goes where you sent it (a file as its standard output is written without `--write`). `hlyn run` names a standard input that is a file the policy doesn't grant. | Pass `--no-stdin` for `/dev/null`. Send standard output to a file you mean it to write. |
 | **Writable folders others execute** | Writing into a folder that cron, git hooks or CI later runs is running code outside the environment. hlyn names the ones it finds before the run (see [Files that run later](#files-that-run-later)), but it can only refuse the whole folder, not one file in it. | Don't grant write to folders something else executes from. |
 | **Hardlinks** | A hardlink planted inside a granted folder beforehand reaches the file it points at. | Don't share granted folders with untrusted writers, and don't run as root. |
 | **GPU workloads** | CUDA writes under `/proc`, which is closed by default because it exposes the environment. | Grant `write=["/proc"]` and remove secrets at the source. |

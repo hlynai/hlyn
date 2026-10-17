@@ -41,6 +41,11 @@ downgrade is a vulnerability even if nothing escaped.
 These are documented limits, not defects. They are in the README, in the API
 docstrings, and in the error messages:
 
+- **Standard input, output and error are open before the seal.** What is piped
+  into `hlyn run` reaches the command whatever `--read` says, and a file as its
+  standard output is written without `--write`. `hlyn run` names a standard
+  input that is a file the policy doesn't grant; `--no-stdin` gives the command
+  `/dev/null`.
 - **Named ports restrict TCP only, and reach every host on them.**
   `net=[443]` leaves UDP reachable. Name hosts instead, or use `net=False` to
   close the network entirely.
