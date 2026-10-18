@@ -6,7 +6,7 @@ swapped in afterwards points.
 a moment later. If the profile builder resolved the path again, a folder swapped
 for a link in between would put the link's *target* in the rule. These tests
 swap the folder at exactly that point and read the profile text, which needs no
-sandbox (`mac.profile` only builds a string), so they run on any machine.
+confined process (`mac.profile` only builds a string), so they run on any machine.
 """
 
 from __future__ import annotations
