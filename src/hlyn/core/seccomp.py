@@ -28,7 +28,7 @@ TYPE_CHECKING = False
 if TYPE_CHECKING:
     from ..policy import Policy
 
-__all__ = ["METADATA", "MISSING", "SHARED", "SHUT", "busy", "load", "program", "ready", "unfiltered", "why"]
+__all__ = ["ATTRIBUTES", "METADATA", "MISSING", "SHARED", "SHUT", "busy", "load", "program", "ready", "unfiltered", "why"]
 
 
 # -- libseccomp constants ---------------------------------------------------
@@ -141,6 +141,12 @@ METADATA: tuple[str, ...] = (
     "setxattr", "lsetxattr", "fsetxattr", "setxattrat",
     "removexattr", "lremovexattr", "fremovexattr", "removexattrat",
 )
+# ioctl requests that change a regular file's attributes (chattr's, and an inode's
+# generation), which Landlock's ioctl right does not cover: it covers devices.
+# Measured on 7.0.14: a program with only read access set a file's flags. Same
+# values on x86_64 and aarch64: FS_IOC_SETFLAGS, FS_IOC_FSSETXATTR, FS_IOC_SETVERSION.
+ATTRIBUTES: tuple[int, ...] = (0x40086602, 0x401C5820, 0x40087602)
+
 # Where a libseccomp too old to know a name still has the call (the numbers
 # are the same on x86_64 and aarch64).
 LATE = {"fchmodat2": 452, "setxattrat": 463, "removexattrat": 466}
@@ -695,6 +701,8 @@ def _build(policy: Policy, watch: bool = False, datagrams: bool = False, meta: b
         if meta:
             for name in METADATA:
                 _notify_call(ctx, name)
+            for request in ATTRIBUTES:
+                _rule(ctx, NOTIFY, "ioctl", [Arg(1, MASKED, LOW, request)])
 
         if policy.exec is False:
             for name in BIRTH:

@@ -311,7 +311,11 @@ def exposed(plan: Policy) -> list[str]:
     names: dict[tuple[int, int], list[str]] = {}
     for root in roots:
         if not os.path.isdir(root):
-            continue  # a file granted on its own: a decision, see above
+            # A file granted on its own is a decision, unless its name hides what it
+            # is: another name of a known secret, or a file with a name the scan
+            # can't see (a hard link).
+            _granted_file(root, linked, names, found)
+            continue
         if credential(root):
             found.append(root)  # the grant is itself a credential folder
             continue
@@ -371,6 +375,32 @@ INSTALLED: tuple[str, ...] = (
     "/Applications", "/Library", "/System", "/usr", "/opt", "/bin", "/sbin", "/lib", "/lib64",
     "/etc", "/nix", "/snap", "/var/lib",
 )
+
+
+def _granted_file(path: str, linked: set[tuple[int, int]],
+                  names: dict[tuple[int, int], list[str]], found: list[str]) -> None:
+    """A file named in a grant: listed if it is another name for a known secret;
+    noted, like any file in a granted folder, if it has other names (`_also_named`)."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return
+    if not stat.S_ISREG(info.st_mode) or secret_file(path):
+        return  # a decision: it is named, and what it is shows in the name
+    if (info.st_dev, info.st_ino) in linked:
+        found.append(path)
+    elif _plain(path) and info.st_nlink > 1:
+        names.setdefault((info.st_dev, info.st_ino), [info.st_nlink]).append(path)  # type: ignore[arg-type]
+
+
+def _plain(path: str) -> bool:
+    """Whether a second name of `path` is worth a warning: it is the user's own file and not
+    in a tree where programs are installed (`INSTALLED`)."""
+    try:
+        mine = os.lstat(path).st_uid == os.geteuid()
+    except OSError:
+        return False
+    return mine and not any(path == tree or path.startswith(tree + "/") for tree in INSTALLED)
 
 
 def _also_named(path: str, names: dict[tuple[int, int], list[str]], entry: os.DirEntry[str]) -> None:

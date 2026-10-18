@@ -264,6 +264,22 @@ def watched(policy: Policy) -> bool:
     return notify.ready() and not seccomp.busy()
 
 
+def anchors(policy: Policy) -> tuple[tuple[str, int, int], ...]:
+    """The write grants as (path, device, inode) of what the policy checked, for the gate."""
+    from .. import policy as checked
+
+    grants = policy.writes()
+    if isinstance(grants, bool):
+        return ()
+    out = []
+    for path in grants:
+        real = os.path.realpath(path)
+        seen = checked._SEEN.get(real) or checked.identity(real)
+        if seen is not None:
+            out.append((real, seen[0], seen[1]))
+    return tuple(out)
+
+
 def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int:
     """Apply `policy` to the calling process. One-way, and irreversible.
 
@@ -292,7 +308,7 @@ def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int
         writes = policy.writes()
         config = guard.Config(port=port, rules=named, writes=writes, connect=CONNECT,
                               socket_check="kernel" if landlock.abi() >= 9 else "gate",
-                              meta=guards(policy))
+                              meta=guards(policy), anchors=anchors(policy))
     # Unix sockets without hosts (`watched`): the entry point started a gate
     # when it was needed and possible; that decision is read here, from
     # whether there is a gate to hand to.
@@ -304,11 +320,11 @@ def load(policy: Policy, tag: str | None = None, port: int | None = None) -> int
         config = guard.Config(port=0, rules=(), writes=policy.writes(), connect=CONNECT,
                               mode="off" if policy.net is False else "ports", socket_check="gate",
                               ports=tuple(port for port in policy.net if isinstance(port, int))
-                              if isinstance(policy.net, tuple) else (), meta=meta)
+                              if isinstance(policy.net, tuple) else (), meta=meta, anchors=anchors(policy))
     elif gated and meta:
         # Only the metadata calls (`guards`): no unix socket check, no proxy.
         config = guard.Config(port=0, rules=(), writes=policy.writes(), connect=CONNECT,
-                              mode="meta", socket_check="kernel", meta=True)
+                              mode="meta", socket_check="kernel", meta=True, anchors=anchors(policy))
     # Unix datagram sockets while a gate checks unix sockets, before Landlock
     # ABI 9 (seccomp.UNIX_KINDS). From ABI 9 the kernel checks each send's
     # path itself, so they are left alone there.

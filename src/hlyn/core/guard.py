@@ -188,6 +188,7 @@ SHAPES: dict[str, tuple[str, int | None, int, int | None]] = {
     "lremovexattr": ("link", None, 0, None),
     "fremovexattr": ("fd", None, 0, None),
     "removexattrat": ("at", 0, 1, 2),
+    "ioctl": ("fd", None, 0, None),  # only the requests in seccomp.ATTRIBUTES arrive
 }
 AT_FDCWD = -100
 NOFOLLOW = 0x100  # AT_SYMLINK_NOFOLLOW
@@ -239,7 +240,10 @@ class Config:
     `meta`: the gate also answers the calls that change a file's mode,
     owner, times or attributes, which Landlock has no right for: it does
     them only inside the `writes` folders (`_metadata`). Mode `"meta"` is a
-    gate that does only that.
+    gate that does only that. `anchors` are those folders as (path, device,
+    inode) when the policy checked them: the gate opens each once and does a
+    call only on what lies beneath that very folder, so a folder replaced
+    since (renamed over) is not honoured.
 
     `socket_check` is who checks a unix connect's socket file, as `hlyn
     probe` says it: `"gate"` before Landlock ABI 9 (Linux 7.1), `"kernel"`
@@ -255,6 +259,7 @@ class Config:
     socket_check: str = "gate"
     ports: tuple[int, ...] = ()
     meta: bool = False
+    anchors: tuple[tuple[str, int, int], ...] = ()
 
     def dumps(self) -> bytes:
         return json.dumps({
@@ -267,6 +272,7 @@ class Config:
             "socket_check": self.socket_check,
             "ports": list(self.ports),
             "meta": self.meta,
+            "anchors": [list(item) for item in self.anchors],
         }).encode()
 
     @classmethod
@@ -284,6 +290,7 @@ class Config:
             socket_check="kernel" if raw.get("socket_check") == "kernel" else "gate",
             ports=tuple(int(port) for port in raw.get("ports", [])),
             meta=bool(raw.get("meta", False)),
+            anchors=tuple((str(a), int(b), int(c)) for a, b, c in raw.get("anchors", [])),
         )
 
 
@@ -364,11 +371,15 @@ class Guard:
                     nr = seccomp.LATE.get(name, seccomp.BAD)
                 if nr != seccomp.BAD:
                     self.meta_calls[nr] = name
+            self.meta_calls[seccomp._nr("ioctl")] = "ioctl"
         writes = self.config.writes
         self.writes: tuple[str, ...] | Literal[True] = (
             True if writes is True else tuple(os.path.realpath(item) for item in writes)
         )
         self._refused: tuple[float, set[tuple[int, int]]] = (0.0, set())
+        self.anchors: list[tuple[str, int]] = []
+        if self.config.meta and self.writes is not True:
+            self._anchor()
 
     # -- the loop ---------------------------------------------------------
 
@@ -865,6 +876,40 @@ class Guard:
 
     # -- metadata calls -----------------------------------------------------
 
+    def _anchor(self) -> None:
+        """Open each write grant once, with no link on the way, and keep it only if it is
+        still what the policy checked. Later calls are resolved beneath these descriptors."""
+        recorded = {path: (dev, ino) for path, dev, ino in self.config.anchors}
+        for path in self.writes:  # type: ignore[union-attr]
+            try:
+                fd = notify.pin(path)
+                info = os.fstat(fd)
+            except OSError:
+                continue  # gone, or a link now: not honoured
+            if recorded.get(path, (info.st_dev, info.st_ino)) != (info.st_dev, info.st_ino):
+                os.close(fd)  # replaced since it was checked: not honoured
+                continue
+            self.anchors.append((path, fd))
+
+    def _root(self, real: str) -> tuple[int, str] | None:
+        """The grant `real` lies in (the deepest) as (its descriptor, `real` relative to it)."""
+        best: tuple[str, int] | None = None
+        for path, fd in self.anchors:
+            if (real == path or real.startswith(path.rstrip("/") + "/")) and (best is None or len(path) > len(best[0])):
+                best = (path, fd)
+        if best is None:
+            return None
+        return best[1], os.path.relpath(real, best[0])
+
+    @staticmethod
+    def _beneath(root: tuple[int, str]) -> int:
+        """An `O_PATH` descriptor for the file at `root`'s relative path, opened inside the
+        grant's own descriptor. The caller closes it."""
+        fd, rel = root
+        if rel == ".":
+            return os.dup(fd)
+        return notify.pin(rel, under=fd, beneath=True)
+
     def _metadata(self, call: notify.Call, name: str) -> None:
         """A call that changes a file's mode, owner, times or attributes.
         Landlock has no right for these, so a confined program could change
@@ -958,14 +1003,18 @@ class Guard:
             if os.path.islink(candidate):
                 link = candidate
         real = link or os.path.realpath(text)
-        if not self._granted(real):
+        root = self._root(real)
+        if root is None:
             return self._outside(call, name, real)
         try:
             if link is None:
-                fd = notify.pin(real)
+                fd = self._beneath(root)
                 held.append(fd)
                 return _Subject(real, f"/proc/self/fd/{fd}")
-            parent = notify.pin(os.path.dirname(link))
+            where = self._root(os.path.dirname(link))
+            if where is None:
+                return self._outside(call, name, real)
+            parent = self._beneath(where)
             held.append(parent)
             return _Subject(real, os.path.basename(link), parent)
         except OSError as exc:
@@ -991,8 +1040,21 @@ class Guard:
             self._event(call, "meta", real, None,
                         detail="a file with no path the gate can check")
             return errno.EPERM
-        if not self._granted(real):
+        root = self._root(real)
+        if root is None:
             return self._outside(call, name, real)
+        try:
+            check = self._beneath(root)
+        except OSError:
+            return errno.EPERM
+        try:
+            here, there = os.fstat(fd), os.fstat(check)
+        finally:
+            os.close(check)
+        if (here.st_dev, here.st_ino) != (there.st_dev, there.st_ino):
+            # The name it was opened by no longer leads to this file inside the grant.
+            self._event(call, "meta", real, None, detail="the file is not where its name says")
+            return errno.EPERM
         return _Subject(real, f"/proc/self/fd/{fd}")
 
     @staticmethod
@@ -1018,6 +1080,8 @@ class Guard:
             return args[i] & 0xFFFFFFFF  # an int argument: the half the kernel reads
 
         try:
+            if name == "ioctl":
+                return self._attributes(call, where)
             if name in ("chmod", "fchmod", "fchmodat", "fchmodat2"):
                 mode = word(1 if name in ("chmod", "fchmod") else 2)
                 if where.parent is not None:
@@ -1043,6 +1107,33 @@ class Guard:
             return exc.errno or errno.EIO
         if not notify.valid(self.fd, call):
             return None  # the thread went: nothing waits for the answer
+        notify.answer(self.notice, call, value=0)
+        return None
+
+    def _attributes(self, call: notify.Call, where: _Subject) -> int | None:
+        """The ioctls that set a file's attributes (chattr's flags, extended
+        flags, the inode's generation), done on the file the gate holds: a
+        regular file or a folder, reopened through the held descriptor. The
+        value is read from the agent's memory once and used as read."""
+        request = call.args[1] & 0xFFFFFFFF
+        size = 28 if request == 0x401C5820 else 8  # struct fsxattr, or a long
+        data = notify.whole(call.pid, call.args[2], size)
+        if data is None:
+            return errno.EFAULT
+        try:
+            held = os.open(where.path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+        except OSError as exc:
+            return exc.errno or errno.EACCES
+        try:
+            if not (stat.S_ISREG(os.fstat(held).st_mode) or stat.S_ISDIR(os.fstat(held).st_mode)):
+                return errno.EPERM  # a device or pipe: the gate does not open those
+            if not notify.valid(self.fd, call):
+                return None
+            fcntl.ioctl(held, request, data)
+        except OSError as exc:
+            return exc.errno or errno.EIO
+        finally:
+            os.close(held)
         notify.answer(self.notice, call, value=0)
         return None
 

@@ -436,6 +436,7 @@ def unixsock(pid: int, ino: int) -> tuple[int, bool] | None:
 # resolve flags that refuse any symlink, /proc magic links included.
 OPENAT2 = 437
 NO_SYMLINKS = 0x04 | 0x02  # RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS
+BENEATH = 0x08  # RESOLVE_BENEATH
 O_PATH = 0o10000000  # Linux's, the same on x86_64 and aarch64 (os has it only there)
 
 
@@ -446,14 +447,17 @@ def _libc() -> ctypes.CDLL:
     return libc
 
 
-def pin(path: str) -> int:
-    """An `O_PATH` descriptor for the file at `path`, an absolute path with no
-    symlink in it: the object the gate checks and then connects to (through
-    `/proc/self/fd/N`), so nothing swapped in afterwards is reached. A
-    symlink anywhere in `path` raises `ELOOP`: someone changed the path
-    since it was resolved. The caller closes it."""
-    how = struct.pack("=QQQ", O_PATH | os.O_CLOEXEC, 0, NO_SYMLINKS)
-    fd = _libc().syscall(ctypes.c_long(OPENAT2), ctypes.c_long(-100), path.encode(), how,
+def pin(path: str, under: int = -100, beneath: bool = False) -> int:
+    """An `O_PATH` descriptor for the file at `path`, with no symlink in it: the
+    object the gate checks and then acts on (through `/proc/self/fd/N`), so
+    nothing swapped in afterwards is reached. A symlink anywhere in `path`
+    raises `ELOOP`: someone changed the path since it was resolved. `path` is
+    absolute, or relative to the descriptor `under`; with `beneath` it may not
+    leave that folder (`RESOLVE_BENEATH`, `..` included), so a path checked
+    against a folder is opened inside the very folder that was checked. The
+    caller closes it."""
+    how = struct.pack("=QQQ", O_PATH | os.O_CLOEXEC, 0, NO_SYMLINKS | (BENEATH if beneath else 0))
+    fd = _libc().syscall(ctypes.c_long(OPENAT2), ctypes.c_long(under), path.encode(), how,
                          ctypes.c_size_t(len(how)))
     if fd < 0:
         code = ctypes.get_errno()

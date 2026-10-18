@@ -11,9 +11,11 @@ program saw, and each refusal has an allowed twin in a granted folder.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import stat
+import struct
 import subprocess
 import sys
 import textwrap
@@ -267,3 +269,91 @@ def test_a_libseccomp_that_does_not_know_a_newer_call_still_builds_the_filter_an
     major, minor = (int(part) for part in platform.release().split(".")[:2])
     # Left out exactly when this kernel has the call (6.13 and newer).
     assert left == (["setxattrat"] if (major, minor) >= (6, 13) else [])
+
+
+FLAGS = """
+import fcntl, struct
+GET, SET, DUMP = 0x80086601, 0x40086602, 0x40
+def flags(fd):
+    buf = bytearray(8)
+    fcntl.ioctl(fd, GET, buf, True)
+    return struct.unpack("l", buf)[0]
+"""
+
+
+def test_file_attribute_ioctls_follow_the_same_rule_as_chmod(tmp_path):
+    kept = tmp_path / "kept"
+    box = tmp_path / "box"
+    kept.mkdir()
+    box.mkdir()
+    outside, inside = make(kept), make(box)
+    body = FLAGS + """
+for name, path in (("outside", {outside!r}), ("inside", {inside!r})):
+    fd = os.open(path, os.O_RDONLY)
+    seen[name + " before"] = flags(fd)
+    attempt(seen, name + " set", lambda: fcntl.ioctl(fd, SET, struct.pack("l", flags(fd) | DUMP)))
+    seen[name + " after"] = flags(fd)
+    attempt(seen, name + " nread", lambda: fcntl.ioctl(fd, 0x541B, bytearray(4), True))  # FIONREAD, untouched
+"""
+    # The control: this filesystem takes the flag at all.
+    probe = os.open(outside, os.O_RDONLY)
+    try:
+        fcntl.ioctl(probe, 0x40086602, struct.pack("l", 0x40))
+    except OSError as exc:
+        pytest.skip(f"no file flags on this filesystem: {exc}")
+    finally:
+        os.close(probe)
+    # the control set the flag on `outside`: undo it
+    undo = os.open(outside, os.O_RDONLY)
+    fcntl.ioctl(undo, 0x40086602, struct.pack("l", 0))
+    os.close(undo)
+    seen = agent(body.format(outside=outside, inside=inside), write=[str(box)], read=[str(kept)])
+    print("seen:", seen)
+    assert seen["outside set"] == "EPERM" and seen["outside after"] == seen["outside before"]
+    assert seen["inside set"] == "ok" and seen["inside after"] == seen["inside before"] | 0x40
+    assert seen["outside nread"] == "ok" and seen["inside nread"] == "ok"
+
+
+def _guard(box, identity):
+    from hlyn.core import guard
+
+    config = guard.Config(port=0, rules=(), writes=(str(box),), meta=True,
+                          anchors=((str(box), *identity),))
+    return guard.Guard(-1, config)  # the descriptor is never read by these checks
+
+
+def test_the_gate_acts_only_beneath_the_grant_that_was_checked(tmp_path):
+    from hlyn.core import notify
+
+    box, kept = tmp_path / "box", tmp_path / "kept"
+    box.mkdir()
+    kept.mkdir()
+    inside, outside = make(box), make(kept)
+    info = os.stat(box)
+    gate = _guard(box, (info.st_dev, info.st_ino))
+    root = gate._root(inside)
+    assert root is not None
+    held = gate._beneath(root)
+    found = os.fstat(held)
+    print("grant kept:", len(gate.anchors), "| opened beneath it:", found.st_ino == os.stat(inside).st_ino)
+    assert len(gate.anchors) == 1 and found.st_ino == os.stat(inside).st_ino
+    os.close(held)
+    assert gate._root(outside) is None  # not in the grant by name
+    with pytest.raises(OSError) as refused:  # and the open itself cannot climb out of it
+        notify.pin("../kept/f", under=gate.anchors[0][1], beneath=True)
+    print("climbing out:", refused.value)
+
+
+def test_a_grant_replaced_after_it_was_checked_is_not_honoured_by_the_gate(tmp_path):
+    box = tmp_path / "box"
+    box.mkdir()
+    make(box)
+    info = os.stat(box)
+    checked = (info.st_dev, info.st_ino)
+    kept = _guard(box, checked)
+    box.rename(tmp_path / "box.old")  # another folder now has the name
+    box.mkdir()
+    make(box)
+    swapped = _guard(box, checked)
+    print("same folder: grants kept", len(kept.anchors), "| replaced folder: grants kept", len(swapped.anchors))
+    assert len(kept.anchors) == 1 and swapped.anchors == [] and swapped._root(str(box / "f")) is None

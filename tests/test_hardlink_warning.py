@@ -145,3 +145,31 @@ def test_a_file_in_an_installed_tree_with_two_names_is_not_flagged_but_the_same_
     print("in a project:", [os.path.basename(p) for p in project], "| in an installed tree:", installed)
     assert [os.path.basename(p) for p in project] == ["notes.txt"]
     assert installed == []
+
+
+def test_a_file_granted_by_name_that_is_a_hard_link_is_flagged_and_a_plain_one_is_not(tmp_path):
+    """A folder grant was scanned; a grant naming the file itself was skipped, so a harmless
+    name linked to a secret elsewhere was silent."""
+    outside, proj = tree(tmp_path)
+    (outside / "stash.cfg").write_text("x")
+    os.link(outside / "stash.cfg", proj / "notes.txt")
+    linked = secret.exposed(Policy(read=[str(proj / "notes.txt")], net=[443]))
+    renamed = set(secret.renamed)
+    plain = secret.exposed(Policy(read=[str(proj / "plain.txt")], net=[443]))
+    print("linked file:", [os.path.basename(p) for p in linked], "| plain file:", plain)
+    assert [os.path.basename(p) for p in linked] == ["notes.txt"] and renamed == set(linked)
+    assert plain == []
+
+
+def test_a_file_granted_by_name_that_is_another_name_of_a_known_secret_is_flagged(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    key = home / ".ssh" / "id_ed25519"
+    key.write_text("not a real key")
+    proj = tmp_path / "project"
+    proj.mkdir()
+    os.link(key, proj / "notes.txt")
+    monkeypatch.setenv("HOME", str(home))
+    found = secret.exposed(Policy(read=[str(proj / "notes.txt")], net=[443]))
+    print("found:", found)
+    assert found == [str(proj / "notes.txt")]

@@ -62,6 +62,7 @@ docstrings, and in the error messages:
 - **macOS: the start folder's names.** A program may read the folder it starts
   in (its path and the names in it, not the files), because macOS reports a
   folder's path only to a program that may read it.
+- **Linux before 7.2: a confined program can signal its own process group.** A kernel flaw lets some signals pass Landlock's signal scope. `hlyn.run(fn)` and runs through the gate keep the command in a group of its own; `hlyn.on()`, and a direct `hlyn run` with no gate, leave it in the caller's, so anything else in that group can be signalled. Fixed in the kernel from 7.2; until then use `hlyn.run(fn)` for code you don't trust.
 - **A kernel below Landlock ABI 6 cannot be used.** hlyn refuses to seal rather
   than enforcing part of the policy.
 - **A policy that grants something dangerous is doing as it was told.**
