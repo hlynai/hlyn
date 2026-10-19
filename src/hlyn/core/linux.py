@@ -117,9 +117,9 @@ def probe() -> dict[str, object]:
         out["why"] = "; ".join(missing)
     left = seccomp.unfiltered() if ok and filter else []
     if left:
+        them = "it" if len(left) == 1 else "them"
         out["metadata_why"] = (f"this libseccomp doesn't know {', '.join(left)} (calls of a newer kernel), "
-                               "so changes made through "
-                               f"{'it are' if len(left) == 1 else 'them are'} not checked: upgrade libseccomp")
+                               f"so changes made through {them} are not checked: upgrade libseccomp")
     if out["hosts"]:
         scope = ptrace()
         if scope is not None and scope >= 2:

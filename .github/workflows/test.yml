@@ -48,6 +48,13 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends libseccomp2 libseccomp-dev gcc libc6-dev iproute2 procps
       - name: test dependencies
         run: python -m pip install pytest hypothesis aiohttp urllib3
+      - name: ruff and mypy
+        # The same two checks release.yml runs on a tag, so a lint or type error
+        # fails here, on the push, and not only when a release is cut.
+        run: |
+          python -m pip install ruff mypy
+          ruff check .
+          mypy
       - name: the real Claude Code (pinned)
         run: |
           sudo npm install -g --no-fund --no-audit @anthropic-ai/claude-code@2.1.286

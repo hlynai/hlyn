@@ -20,7 +20,7 @@ gate. `Guard` answers them from one loop:
 | unix abstract name, before Landlock ABI 9              | `EACCES`, and say so         |
 | route netlink connect                                  | the kernel's answer (0, `EPERM`, `EINVAL`) |
 | a send on any socket that names no socket file         | let it run                   |
-| chmod, chown, utime, setxattr (and kin) on a path or descriptor in a write grant | done by the gate, on the object it checked |
+| a metadata call (chmod, chown, utime ...) in a write grant | done by the gate, on what it checked |
 | the same anywhere else                                | `EPERM`, naming `--write`    |
 | anything unreadable or unknown                        | `EACCES` (fail closed)       |
 
@@ -895,7 +895,8 @@ class Guard:
         """The grant `real` lies in (the deepest) as (its descriptor, `real` relative to it)."""
         best: tuple[str, int] | None = None
         for path, fd in self.anchors:
-            if (real == path or real.startswith(path.rstrip("/") + "/")) and (best is None or len(path) > len(best[0])):
+            inside = real == path or real.startswith(path.rstrip("/") + "/")
+            if inside and (best is None or len(path) > len(best[0])):
                 best = (path, fd)
         if best is None:
             return None
@@ -989,10 +990,7 @@ class Guard:
     def _by_path(self, call: notify.Call, name: str, text: str, base: int, follow: bool,
                  held: list[int]) -> _Subject | int:
         if not os.path.isabs(text):
-            if base == AT_FDCWD:
-                folder = notify.cwd(call.pid)
-            else:
-                folder = self._folder(call.pid, base)
+            folder = notify.cwd(call.pid) if base == AT_FDCWD else self._folder(call.pid, base)
             if folder is None:
                 return errno.EBADF if base != AT_FDCWD else errno.EACCES
             text = os.path.join(folder, text)

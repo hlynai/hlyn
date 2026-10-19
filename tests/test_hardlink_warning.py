@@ -119,7 +119,7 @@ def test_hlyn_run_warns_before_the_command_reads_it(tmp_path):
     assert "hard link" not in quiet.stderr
 
 
-def test_a_file_owned_by_someone_else_with_two_names_is_not_flagged_but_the_users_own_is(tmp_path, monkeypatch):
+def test_a_file_owned_by_someone_else_with_two_names_is_not_flagged_the_users_own_is(tmp_path, monkeypatch):
     """System files (a toolchain's, /usr's) often have several names, and are not
     the user's to have linked a secret to: CI's Xcode runtime was listed."""
     outside, proj = tree(tmp_path)
@@ -133,7 +133,7 @@ def test_a_file_owned_by_someone_else_with_two_names_is_not_flagged_but_the_user
     assert theirs == []
 
 
-def test_a_file_in_an_installed_tree_with_two_names_is_not_flagged_but_the_same_in_a_project_is(tmp_path, monkeypatch):
+def test_a_file_in_an_installed_tree_with_two_names_is_not_flagged_but_in_a_project_is(tmp_path, monkeypatch):
     """A toolchain's libraries have several names even when the user owns them (CI's
     Xcode); a project folder's second name is the thing to warn about."""
     outside, proj = tree(tmp_path)

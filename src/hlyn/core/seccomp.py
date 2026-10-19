@@ -28,7 +28,10 @@ TYPE_CHECKING = False
 if TYPE_CHECKING:
     from ..policy import Policy
 
-__all__ = ["ATTRIBUTES", "METADATA", "REFUSED_IOCTLS", "MISSING", "SHARED", "SHUT", "busy", "load", "program", "ready", "unfiltered", "why"]
+__all__ = [
+    "ATTRIBUTES", "METADATA", "MISSING", "REFUSED_IOCTLS", "SHARED", "SHUT",
+    "busy", "load", "program", "ready", "unfiltered", "why",
+]
 
 
 # -- libseccomp constants ---------------------------------------------------

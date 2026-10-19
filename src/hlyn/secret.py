@@ -23,6 +23,12 @@ from collections.abc import Iterator
 
 from .policy import Policy, prune, under
 
+# `typing` itself costs a helper's start ~5 ms, and every use here is an
+# annotation; mypy reads this flag as it reads typing's.
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    from typing import Any
+
 __all__ = ["Exposed", "credential", "exposed", "secret", "secret_file"]
 
 
@@ -308,7 +314,7 @@ def exposed(plan: Policy) -> list[str]:
     linked = _linked_secrets(home)
     cut.clear()
     renamed.clear()
-    names: dict[tuple[int, int], list[str]] = {}
+    names: dict[tuple[int, int], list[Any]] = {}
     for root in roots:
         if not os.path.isdir(root):
             # A file granted on its own is a decision, unless its name hides what it
@@ -378,7 +384,7 @@ INSTALLED: tuple[str, ...] = (
 
 
 def _granted_file(path: str, linked: set[tuple[int, int]],
-                  names: dict[tuple[int, int], list[str]], found: list[str]) -> None:
+                  names: dict[tuple[int, int], list[Any]], found: list[str]) -> None:
     """A file named in a grant: listed if it is another name for a known secret;
     noted, like any file in a granted folder, if it has other names (`_also_named`)."""
     try:
@@ -390,7 +396,7 @@ def _granted_file(path: str, linked: set[tuple[int, int]],
     if (info.st_dev, info.st_ino) in linked:
         found.append(path)
     elif _plain(path) and info.st_nlink > 1:
-        names.setdefault((info.st_dev, info.st_ino), [info.st_nlink]).append(path)  # type: ignore[arg-type]
+        names.setdefault((info.st_dev, info.st_ino), [info.st_nlink]).append(path)
 
 
 def _plain(path: str) -> bool:
@@ -403,7 +409,7 @@ def _plain(path: str) -> bool:
     return mine and not any(path == tree or path.startswith(tree + "/") for tree in INSTALLED)
 
 
-def _also_named(path: str, names: dict[tuple[int, int], list[str]], entry: os.DirEntry[str]) -> None:
+def _also_named(path: str, names: dict[tuple[int, int], list[Any]], entry: os.DirEntry[str]) -> None:
     """Note `entry` if it is one of the user's regular files with more than one link."""
     if any(path == tree or path.startswith(tree + "/") for tree in INSTALLED):
         return
@@ -416,16 +422,16 @@ def _also_named(path: str, names: dict[tuple[int, int], list[str]], entry: os.Di
     # Only the user's own files: a link planted to reach a secret is to a file
     # the user owns, and system files (Xcode's, /usr's) often have several names.
     if info.st_nlink > 1 and info.st_uid == os.geteuid():
-        names.setdefault((info.st_dev, info.st_ino), [info.st_nlink]).append(path)  # type: ignore[arg-type]
+        names.setdefault((info.st_dev, info.st_ino), [info.st_nlink]).append(path)
 
 
-def _found_elsewhere(names: dict[tuple[int, int], list[str]]) -> list[str]:
+def _found_elsewhere(names: dict[tuple[int, int], list[Any]]) -> list[str]:
     """The files with more links than names seen in the scan: another name
     exists that the scan did not see."""
     out = []
     for links, *seen in names.values():
-        if links > len(seen):  # type: ignore[operator]
-            out.append(seen[0])  # type: ignore[arg-type]
+        if links > len(seen):
+            out.append(seen[0])
     return sorted(out, key=lambda item: (item.count(os.sep), item))
 
 

@@ -760,7 +760,7 @@ def run(fn: Callable[[], Any], policy: object = None, *, keep_fds: Sequence[int]
             import signal
 
             if not isinstance(stopped, KeyboardInterrupt):
-                order = (signal.SIGTERM, signal.SIGKILL)
+                order: tuple[int, ...] = (signal.SIGTERM, signal.SIGKILL)
             elif alone_in_group:
                 order = (signal.SIGINT, signal.SIGTERM, signal.SIGKILL)
             else:

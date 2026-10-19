@@ -31,7 +31,8 @@ pytestmark = [
 THEN = 1_000_000_000  # a fixed time, in seconds
 
 
-def agent(body: str, *, write: list[str], read: list[str] = (), writes_open: bool = False, timeout: int = 60) -> dict[str, str]:
+def agent(body: str, *, write: list[str], read: list[str] = (), writes_open: bool = False,
+          timeout: int = 60) -> dict[str, str]:
     """Run `body` (which fills `seen`) confined with the given write grants;
     what it saw, name -> result, printed in full."""
     head = textwrap.dedent(f"""
@@ -52,7 +53,8 @@ def agent(body: str, *, write: list[str], read: list[str] = (), writes_open: boo
     tail = textwrap.dedent(f"""
             return seen
 
-        print(json.dumps(hlyn.run(work, write={True if writes_open else write!r}, read={list(read)!r}, log=False)))
+        print(json.dumps(hlyn.run(work, write={True if writes_open else write!r},
+                                  read={list(read)!r}, log=False)))
     """)
     code = head + textwrap.indent(textwrap.dedent(body), "    ") + "\n" + tail
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
@@ -164,12 +166,13 @@ def test_a_link_inside_a_grant_does_not_reach_a_file_outside_it(tmp_path):
     seen = agent(f"""
         attempt(seen, "chmod through the link", lambda: os.chmod({str(box / "link")!r}, 0o644))
         attempt(seen, "utime through the link", lambda: os.utime({str(box / "link")!r}, (1, 1)))
-        attempt(seen, "the link itself", lambda: os.utime({str(box / "link")!r}, (42, 42), follow_symlinks=False))
+        attempt(seen, "the link itself",
+                lambda: os.utime({str(box / "link")!r}, (42, 42), follow_symlinks=False))
         attempt(seen, "a file next to it", lambda: os.chmod({own!r}, 0o640))
     """, write=[str(box)])
     after = os.stat(target)
-    print("seen:", seen, "| target mode:", oct(stat.S_IMODE(after.st_mode)), "| target mtime:", after.st_mtime,
-          "| link mtime:", os.lstat(box / "link").st_mtime)
+    print("seen:", seen, "| target mode:", oct(stat.S_IMODE(after.st_mode)),
+          "| target mtime:", after.st_mtime, "| link mtime:", os.lstat(box / "link").st_mtime)
     assert seen == {"chmod through the link": "EPERM", "utime through the link": "EPERM",
                     "the link itself": "ok", "a file next to it": "ok"}
     assert stat.S_IMODE(after.st_mode) == 0o600
@@ -201,7 +204,8 @@ def test_with_writes_open_nothing_is_trapped_and_the_call_just_runs(tmp_path):
         hlyn.run(lambda: os.chmod({target!r}, 0o644), write=True, log=False)
         print("mode", oct(os.stat({target!r}).st_mode & 0o7777))
     """)
-    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=False)
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          timeout=60, check=False)
     print(done.stdout, done.stderr)
     assert done.returncode == 0, done.stderr
     assert "mode 0o644" in done.stdout
@@ -252,7 +256,8 @@ class _OldLibseccomp:
         return getattr(self.real, name)
 
 
-def test_a_libseccomp_that_does_not_know_a_newer_call_still_builds_the_filter_and_says_what_is_left(monkeypatch):
+def test_a_libseccomp_that_does_not_know_a_newer_call_still_builds_the_filter_and_says_whats_left(
+        monkeypatch):
     from hlyn import Policy
     from hlyn.core import seccomp
 
@@ -355,7 +360,8 @@ def test_a_grant_replaced_after_it_was_checked_is_not_honoured_by_the_gate(tmp_p
     box.mkdir()
     make(box)
     swapped = _guard(box, checked)
-    print("same folder: grants kept", len(kept.anchors), "| replaced folder: grants kept", len(swapped.anchors))
+    print("same folder: grants kept", len(kept.anchors),
+          "| replaced folder: grants kept", len(swapped.anchors))
     assert len(kept.anchors) == 1 and swapped.anchors == [] and swapped._root(str(box / "f")) is None
 
 

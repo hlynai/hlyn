@@ -61,13 +61,13 @@ __all__ = [
     "proto",
     "read",
     "receive",
-    "text",
-    "whole",
     "sockaddr",
     "tcp",
+    "text",
     "unix",
     "unixsock",
     "valid",
+    "whole",
 ]
 
 # `SECCOMP_USER_NOTIF_FLAG_CONTINUE`: let the call run as the agent made it.
