@@ -31,7 +31,7 @@ pytestmark = [
 THEN = 1_000_000_000  # a fixed time, in seconds
 
 
-def agent(body: str, *, write: list[str], read: list[str] = (), timeout: int = 60) -> dict[str, str]:
+def agent(body: str, *, write: list[str], read: list[str] = (), writes_open: bool = False, timeout: int = 60) -> dict[str, str]:
     """Run `body` (which fills `seen`) confined with the given write grants;
     what it saw, name -> result, printed in full."""
     head = textwrap.dedent(f"""
@@ -52,7 +52,7 @@ def agent(body: str, *, write: list[str], read: list[str] = (), timeout: int = 6
     tail = textwrap.dedent(f"""
             return seen
 
-        print(json.dumps(hlyn.run(work, write={write!r}, read={list(read)!r}, log=False)))
+        print(json.dumps(hlyn.run(work, write={True if writes_open else write!r}, read={list(read)!r}, log=False)))
     """)
     code = head + textwrap.indent(textwrap.dedent(body), "    ") + "\n" + tail
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
@@ -357,3 +357,22 @@ def test_a_grant_replaced_after_it_was_checked_is_not_honoured_by_the_gate(tmp_p
     swapped = _guard(box, checked)
     print("same folder: grants kept", len(kept.anchors), "| replaced folder: grants kept", len(swapped.anchors))
     assert len(kept.anchors) == 1 and swapped.anchors == [] and swapped._root(str(box / "f")) is None
+
+
+def test_ioctls_that_change_a_file_for_good_are_refused_while_writes_are_limited(tmp_path):
+    """fs-verity enable and the encryption policy and key calls need only the file's mode, which
+    Landlock ignores. The refusal comes before the filesystem is asked, so any file shows it."""
+    box = tmp_path / "box"
+    box.mkdir()
+    target = make(box)
+    body = f"""
+fd = os.open({target!r}, os.O_RDONLY)
+for name, request, size in (("verity", 0x40806685, 128), ("policy", 0x800C6613, 12),
+                            ("add key", 0xC0506617, 80), ("remove key", 0xC0406618, 64)):
+    attempt(seen, name, lambda: __import__("fcntl").ioctl(fd, request, bytearray(size), True))
+"""
+    refused = agent(body, write=[str(box)], read=[str(box)])
+    open_ = agent(body, write=[str(box)], read=[str(box)], writes_open=True)
+    print("limited writes:", refused, "| writes open:", open_)
+    assert set(refused.values()) == {"EPERM"}
+    assert "EPERM" not in open_.values() and len(open_) == 4  # the filesystem answers instead

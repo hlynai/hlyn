@@ -176,6 +176,7 @@ PROMISES: list[dict[str, object]] = [
                   "test_metadata.py::test_a_descriptor_to_a_file_that_was_removed_is_refused",
                   "test_metadata.py::test_the_report_names_the_folder_to_grant",
                   "test_metadata.py::test_file_attribute_ioctls_follow_the_same_rule_as_chmod",
+                  "test_metadata.py::test_ioctls_that_change_a_file_for_good_are_refused_while_writes_are_limited",
                   "test_metadata.py::test_a_grant_replaced_after_it_was_checked_is_not_honoured_by_the_gate"],
         "control": ["test_metadata.py::test_the_same_changes_inside_a_grant_work_and_take_effect",
                     "test_metadata.py::test_an_attribute_inside_a_grant_is_set_and_removed",

@@ -28,7 +28,7 @@ TYPE_CHECKING = False
 if TYPE_CHECKING:
     from ..policy import Policy
 
-__all__ = ["ATTRIBUTES", "METADATA", "MISSING", "SHARED", "SHUT", "busy", "load", "program", "ready", "unfiltered", "why"]
+__all__ = ["ATTRIBUTES", "METADATA", "REFUSED_IOCTLS", "MISSING", "SHARED", "SHUT", "busy", "load", "program", "ready", "unfiltered", "why"]
 
 
 # -- libseccomp constants ---------------------------------------------------
@@ -146,6 +146,18 @@ METADATA: tuple[str, ...] = (
 # Measured on 7.0.14: a program with only read access set a file's flags. Same
 # values on x86_64 and aarch64: FS_IOC_SETFLAGS, FS_IOC_FSSETXATTR, FS_IOC_SETVERSION.
 ATTRIBUTES: tuple[int, ...] = (0x40086602, 0x401C5820, 0x40087602)
+
+# ioctl requests refused (EPERM) while writes are limited: they change a file or
+# folder for good and only need the file's mode, which Landlock does not look at.
+# Measured on 7.0.14 (ext4 with `encrypt`): a program with a read grant put an
+# encryption policy on a folder in it, after which files could not be created
+# there. fs-verity's enable needs write access to the inode by mode only, on a
+# read-only descriptor (kernel docs: filesystems/fsverity), and can't be undone;
+# not measured, the kernel here has no fs-verity. Nothing a confined agent needs.
+# FS_IOC_ENABLE_VERITY, FS_IOC_SET_ENCRYPTION_POLICY, FS_IOC_ADD_ENCRYPTION_KEY
+# and FS_IOC_REMOVE_ENCRYPTION_KEY (the key ones act on the whole filesystem
+# through any descriptor on it).
+REFUSED_IOCTLS: tuple[int, ...] = (0x40806685, 0x800C6613, 0xC0506617, 0xC0406618)
 
 # Where a libseccomp too old to know a name still has the call (the numbers
 # are the same on x86_64 and aarch64).
@@ -703,6 +715,8 @@ def _build(policy: Policy, watch: bool = False, datagrams: bool = False, meta: b
                 _notify_call(ctx, name)
             for request in ATTRIBUTES:
                 _rule(ctx, NOTIFY, "ioctl", [Arg(1, MASKED, LOW, request)])
+            for request in REFUSED_IOCTLS:
+                _rule(ctx, ERROR | EPERM, "ioctl", [Arg(1, MASKED, LOW, request)])
 
         if policy.exec is False:
             for name in BIRTH:
